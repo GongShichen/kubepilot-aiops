@@ -1,5 +1,7 @@
 # KubePilot-AIOps
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 KubePilot is a local-first Kubernetes incident diagnosis and recovery platform built with Go, Gin, Eino Graph, Prometheus, Loki, Jaeger, Milvus, PostgreSQL, Redis, and an official Drain3 parser sidecar.
 
 It receives Alertmanager events, correlates alerts, collects metrics/logs/traces/Kubernetes evidence, performs hypothesis-driven diagnosis, proposes a constrained recovery action, pauses for approval, executes through `client-go`, and verifies the result.
