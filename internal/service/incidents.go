@@ -14,10 +14,13 @@ import (
 )
 
 type IncidentManager struct {
-	Store      store.IncidentStore
-	Supervisor *agent.Supervisor
-	Executor   agent.Executor
-	Hub        *Hub
+	Store            store.IncidentStore
+	Supervisor       *agent.Supervisor
+	Executor         agent.Executor
+	Hub              *Hub
+	ModelSnapshotter interface {
+		WithSnapshot(context.Context) context.Context
+	}
 }
 type ManualIncident struct {
 	Severity        string    `json:"severity"`
@@ -201,6 +204,9 @@ func (m *IncidentManager) Retry(ctx context.Context, id string) (*domain.Inciden
 func (m *IncidentManager) diagnose(id string) {
 	workflowCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	if m.ModelSnapshotter != nil {
+		workflowCtx = m.ModelSnapshotter.WithSnapshot(workflowCtx)
+	}
 	in, err := m.Store.Get(workflowCtx, id)
 	if err != nil {
 		return

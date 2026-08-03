@@ -82,6 +82,8 @@ CHAT_API_KEY=...
 CHAT_MODEL=...
 CHAT_MAX_RETRIES=1                    # timeout、429、5xx 最多重试一次
 CHAT_REASONING_EFFORT=low             # reasoning 模型可选
+CONFIG_RELOAD_INTERVAL=2s             # 无需重启 Agent，轮询挂载的 .env
+CONFIG_RELOAD_RETRY_INTERVAL=30s      # 候选模型探测失败后的重试间隔
 EMBEDDING_BASE_URL=https://...
 EMBEDDING_API_PATH=/embeddings
 EMBEDDING_API_KEY=...
@@ -94,7 +96,9 @@ DRAIN3_TOKEN=...
 
 密钥只从环境变量或未纳入版本控制的 `.env` 读取。健康检查响应、日志、Trace 和 Benchmark manifest 均不会记录密钥；Docker 构建上下文也会排除 `.env`、运行时凭据和 Benchmark 产物。
 
-所有对话请求均设置 `stream: true`。OpenAI-compatible SSE 会聚合文本 delta 和按索引拆分的 Tool Calling 参数；Anthropic-compatible SSE 会聚合文本块和 `input_json_delta` 工具参数。忽略流式参数并返回普通 JSON 的兼容 provider 仍可使用。进入恢复模式前，系统会通过有界重试探测模型的 Tool Calling 能力。
+所有对话请求均设置 `stream: true`。OpenAI-compatible SSE 会聚合文本 delta 和按索引拆分的 Tool Calling 参数；Anthropic-compatible SSE 会聚合文本块和 `input_json_delta` 工具参数。忽略流式参数并返回普通 JSON 的兼容 provider 仍可使用。
+
+Agent 会监听只读挂载的 `.env` 中的对话模型配置变化。候选 Client 在后台完成校验和 Tool Calling 探测，成功后才原子替换当前 Client；探测失败会继续保留旧模型，HTTP 启动不会被模型探测阻塞。每个 Incident 在工作流开始时固定一份模型快照，避免诊断中途切换；热加载健康状态和日志不会暴露 API Key。
 
 仓库中的 Alertmanager 开发配置使用 `change-alert-token`。首次本地运行时，应在 `.env` 中配置相同值，或同时修改 `deploy/docker/alertmanager/alertmanager.yml`。
 

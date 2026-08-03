@@ -103,7 +103,7 @@ func retryableModelError(err error) bool {
 	if errors.As(err, &endpointErr) {
 		return endpointErr.Status == http.StatusTooManyRequests || endpointErr.Status >= 500
 	}
-	if errors.Is(err, io.ErrUnexpectedEOF) {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 	message := strings.ToLower(err.Error())

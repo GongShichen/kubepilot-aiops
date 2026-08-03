@@ -82,6 +82,8 @@ CHAT_API_KEY=...
 CHAT_MODEL=...
 CHAT_MAX_RETRIES=1                    # retry timeout, 429, and 5xx once
 CHAT_REASONING_EFFORT=low            # optional for reasoning models
+CONFIG_RELOAD_INTERVAL=2s            # poll the mounted .env without restarting Agent
+CONFIG_RELOAD_RETRY_INTERVAL=30s     # retry a candidate that failed capability probing
 EMBEDDING_BASE_URL=https://...
 EMBEDDING_API_PATH=/embeddings
 EMBEDDING_API_KEY=...
@@ -95,7 +97,9 @@ DRAIN3_TOKEN=...
 Secrets are read only from environment variables or the untracked `.env`. Health responses, logs, traces, and benchmark manifests never include keys.
 The Docker build context also excludes `.env`, generated runtime credentials, and benchmark artifacts.
 
-Chat requests always set `stream: true`. OpenAI-compatible SSE deltas aggregate text and indexed tool-call argument fragments; Anthropic-compatible SSE aggregates text blocks and `input_json_delta` tool arguments. Providers that ignore streaming and return a normal JSON response remain contract-compatible. Tool calling is probed with bounded retries before recovery is enabled.
+Chat requests always set `stream: true`. OpenAI-compatible SSE deltas aggregate text and indexed tool-call argument fragments; Anthropic-compatible SSE aggregates text blocks and `input_json_delta` tool arguments. Providers that ignore streaming and return a normal JSON response remain contract-compatible.
+
+The Agent watches the read-only mounted `.env` for chat configuration changes. A candidate client is validated and probed asynchronously; it replaces the active client atomically only after Tool Calling succeeds. A failed candidate leaves the previous client active, HTTP startup is never blocked by model probing, and each Incident pins one model snapshot for its complete workflow. API keys are never exposed by reload health or logs.
 
 The checked-in Alertmanager development receiver uses `change-alert-token`; set the same value in `.env` for the first local run or replace it in `deploy/docker/alertmanager/alertmanager.yml`.
 

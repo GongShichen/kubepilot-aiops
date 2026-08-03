@@ -27,6 +27,9 @@ type Config struct {
 	Drain3Token       string
 	Kubeconfig        string
 	AllowedNamespaces []string
+	ConfigEnvFile     string
+	ConfigReloadEvery time.Duration
+	ConfigRetryEvery  time.Duration
 }
 
 type ChatConfig struct {
@@ -65,6 +68,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	configReloadEvery, err := duration("CONFIG_RELOAD_INTERVAL", 2*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	configRetryEvery, err := duration("CONFIG_RELOAD_RETRY_INTERVAL", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
 	maxTokens, err := integer("CHAT_MAX_TOKENS", 4096)
 	if err != nil {
 		return Config{}, err
@@ -92,6 +103,7 @@ func Load() (Config, error) {
 		Embedding:     EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: get("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: dimensions, Timeout: embedTimeout, RequestInterval: embedRequestInterval},
 		PrometheusURL: get("PROMETHEUS_URL", "http://localhost:9090"), LokiURL: get("LOKI_URL", "http://localhost:3100"), JaegerURL: get("JAEGER_URL", "http://localhost:16686"), MilvusAddress: get("MILVUS_ADDRESS", "localhost:19530"), HistoryCollection: get("HISTORY_COLLECTION", "kubepilot_history_v2"),
 		Drain3URL: get("DRAIN3_WS_URL", "ws://localhost:8081/ws/v1/parse"), Drain3Token: os.Getenv("DRAIN3_TOKEN"), Kubeconfig: os.Getenv("KUBECONFIG"), AllowedNamespaces: split(get("ALLOWED_NAMESPACES", "kubepilot-demo,kubepilot-benchmark")),
+		ConfigEnvFile: os.Getenv("CONFIG_ENV_FILE"), ConfigReloadEvery: configReloadEvery, ConfigRetryEvery: configRetryEvery,
 	}
 	if err := cfg.ValidateBase(); err != nil {
 		return Config{}, err
@@ -119,16 +131,23 @@ func (c Config) ValidateBase() error {
 }
 
 func (c Config) ValidateModel() error {
-	if c.Chat.BaseURL == "" || c.Chat.APIKey == "" || c.Chat.Model == "" {
+	return ValidateChat(c.Chat)
+}
+
+func ValidateChat(chat ChatConfig) error {
+	if chat.BaseURL == "" || chat.APIKey == "" || chat.Model == "" {
 		return errors.New("CHAT_BASE_URL, CHAT_API_KEY and CHAT_MODEL are required for model calls")
 	}
-	if _, err := url.ParseRequestURI(c.Chat.BaseURL); err != nil {
+	if chat.Protocol != "openai-compatible" && chat.Protocol != "anthropic-compatible" {
+		return fmt.Errorf("unsupported CHAT_PROTOCOL %q", chat.Protocol)
+	}
+	if _, err := url.ParseRequestURI(chat.BaseURL); err != nil {
 		return fmt.Errorf("invalid CHAT_BASE_URL: %w", err)
 	}
-	if c.Chat.ReasoningEffort != "" && c.Chat.ReasoningEffort != "low" && c.Chat.ReasoningEffort != "medium" && c.Chat.ReasoningEffort != "high" {
+	if chat.ReasoningEffort != "" && chat.ReasoningEffort != "low" && chat.ReasoningEffort != "medium" && chat.ReasoningEffort != "high" {
 		return fmt.Errorf("CHAT_REASONING_EFFORT must be low, medium, or high")
 	}
-	if c.Chat.MaxRetries < 0 || c.Chat.MaxRetries > 3 {
+	if chat.MaxRetries < 0 || chat.MaxRetries > 3 {
 		return fmt.Errorf("CHAT_MAX_RETRIES must be between 0 and 3")
 	}
 	return nil

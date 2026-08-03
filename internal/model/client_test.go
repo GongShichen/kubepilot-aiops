@@ -65,6 +65,9 @@ func TestUnexpectedEOFFromStreamIsRetryable(t *testing.T) {
 	if !retryableModelError(io.ErrUnexpectedEOF) {
 		t.Fatal("unexpected EOF should be retried")
 	}
+	if !retryableModelError(io.EOF) {
+		t.Fatal("EOF should be retried")
+	}
 }
 
 func TestOpenAICompatibleToolCallStringArguments(t *testing.T) {

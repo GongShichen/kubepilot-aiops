@@ -189,11 +189,15 @@ services:
       DRAIN3_WS_URL: ws://drain3:8081/ws/v1/parse
       OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
       KUBECONFIG: /runtime/kubeconfig
+      CONFIG_ENV_FILE: /run/kubepilot/config/.env
+      CONFIG_RELOAD_INTERVAL: ${CONFIG_RELOAD_INTERVAL:-2s}
+      CONFIG_RELOAD_RETRY_INTERVAL: ${CONFIG_RELOAD_RETRY_INTERVAL:-30s}
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
       - ../../.runtime/kubeconfig:/runtime/kubeconfig:ro
       - ../../artifacts:/app/artifacts
+      - ../../.env:/run/kubepilot/config/.env:ro
     depends_on:
       postgres: {condition: service_healthy}
       agent-redis: {condition: service_healthy}

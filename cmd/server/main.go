@@ -62,14 +62,8 @@ func main() {
 		slog.Error("redis unavailable", "error", err)
 		os.Exit(1)
 	}
-	chat := llm.New(cfg.Chat)
-	modelReady := cfg.ValidateModel() == nil
-	if modelReady {
-		if probeErr := probeWithRetry(ctx, chat, min(cfg.Chat.Timeout, 45*time.Second), 3); probeErr != nil {
-			slog.Warn("model tool-calling probe failed; recovery mode disabled", "error", probeErr)
-			modelReady = false
-		}
-	}
+	chat := llm.NewHotClient(cfg.Chat, cfg.ConfigEnvFile, cfg.ConfigReloadEvery, cfg.ConfigRetryEvery)
+	go chat.Run(ctx)
 	parser := retrieval.NewWSParser(cfg.Drain3URL, cfg.Drain3Token)
 	defer parser.Close()
 	collectors := map[string]agent.Collector{"metric": agent.MetricAgent{Client: tools.NewPrometheus(cfg.PrometheusURL)}, "log": agent.LogAgent{Loki: tools.NewLoki(cfg.LokiURL), Parser: parser}, "trace": agent.TraceAgent{Client: tools.NewJaeger(cfg.JaegerURL)}}
@@ -80,12 +74,8 @@ func main() {
 	} else {
 		slog.Warn("kubernetes collector disabled", "error", err)
 	}
-	var diagnosis *agent.DiagnosisAgent
-	var recovery *agent.RecoveryAgent
-	if modelReady {
-		diagnosis = &agent.DiagnosisAgent{Model: chat}
-		recovery = &agent.RecoveryAgent{Model: chat}
-	}
+	diagnosis := &agent.DiagnosisAgent{Model: chat}
+	recovery := &agent.RecoveryAgent{Model: chat}
 	var historical agent.Collector
 	if cfg.ValidateEmbedding() == nil {
 		milvus := retrieval.NewMilvusStore(cfg.MilvusAddress, cfg.HistoryCollection, cfg.Embedding.Dimensions)
@@ -100,17 +90,10 @@ func main() {
 		slog.Error("compile Eino graph", "error", err)
 		os.Exit(1)
 	}
-	manager := &service.IncidentManager{Store: pg, Supervisor: supervisor, Executor: executor, Hub: service.NewHub()}
+	manager := &service.IncidentManager{Store: pg, Supervisor: supervisor, Executor: executor, Hub: service.NewHub(), ModelSnapshotter: chat}
 	benchmarkManager := service.NewBenchmarkManager("/usr/local/bin/kubepilot-benchmark", "http://127.0.0.1"+cfg.HTTPAddr, cfg.APIToken, cfg.WebhookToken, cfg.Kubeconfig, "artifacts/benchmark", manager.Hub)
-	srvAPI := &api.Server{Manager: manager, Benchmarks: benchmarkManager, APIToken: cfg.APIToken, WebhookToken: cfg.WebhookToken, ModelHealth: func() map[string]any {
-		return map[string]any{"protocol": cfg.Chat.Protocol, "model": cfg.Chat.Model, "configured": modelReady}
-	}, ModelProbe: func(c *gin.Context) error {
-		if err := cfg.ValidateModel(); err != nil {
-			return err
-		}
-		probeCtx, cancel := context.WithTimeout(c, cfg.Chat.Timeout)
-		defer cancel()
-		return chat.Probe(probeCtx)
+	srvAPI := &api.Server{Manager: manager, Benchmarks: benchmarkManager, APIToken: cfg.APIToken, WebhookToken: cfg.WebhookToken, ModelHealth: chat.Health, ModelProbe: func(c *gin.Context) error {
+		return chat.Probe(c)
 	}}
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: srvAPI.Router(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
@@ -124,26 +107,4 @@ func main() {
 	shutdownCtx, done := context.WithTimeout(context.Background(), 10*time.Second)
 	defer done()
 	_ = server.Shutdown(shutdownCtx)
-}
-
-func probeWithRetry(ctx context.Context, client llm.Client, timeout time.Duration, attempts int) error {
-	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
-		probeCtx, cancel := context.WithTimeout(ctx, timeout)
-		lastErr = client.Probe(probeCtx)
-		cancel()
-		if lastErr == nil {
-			return nil
-		}
-		if attempt+1 == attempts {
-			break
-		}
-		delay := time.Duration(1<<attempt) * time.Second
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-		}
-	}
-	return lastErr
 }
