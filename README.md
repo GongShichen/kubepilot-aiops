@@ -24,7 +24,7 @@ The Go Log Agent sends batches to Drain3 over `ws://drain3:8081/ws/v1/parse`. Re
 - One OpenAI-compatible or Anthropic-compatible chat endpoint with tool calling.
 - One embedding model exposed through an OpenAI-compatible embeddings endpoint.
 
-On the detected 32 GB Apple Silicon development machine the default allocation is Colima 8 CPU / 22 GB RAM / 100 GB disk and Minikube 7 CPU / 18 GB RAM.
+Size the container runtime and Minikube allocations for the available host resources. Keep sufficient memory for PostgreSQL, the observability stack, Milvus, and the Kubernetes workloads when running the full benchmark.
 
 ## Configuration
 
