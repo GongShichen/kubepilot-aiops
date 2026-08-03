@@ -221,6 +221,18 @@ func run(args []string) {
 	summary, err := reporter.Write(*artifactRoot, manifest, results)
 	fatal(err)
 	fmt.Printf("run=%s total=%d passed=%d root_cause_accuracy=%.2f%% artifacts=%s\n", manifest.RunID, summary.Total, summary.Passed, summary.RootCauseAccuracy*100, filepath.Join(*artifactRoot, manifest.RunID))
+	if failedCase, ok := cleanupFailure(results); ok {
+		fatal(fmt.Errorf("benchmark stopped after cleanup failure in case %s", failedCase))
+	}
+}
+
+func cleanupFailure(results []reporter.CaseResult) (string, bool) {
+	for _, result := range results {
+		if result.Status == "cleanup_failed" {
+			return result.CaseID, true
+		}
+	}
+	return "", false
 }
 
 func diagnosisModelConfigHash() string {

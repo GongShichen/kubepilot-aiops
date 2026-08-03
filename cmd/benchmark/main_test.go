@@ -35,3 +35,13 @@ func TestValidateResumeManifestRejectsConfigurationChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCleanupFailureStopsFullPipeline(t *testing.T) {
+	caseID, failed := cleanupFailure([]reporter.CaseResult{
+		{CaseID: "first", Status: "failed"},
+		{CaseID: "dirty", Status: "cleanup_failed"},
+	})
+	if !failed || caseID != "dirty" {
+		t.Fatalf("cleanupFailure() = %q, %v", caseID, failed)
+	}
+}

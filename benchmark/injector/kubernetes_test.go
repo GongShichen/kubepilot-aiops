@@ -10,6 +10,8 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestLoadJobNameIsRFC1123(t *testing.T) {
@@ -45,6 +47,28 @@ func TestRetryServiceProxyStopsOnContextCancellation(t *testing.T) {
 	err := retryServiceProxy(ctx, func() error { return fmt.Errorf("no endpoints available for service") })
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestReplaceUnreadyPodsResetsCrashLoopBackoff(t *testing.T) {
+	ready := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "ready", Namespace: "kubepilot-benchmark", Labels: map[string]string{"app": "gateway-service"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	unready := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "crash-looping", Namespace: "kubepilot-benchmark", Labels: map[string]string{"app": "gateway-service"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}},
+	}
+	client := fake.NewSimpleClientset(ready, unready)
+	injector := &Kubernetes{client: client}
+	if err := injector.replaceUnreadyPods(context.Background(), "kubepilot-benchmark", "gateway-service"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().Pods("kubepilot-benchmark").Get(context.Background(), ready.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("ready pod was deleted: %v", err)
+	}
+	if _, err := client.CoreV1().Pods("kubepilot-benchmark").Get(context.Background(), unready.Name, metav1.GetOptions{}); err == nil {
+		t.Fatal("unready pod was not replaced")
 	}
 }
 

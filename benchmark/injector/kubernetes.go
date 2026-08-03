@@ -83,6 +83,9 @@ func (k *Kubernetes) normalizeBaseline(ctx context.Context, s scenarios.Scenario
 		if err := k.normalizeService(ctx, s.Namespace, service); err != nil {
 			return err
 		}
+		if err := k.replaceUnreadyPods(ctx, s.Namespace, service); err != nil {
+			return err
+		}
 	}
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		scale, err := k.client.AppsV1().Deployments(s.Namespace).GetScale(ctx, "mysql", metav1.GetOptions{})
@@ -105,6 +108,42 @@ func (k *Kubernetes) normalizeBaseline(ctx context.Context, s scenarios.Scenario
 		}
 	}
 	return nil
+}
+
+// replaceUnreadyPods resets Kubernetes' CrashLoopBackOff delay after the
+// known-good workload definition has been restored. In-process memory faults
+// disappear with the old process, while waiting for the backoff can otherwise
+// leave a Service without endpoints longer than the bounded cleanup window.
+func (k *Kubernetes) replaceUnreadyPods(ctx context.Context, namespace, service string) error {
+	pods, err := k.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + service})
+	if err != nil {
+		return fmt.Errorf("list pods for %s baseline recovery: %w", service, err)
+	}
+	zero := int64(0)
+	background := metav1.DeletePropagationBackground
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if podReady(pod) {
+			continue
+		}
+		err = k.client.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &background})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("replace unready pod %s for baseline recovery: %w", pod.Name, err)
+		}
+	}
+	return nil
+}
+
+func podReady(pod *corev1.Pod) bool {
+	if pod == nil || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func (k *Kubernetes) normalizeDeployment(ctx context.Context, namespace, service string) error {
