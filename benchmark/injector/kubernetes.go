@@ -29,6 +29,7 @@ type Kubernetes struct {
 	deployments map[string]*appsv1.Deployment
 	services    map[string]*corev1.Service
 	scales      map[string]int32
+	restarts    map[string]int32
 }
 
 func NewKubernetes(kubeconfig string) (*Kubernetes, error) {
@@ -40,7 +41,7 @@ func NewKubernetes(kubeconfig string) (*Kubernetes, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Kubernetes{client: cli, deployments: map[string]*appsv1.Deployment{}, services: map[string]*corev1.Service{}, scales: map[string]int32{}}, nil
+	return &Kubernetes{client: cli, deployments: map[string]*appsv1.Deployment{}, services: map[string]*corev1.Service{}, scales: map[string]int32{}, restarts: map[string]int32{}}, nil
 }
 func (k *Kubernetes) key(s scenarios.Scenario) string { return s.Namespace + "/" + s.ID }
 func (k *Kubernetes) Preflight(ctx context.Context, s scenarios.Scenario) error {
@@ -160,6 +161,7 @@ func (k *Kubernetes) Inject(ctx context.Context, s scenarios.Scenario) error {
 	defer k.mu.Unlock()
 	key := k.key(s)
 	if s.Injector == "service_fault" || s.Injector == "traffic" {
+		k.restarts[key], _ = k.currentRestarts(ctx, s.Namespace, s.Service)
 		if err := k.controlFault(ctx, s.Namespace, s.Service, s.Variant); err != nil {
 			return err
 		}
@@ -268,6 +270,7 @@ func (k *Kubernetes) Cleanup(ctx context.Context, s scenarios.Scenario) error {
 		if err := k.controlFault(ctx, s.Namespace, s.Service, ""); err != nil {
 			return err
 		}
+		delete(k.restarts, key)
 	}
 	if original := k.deployments[key]; original != nil {
 		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
@@ -355,6 +358,44 @@ func (k *Kubernetes) controlFault(ctx context.Context, namespace, service, mode 
 	return nil
 }
 
+type faultStatus struct {
+	Mode          string `json:"mode"`
+	RetainedBytes int    `json:"retained_bytes"`
+}
+
+func (k *Kubernetes) getFaultStatus(ctx context.Context, namespace, service string) (faultStatus, error) {
+	secret, err := k.client.CoreV1().Secrets(namespace).Get(ctx, "demo-secrets", metav1.GetOptions{})
+	if err != nil {
+		return faultStatus{}, err
+	}
+	raw, err := k.client.CoreV1().RESTClient().Get().Namespace(namespace).
+		Resource("services").SubResource("proxy").Name("http:"+service+":http").
+		Suffix("benchmark", "v1", "fault").
+		SetHeader("X-KubePilot-Benchmark-Token", string(secret.Data["benchmark-control-token"])).DoRaw(ctx)
+	if err != nil {
+		return faultStatus{}, err
+	}
+	var status faultStatus
+	if err = json.Unmarshal(raw, &status); err != nil {
+		return faultStatus{}, err
+	}
+	return status, nil
+}
+
+func (k *Kubernetes) currentRestarts(ctx context.Context, namespace, service string) (int32, error) {
+	pods, err := k.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + service})
+	if err != nil {
+		return 0, err
+	}
+	var total int32
+	for _, pod := range pods.Items {
+		for _, container := range pod.Status.ContainerStatuses {
+			total += container.RestartCount
+		}
+	}
+	return total, nil
+}
+
 func (k *Kubernetes) createLoad(ctx context.Context, s scenarios.Scenario) error {
 	backoff := int32(0)
 	ttl := int32(120)
@@ -410,7 +451,19 @@ func (k *Kubernetes) WaitVisible(ctx context.Context, s scenarios.Scenario) erro
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if s.Injector == "dependency_scale" {
+			if s.Injector == "service_fault" || s.Injector == "traffic" {
+				status, statusErr := k.getFaultStatus(ctx, s.Namespace, s.Service)
+				switch s.Variant {
+				case "memory_leak", "unbounded_cache":
+					restarts, restartErr := k.currentRestarts(ctx, s.Namespace, s.Service)
+					observed = (statusErr == nil && status.Mode == s.Variant && status.RetainedBytes >= 64<<20) || (restartErr == nil && restarts > k.restarts[k.key(s)])
+				case "memory_burst":
+					restarts, restartErr := k.currentRestarts(ctx, s.Namespace, s.Service)
+					observed = restartErr == nil && restarts > k.restarts[k.key(s)]
+				default:
+					observed = statusErr == nil && status.Mode == s.Variant
+				}
+			} else if s.Injector == "dependency_scale" {
 				scale, err := k.client.AppsV1().Deployments(s.Namespace).GetScale(ctx, "mysql", metav1.GetOptions{})
 				observed = err == nil && scale.Spec.Replicas == 0
 			} else if s.Injector == "service_patch" || s.Injector == "network_policy" {

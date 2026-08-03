@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -86,5 +87,51 @@ func TestEmbedderDoesNotRetryNonRateLimitClientError(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("calls=%d, want 1", calls.Load())
+	}
+}
+
+func TestEmbedderSplitsConfiguredBatches(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		var request struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		if len(request.Input) > 2 {
+			t.Fatalf("oversized batch: %d", len(request.Input))
+		}
+		data := make([]map[string]any, len(request.Input))
+		for index := range request.Input {
+			data[index] = map[string]any{"index": index, "embedding": []float32{0.1, 0.2}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer server.Close()
+	embedder := NewEmbedder(config.EmbeddingConfig{BaseURL: server.URL, APIPath: "/embeddings", APIKey: "secret", Model: "test", Dimensions: 2, BatchSize: 2, Timeout: time.Second})
+	vectors, err := embedder.Embed(context.Background(), []string{"1", "2", "3", "4", "5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vectors) != 5 || calls.Load() != 3 {
+		t.Fatalf("vectors=%d calls=%d", len(vectors), calls.Load())
+	}
+}
+
+func TestEmbedderRedactsProviderEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"https://embedding.example.test/v1 key=secret"}`))
+	}))
+	defer server.Close()
+	embedder := NewEmbedder(config.EmbeddingConfig{BaseURL: server.URL, APIPath: "/embeddings", APIKey: "secret", Model: "test", Dimensions: 2, BatchSize: 1, Timeout: time.Second})
+	_, err := embedder.Embed(context.Background(), []string{"one"})
+	if err == nil {
+		t.Fatal("expected provider error")
+	}
+	if strings.Contains(err.Error(), "embedding.example.test") || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("provider error was not redacted: %s", err)
 	}
 }

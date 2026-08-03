@@ -176,8 +176,18 @@ func run(args []string) {
 		*runID = ulid.Make().String()
 	}
 	checkpoint := filepath.Join(*artifactRoot, *runID, "checkpoint.jsonl")
+	chatEndpoint := strings.TrimRight(os.Getenv("CHAT_BASE_URL"), "/") + "/" + strings.TrimLeft(env("CHAT_API_PATH", "/chat/completions"), "/")
+	endpointHash := sha256.Sum256([]byte(chatEndpoint))
+	historyHash, _ := fileSHA256("benchmark/history.yaml")
+	sourceHash, _ := sourceTreeSHA256(".")
+	modelConfigHash := diagnosisModelConfigHash()
+	manifest := reporter.Manifest{RunID: *runID, Profile: *profile, CatalogHash: hash, Protocol: env("CHAT_PROTOCOL", "openai-compatible"), Model: os.Getenv("CHAT_MODEL"), EndpointHash: hex.EncodeToString(endpointHash[:]), ModelConfigHash: modelConfigHash, EmbeddingModel: os.Getenv("EMBEDDING_MODEL"), EmbeddingDimensions: env("EMBEDDING_DIMENSIONS", "1024"), DiagnosisMethod: *diagnosisMethod, GitCommit: gitCommit(), SourceHash: sourceHash, HistoryDatasetHash: historyHash, HistoryCollection: env("HISTORY_COLLECTION", "kubepilot_history_v2"), Seed: 20260803, StartedAt: time.Now().UTC()}
 	var previous []reporter.CaseResult
 	if *resumeRun {
+		var existing reporter.Manifest
+		fatal(readJSON(filepath.Join(*artifactRoot, *runID, "manifest.json"), &existing))
+		fatal(validateResumeManifest(existing, manifest))
+		manifest.StartedAt = existing.StartedAt
 		loaded, loadErr := readCaseResults(checkpoint)
 		err = loadErr
 		fatal(err)
@@ -196,19 +206,51 @@ func run(args []string) {
 			}
 		}
 		items = pending
+	} else {
+		if _, statErr := os.Stat(checkpoint); statErr == nil {
+			fatal(fmt.Errorf("run %q already has a checkpoint; use resume or a new run ID", *runID))
+		} else if !os.IsNotExist(statErr) {
+			fatal(statErr)
+		}
+		fatal(reporter.WriteManifest(*artifactRoot, manifest))
 	}
 	client := runner.NewHTTPClient(*agentURL, *token)
 	client.DiagnosisMethod = *diagnosisMethod
 	r := &runner.Runner{Registry: reg, Client: client, AutoApprove: *autoApprove, PollInterval: time.Second, DiagnosisMethod: *diagnosisMethod, OnResult: func(result reporter.CaseResult) { fatal(appendCheckpoint(checkpoint, result)) }}
-	startedAt := time.Now().UTC()
 	results := append(previous, r.Run(runCtx, items)...)
-	endpointHash := sha256.Sum256([]byte(os.Getenv("CHAT_BASE_URL")))
-	historyHash, _ := fileSHA256("benchmark/history.yaml")
-	sourceHash, _ := sourceTreeSHA256(".")
-	manifest := reporter.Manifest{RunID: *runID, Profile: *profile, CatalogHash: hash, Protocol: os.Getenv("CHAT_PROTOCOL"), Model: os.Getenv("CHAT_MODEL"), EndpointHash: hex.EncodeToString(endpointHash[:]), EmbeddingModel: os.Getenv("EMBEDDING_MODEL"), EmbeddingDimensions: os.Getenv("EMBEDDING_DIMENSIONS"), DiagnosisMethod: *diagnosisMethod, GitCommit: gitCommit(), SourceHash: sourceHash, HistoryDatasetHash: historyHash, HistoryCollection: env("HISTORY_COLLECTION", "kubepilot_history_v2"), Seed: 20260803, StartedAt: startedAt}
 	summary, err := reporter.Write(*artifactRoot, manifest, results)
 	fatal(err)
 	fmt.Printf("run=%s total=%d passed=%d root_cause_accuracy=%.2f%% artifacts=%s\n", manifest.RunID, summary.Total, summary.Passed, summary.RootCauseAccuracy*100, filepath.Join(*artifactRoot, manifest.RunID))
+}
+
+func diagnosisModelConfigHash() string {
+	configuration := map[string]string{
+		"protocol": env("CHAT_PROTOCOL", "openai-compatible"), "endpoint": strings.TrimRight(os.Getenv("CHAT_BASE_URL"), "/") + "/" + strings.TrimLeft(env("CHAT_API_PATH", "/chat/completions"), "/"),
+		"model": os.Getenv("CHAT_MODEL"), "timeout": env("CHAT_TIMEOUT", "60s"), "max_tokens": env("CHAT_MAX_TOKENS", "4096"),
+		"temperature": env("CHAT_TEMPERATURE", "0"), "reasoning_effort": os.Getenv("CHAT_REASONING_EFFORT"), "max_retries": env("CHAT_MAX_RETRIES", "1"),
+	}
+	encoded, _ := json.Marshal(configuration)
+	hash := sha256.Sum256(encoded)
+	return hex.EncodeToString(hash[:])
+}
+
+func validateResumeManifest(existing, current reporter.Manifest) error {
+	type field struct{ name, old, new string }
+	fields := []field{
+		{"profile", existing.Profile, current.Profile}, {"catalog_hash", existing.CatalogHash, current.CatalogHash},
+		{"chat_protocol", existing.Protocol, current.Protocol}, {"chat_model", existing.Model, current.Model},
+		{"endpoint_hash", existing.EndpointHash, current.EndpointHash}, {"model_config_hash", existing.ModelConfigHash, current.ModelConfigHash},
+		{"embedding_model", existing.EmbeddingModel, current.EmbeddingModel}, {"embedding_dimensions", existing.EmbeddingDimensions, current.EmbeddingDimensions},
+		{"diagnosis_method", existing.DiagnosisMethod, current.DiagnosisMethod}, {"git_commit", existing.GitCommit, current.GitCommit},
+		{"source_hash", existing.SourceHash, current.SourceHash}, {"history_dataset_hash", existing.HistoryDatasetHash, current.HistoryDatasetHash},
+		{"history_collection", existing.HistoryCollection, current.HistoryCollection},
+	}
+	for _, item := range fields {
+		if item.old != item.new {
+			return fmt.Errorf("cannot resume run with changed %s (recorded=%q current=%q); start a new run ID", item.name, item.old, item.new)
+		}
+	}
+	return nil
 }
 
 func writeDiagnosisComparison(root, runID, profile string, methods []string) error {

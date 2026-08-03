@@ -2,63 +2,16 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
-	llm "github.com/kubepilot-aiops/kubepilot/internal/model"
-	"github.com/oklog/ulid/v2"
 )
-
-type RecoveryAgent struct{ Model llm.Client }
-
-func (a RecoveryAgent) Propose(ctx context.Context, in *domain.Incident) error {
-	incidentView := *in
-	incidentView.Evidence = nil
-	incidentView.Alerts = nil
-	incidentView.Verification = nil
-	payload, _ := json.Marshal(incidentView)
-	tool := recoveryTool()
-	prompt := `Call submit_recovery exactly once with a safe Kubernetes recovery proposal. Allowed action values are restart_pod, scale_deployment, rollback_deployment. Do not invent shell commands. Target must be the incident workload name without a namespace or resource kind.`
-	resp, err := a.Model.Complete(ctx, []llm.Message{{Role: "system", Content: prompt}, {Role: "user", Content: string(payload)}}, []llm.Tool{tool})
-	if err != nil {
-		return err
-	}
-	output, err := responseJSON(resp, tool.Name)
-	if err != nil {
-		return err
-	}
-	var p domain.RecoveryProposal
-	if err = json.Unmarshal([]byte(stripFence(output)), &p); err != nil {
-		repaired, repairErr := a.Model.Complete(ctx, []llm.Message{{Role: "system", Content: "Repair this invalid proposal without adding shell commands and call submit_recovery exactly once."}, {Role: "user", Content: output}}, []llm.Tool{tool})
-		if repairErr != nil {
-			return fmt.Errorf("invalid recovery JSON: %w", err)
-		}
-		repairedOutput, outputErr := responseJSON(repaired, tool.Name)
-		if outputErr != nil {
-			return fmt.Errorf("invalid recovery JSON: %w", outputErr)
-		}
-		if err = json.Unmarshal([]byte(stripFence(repairedOutput)), &p); err != nil {
-			return fmt.Errorf("invalid recovery JSON after one repair: %w", err)
-		}
-	}
-	switch p.Action {
-	case domain.ActionRestartPod, domain.ActionScaleDeployment, domain.ActionRollbackDeployment:
-	default:
-		return fmt.Errorf("unsupported recovery action %q", p.Action)
-	}
-	p.Target, err = canonicalProposalTarget(p.Target, in.Namespace, in.Resource)
-	if err != nil {
-		return err
-	}
-	p.ID = ulid.Make().String()
-	p.Namespace = in.Namespace
-	p.ExpiresAt = time.Now().UTC().Add(15 * time.Minute)
-	in.Proposal = &p
-	return nil
-}
 
 func canonicalProposalTarget(target, namespace, resource string) (string, error) {
 	if target == "" || target == resource {
@@ -71,24 +24,6 @@ func canonicalProposalTarget(target, namespace, resource string) (string, error)
 	return "", fmt.Errorf("proposal target %q does not match incident resource %q in namespace %q", target, resource, namespace)
 }
 
-func recoveryTool() llm.Tool {
-	return llm.Tool{Name: "submit_recovery", Description: "Submit one constrained Kubernetes recovery proposal.", InputSchema: map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"action":     map[string]any{"type": "string", "enum": []string{"restart_pod", "scale_deployment", "rollback_deployment"}},
-			"target":     map[string]any{"type": "string", "description": "workload name only, without namespace or resource kind"},
-			"parameters": map[string]any{"type": "object"},
-			"reason":     map[string]any{"type": "string"},
-			"risk":       map[string]any{"type": "string"},
-			"diff":       map[string]any{"type": "string"},
-			"rollback":   map[string]any{"type": "string"},
-			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
-		},
-		"required":             []string{"action", "target", "parameters", "reason", "risk", "diff", "rollback", "confidence"},
-		"additionalProperties": false,
-	}}
-}
-
 type KubernetesExecutor struct {
 	Client interface {
 		RestartDeployment(context.Context, string, string) error
@@ -96,6 +31,22 @@ type KubernetesExecutor struct {
 		RollbackDeployment(context.Context, string, string) error
 		TargetState(context.Context, string, string) (string, string, bool, int32, error)
 	}
+	Guard interface {
+		ClaimAction(context.Context, string, time.Duration) (bool, error)
+		CompleteAction(context.Context, string, string, time.Duration) error
+	}
+}
+
+var ErrActionResultUnknown = errors.New("Kubernetes action result is unknown and must not be replayed")
+
+type kubernetesDryRunner interface {
+	DryRunRestartDeployment(context.Context, string, string, string) (map[string]any, map[string]any, error)
+	DryRunScaleDeployment(context.Context, string, string, int32) (map[string]any, map[string]any, error)
+	DryRunRollbackDeployment(context.Context, string, string) (map[string]any, map[string]any, error)
+}
+
+type restartAtExecutor interface {
+	RestartDeploymentAt(context.Context, string, string, string) error
 }
 
 func (e KubernetesExecutor) Prepare(ctx context.Context, p *domain.RecoveryProposal) error {
@@ -105,6 +56,55 @@ func (e KubernetesExecutor) Prepare(ctx context.Context, p *domain.RecoveryPropo
 	}
 	p.TargetUID, p.ResourceVersion = uid, rv
 	return nil
+}
+
+func (e KubernetesExecutor) DryRun(ctx context.Context, p *domain.RecoveryProposal) (*domain.DryRunResult, error) {
+	if err := e.Prepare(ctx, p); err != nil {
+		return &domain.DryRunResult{Action: p.Action, Target: p.Target, Error: err.Error(), ValidatedAt: time.Now().UTC()}, err
+	}
+	runner, ok := e.Client.(kubernetesDryRunner)
+	if !ok {
+		return &domain.DryRunResult{Action: p.Action, Target: p.Target, Error: "Kubernetes DryRunAll is unavailable", ValidatedAt: time.Now().UTC()}, fmt.Errorf("Kubernetes DryRunAll is unavailable")
+	}
+	var before, after map[string]any
+	var err error
+	switch p.Action {
+	case domain.ActionRestartPod:
+		restartedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		if p.Parameters == nil {
+			p.Parameters = map[string]any{}
+		}
+		p.Parameters["restarted_at"] = restartedAt
+		before, after, err = runner.DryRunRestartDeployment(ctx, p.Namespace, p.Target, restartedAt)
+	case domain.ActionScaleDeployment:
+		var replicas int32
+		replicas, err = proposalReplicas(p.Parameters)
+		if err == nil {
+			before, after, err = runner.DryRunScaleDeployment(ctx, p.Namespace, p.Target, replicas)
+		}
+	case domain.ActionRollbackDeployment:
+		before, after, err = runner.DryRunRollbackDeployment(ctx, p.Namespace, p.Target)
+	default:
+		err = fmt.Errorf("unsupported recovery action %q", p.Action)
+	}
+	result := &domain.DryRunResult{Action: p.Action, Target: p.Target, Before: before, After: after, ValidatedAt: time.Now().UTC()}
+	if err != nil {
+		result.Error = err.Error()
+		return result, err
+	}
+	payload, _ := json.Marshal(struct {
+		Action     domain.RecoveryAction `json:"action"`
+		Namespace  string                `json:"namespace"`
+		Target     string                `json:"target"`
+		UID        string                `json:"uid"`
+		Version    string                `json:"resource_version"`
+		Parameters map[string]any        `json:"parameters"`
+		After      map[string]any        `json:"after"`
+	}{p.Action, p.Namespace, p.Target, p.TargetUID, p.ResourceVersion, p.Parameters, after})
+	hash := sha256.Sum256(payload)
+	result.Success = true
+	result.MutationSpecHash = hex.EncodeToString(hash[:])
+	return result, nil
 }
 
 func (e KubernetesExecutor) Execute(ctx context.Context, in *domain.Incident, p domain.RecoveryProposal) error {
@@ -118,20 +118,81 @@ func (e KubernetesExecutor) Execute(ctx context.Context, in *domain.Incident, p 
 	if uid != p.TargetUID || rv != p.ResourceVersion {
 		return fmt.Errorf("target changed since proposal: uid/resourceVersion mismatch")
 	}
+	if in == nil || in.ExecutionContext == nil || in.ExecutionContext.IdempotencyKey == "" {
+		return fmt.Errorf("approved execution context is required")
+	}
+	if e.Guard == nil {
+		return fmt.Errorf("persistent action guard is required")
+	}
+	actionKey := in.ID + ":" + in.ExecutionContext.IdempotencyKey
+	claimed, err := e.Guard.ClaimAction(ctx, actionKey, 24*time.Hour)
+	if err != nil {
+		return fmt.Errorf("claim action: %w", err)
+	}
+	if !claimed {
+		return ErrActionResultUnknown
+	}
+	completion := "failed"
+	defer func() {
+		_ = e.Guard.CompleteAction(context.WithoutCancel(ctx), actionKey, completion, 24*time.Hour)
+	}()
+
+	var executeErr error
 	switch p.Action {
 	case domain.ActionRestartPod:
-		return e.Client.RestartDeployment(ctx, p.Namespace, p.Target)
-	case domain.ActionScaleDeployment:
-		v, ok := p.Parameters["replicas"].(float64)
-		if !ok {
-			return fmt.Errorf("replicas is required")
+		if restartedAt, ok := p.Parameters["restarted_at"].(string); ok {
+			if client, supported := e.Client.(restartAtExecutor); supported {
+				executeErr = client.RestartDeploymentAt(ctx, p.Namespace, p.Target, restartedAt)
+				break
+			}
 		}
-		return e.Client.ScaleDeployment(ctx, p.Namespace, p.Target, int32(v))
+		executeErr = e.Client.RestartDeployment(ctx, p.Namespace, p.Target)
+	case domain.ActionScaleDeployment:
+		replicas, parseErr := proposalReplicas(p.Parameters)
+		if parseErr != nil {
+			executeErr = parseErr
+			break
+		}
+		executeErr = e.Client.ScaleDeployment(ctx, p.Namespace, p.Target, replicas)
 	case domain.ActionRollbackDeployment:
-		return e.Client.RollbackDeployment(ctx, p.Namespace, p.Target)
+		executeErr = e.Client.RollbackDeployment(ctx, p.Namespace, p.Target)
 	default:
-		return fmt.Errorf("unsupported action")
+		executeErr = fmt.Errorf("unsupported action")
 	}
+	if executeErr == nil {
+		completion = "succeeded"
+	}
+	return executeErr
+}
+
+func proposalReplicas(parameters map[string]any) (int32, error) {
+	value, ok := parameters["replicas"]
+	if !ok {
+		return 0, fmt.Errorf("replicas is required")
+	}
+	var replicas int64
+	switch number := value.(type) {
+	case float64:
+		replicas = int64(number)
+	case int:
+		replicas = int64(number)
+	case int32:
+		replicas = int64(number)
+	case int64:
+		replicas = number
+	case json.Number:
+		parsed, err := number.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("replicas must be an integer")
+		}
+		replicas = parsed
+	default:
+		return 0, fmt.Errorf("replicas must be an integer")
+	}
+	if replicas < 1 || replicas > 10 {
+		return 0, fmt.Errorf("replicas must be between 1 and 10")
+	}
+	return int32(replicas), nil
 }
 func (e KubernetesExecutor) Verify(ctx context.Context, in *domain.Incident) (domain.Verification, error) {
 	deadline := time.NewTimer(2 * time.Minute)
@@ -140,8 +201,12 @@ func (e KubernetesExecutor) Verify(ctx context.Context, in *domain.Incident) (do
 	defer ticker.Stop()
 	consecutive := 0
 	var previousRestarts int32 = -1
+	target := in.Resource
+	if in.Proposal != nil && in.Proposal.Target != "" {
+		target = in.Proposal.Target
+	}
 	for {
-		_, _, ready, restarts, err := e.Client.TargetState(ctx, in.Namespace, in.Resource)
+		_, _, ready, restarts, err := e.Client.TargetState(ctx, in.Namespace, target)
 		stable := err == nil && ready && (previousRestarts < 0 || restarts <= previousRestarts)
 		if stable {
 			consecutive++

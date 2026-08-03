@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"time"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
@@ -10,8 +11,67 @@ type Collector interface {
 	Collect(context.Context, *domain.Incident) ([]domain.Evidence, error)
 }
 type WorkflowState struct {
-	Incident *domain.Incident `json:"incident"`
-	Errors   []string         `json:"errors,omitempty"`
+	Version           string                   `json:"version"`
+	Incident          *domain.Incident         `json:"incident"`
+	EvidencePlan      EvidencePlan             `json:"evidence_plan"`
+	DryRun            *domain.DryRunResult     `json:"dry_run,omitempty"`
+	ExecutionContext  *domain.ExecutionContext `json:"execution_context,omitempty"`
+	VerificationState VerificationState        `json:"verification_state"`
+	ModelSnapshotHash string                   `json:"model_snapshot_hash,omitempty"`
+	ToolCalls         int                      `json:"tool_calls"`
+	DiagnosisAttempts int                      `json:"diagnosis_attempts"`
+	Errors            []string                 `json:"errors,omitempty"`
+}
+
+const WorkflowVersion = "eino-incident-v2"
+
+type EvidencePlan struct {
+	WindowStart time.Time            `json:"window_start" jsonschema:"required"`
+	WindowEnd   time.Time            `json:"window_end" jsonschema:"required"`
+	Sources     []EvidencePlanSource `json:"sources" jsonschema:"required,minItems=4"`
+}
+
+type EvidencePlanSource struct {
+	Source   string `json:"source" jsonschema:"required,enum=metric,enum=log,enum=trace,enum=kubernetes"`
+	Service  string `json:"service,omitempty"`
+	Resource string `json:"resource,omitempty"`
+}
+
+type CorrelationDecision struct {
+	Merge      bool    `json:"merge" jsonschema:"required"`
+	IncidentID string  `json:"incident_id,omitempty"`
+	Confidence float64 `json:"confidence" jsonschema:"required,minimum=0,maximum=1"`
+	Reason     string  `json:"reason" jsonschema:"required"`
+}
+
+type DiagnosisDecision struct {
+	ReasoningType             string              `json:"reasoning_type" jsonschema:"required,enum=hypothesis_verification"`
+	RootCause                 string              `json:"root_cause" jsonschema:"required"`
+	Category                  string              `json:"category" jsonschema:"required,enum=cpu,enum=memory,enum=database,enum=network,enum=deployment"`
+	Variant                   string              `json:"variant" jsonschema:"required"`
+	Service                   string              `json:"service" jsonschema:"required"`
+	Resource                  string              `json:"resource" jsonschema:"required"`
+	Confidence                float64             `json:"confidence" jsonschema:"required,minimum=0,maximum=1"`
+	EvidenceIDs               []string            `json:"evidence_ids" jsonschema:"required,minItems=1"`
+	Hypotheses                []domain.Hypothesis `json:"hypotheses" jsonschema:"required,minItems=1,maxItems=3"`
+	RequestAdditionalEvidence bool                `json:"request_additional_evidence,omitempty"`
+}
+
+type RecoveryDecision struct {
+	Action     domain.RecoveryAction `json:"action" jsonschema:"required,enum=restart_pod,enum=scale_deployment,enum=rollback_deployment"`
+	Target     string                `json:"target" jsonschema:"required"`
+	Parameters map[string]any        `json:"parameters" jsonschema:"required"`
+	Reason     string                `json:"reason" jsonschema:"required"`
+	Risk       string                `json:"risk" jsonschema:"required"`
+	Diff       string                `json:"diff" jsonschema:"required"`
+	Rollback   string                `json:"rollback" jsonschema:"required"`
+	Confidence float64               `json:"confidence" jsonschema:"required,minimum=0,maximum=1"`
+}
+
+type VerificationState struct {
+	StartedAt          time.Time `json:"started_at,omitempty"`
+	ConsecutiveSuccess int       `json:"consecutive_success"`
+	Attempts           int       `json:"attempts"`
 }
 type Executor interface {
 	Execute(context.Context, *domain.Incident, domain.RecoveryProposal) error

@@ -13,7 +13,7 @@ func TestIncidentScoresOnlyCitedEvidence(t *testing.T) {
 		RequiredEvidence: []string{"log_template", "trace"},
 	}}
 	incident := &domain.Incident{
-		RootCauseCategory: "database", RootCauseVariant: "pool_exhausted", Service: "payment-service", Resource: "payment-service",
+		RootCauseCategory: "database", RootCauseVariant: "pool_exhausted", RootCauseService: "payment-service", RootCauseResource: "payment-service",
 		RootCauseEvidenceIDs: []string{"log", "noise"},
 		Evidence: []domain.Evidence{
 			{ID: "log", Kind: "log_template", Source: "loki"},
@@ -36,7 +36,7 @@ func TestIncidentRejectsUncitedCollectedEvidence(t *testing.T) {
 		RequiredEvidence: []string{"cpu"},
 	}}
 	incident := &domain.Incident{
-		RootCauseCategory: "cpu", RootCauseVariant: "busy_loop", Service: "gateway-service", Resource: "gateway-service",
+		RootCauseCategory: "cpu", RootCauseVariant: "busy_loop", RootCauseService: "gateway-service", RootCauseResource: "gateway-service",
 		Evidence: []domain.Evidence{{ID: "cpu", Kind: "cpu"}},
 	}
 	score := Incident(scenario, incident)
@@ -51,7 +51,7 @@ func TestIncidentRequiresExactRootCauseVariant(t *testing.T) {
 	}}
 	incident := &domain.Incident{
 		RootCauseCategory: "database", RootCauseVariant: "invalid_credentials",
-		Service: "payment-service", Resource: "payment-service",
+		RootCauseService: "payment-service", RootCauseResource: "payment-service",
 	}
 	score := Incident(scenario, incident)
 	if !score.CategoryCorrect || score.VariantCorrect || score.RootCauseCorrect || score.StrictRootCause {
@@ -64,11 +64,20 @@ func TestIncidentMapsCurrentMetricToRequiredEvidenceKind(t *testing.T) {
 		RootCauseCategory: "cpu", Service: "gateway-service", Resource: "gateway-service", RequiredEvidence: []string{"cpu"},
 	}}
 	incident := &domain.Incident{
-		RootCauseCategory: "cpu", RootCauseVariant: "busy_loop", Service: "gateway-service", Resource: "gateway-service",
+		RootCauseCategory: "cpu", RootCauseVariant: "busy_loop", RootCauseService: "gateway-service", RootCauseResource: "gateway-service",
 		RootCauseEvidenceIDs: []string{"current"}, Evidence: []domain.Evidence{{ID: "current", Kind: "cpu_current"}},
 	}
 	score := Incident(scenario, incident)
 	if score.EvidencePrecision != 1 || score.EvidenceRecall != 1 || !score.StrictRootCause {
 		t.Fatalf("current metric should satisfy cpu evidence: %#v", score)
+	}
+}
+
+func TestIncidentDoesNotCreditAlertTargetAsPredictedTarget(t *testing.T) {
+	scenario := scenarios.Scenario{Variant: "busy_loop", GroundTruth: scenarios.GroundTruth{RootCauseCategory: "cpu", Service: "gateway-service", Resource: "gateway-service"}}
+	incident := &domain.Incident{Service: "gateway-service", Resource: "gateway-service", RootCauseCategory: "cpu", RootCauseVariant: "busy_loop"}
+	score := Incident(scenario, incident)
+	if score.ServiceCorrect || score.ResourceCorrect || score.RootCauseCorrect {
+		t.Fatalf("input target was incorrectly scored as model output: %#v", score)
 	}
 }

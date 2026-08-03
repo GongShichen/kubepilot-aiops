@@ -158,6 +158,8 @@ func (c *faultController) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.Method {
+	case http.MethodGet:
+		write(w, http.StatusOK, map[string]any{"mode": c.modeValue(), "retained_bytes": retainedBytes()})
 	case http.MethodPost:
 		var body struct {
 			Mode string `json:"mode"`
@@ -175,6 +177,16 @@ func (c *faultController) handle(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", "POST, DELETE")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func retainedBytes() int {
+	leakMu.Lock()
+	defer leakMu.Unlock()
+	total := 0
+	for _, block := range leak {
+		total += len(block)
+	}
+	return total
 }
 
 func (c *faultController) setMode(mode string) {
@@ -225,23 +237,49 @@ func startFaultWorkers(mode string) context.CancelFunc {
 		go func() {
 			ticker := time.NewTicker(500 * time.Millisecond)
 			defer ticker.Stop()
+			retained := 0
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
+					allocationBlock := allocateTouched(allocation)
 					leakMu.Lock()
-					leak = append(leak, make([]byte, allocation))
+					leak = append(leak, allocationBlock)
 					leakMu.Unlock()
+					retained += allocation
+					if retained%(32<<20) == 0 {
+						logJSON(map[string]any{"time": time.Now().UTC(), "level": "ERROR", "error": "application memory pressure is increasing", "retained_bytes": retained})
+					}
 				}
 			}
 		}()
 	case "memory_burst":
-		leakMu.Lock()
-		leak = append(leak, make([]byte, 160<<20))
-		leakMu.Unlock()
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(250 * time.Millisecond):
+			}
+			logJSON(map[string]any{"time": time.Now().UTC(), "level": "ERROR", "error": "application memory allocation exceeded its operating envelope"})
+			allocationBlock := allocateTouched(320 << 20)
+			leakMu.Lock()
+			leak = append(leak, allocationBlock)
+			leakMu.Unlock()
+		}()
 	}
 	return cancel
+}
+
+func allocateTouched(size int) []byte {
+	block := make([]byte, size)
+	for offset := 0; offset < len(block); offset += 4096 {
+		block[offset] = byte(offset/4096 + 1)
+	}
+	if len(block) > 0 {
+		block[len(block)-1] = 1
+	}
+	return block
 }
 
 func validFaultMode(mode string) bool {

@@ -114,8 +114,8 @@ func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter
 	res.Score = scorer.Incident(s, in)
 	res.RootCauseCategory = in.RootCauseCategory
 	res.RootCauseVariant = in.RootCauseVariant
-	res.Service = in.Service
-	res.Resource = in.Resource
+	res.Service = in.RootCauseService
+	res.Resource = in.RootCauseResource
 	res.Confidence = in.Confidence
 	if in.DiagnosisError != "" {
 		res.Error = "diagnosis workflow: " + in.DiagnosisError

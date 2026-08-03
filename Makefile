@@ -37,7 +37,7 @@ demo-up:
 	kubectl rollout status deployment/gateway-service -n kubepilot-benchmark --timeout=180s
 
 up: cluster-up infra-up demo-up runtime
-	$(COMPOSE) up -d --build kubepilot-agent
+	$(COMPOSE) up -d --build log-indexer kubepilot-agent
 
 down:
 	$(COMPOSE) down

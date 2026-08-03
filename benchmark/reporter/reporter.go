@@ -22,6 +22,7 @@ type Manifest struct {
 	Protocol            string    `json:"chat_protocol"`
 	Model               string    `json:"chat_model"`
 	EndpointHash        string    `json:"endpoint_hash"`
+	ModelConfigHash     string    `json:"model_config_hash"`
 	EmbeddingModel      string    `json:"embedding_model,omitempty"`
 	EmbeddingDimensions string    `json:"embedding_dimensions,omitempty"`
 	DiagnosisMethod     string    `json:"diagnosis_method,omitempty"`
@@ -33,6 +34,15 @@ type Manifest struct {
 	StartedAt           time.Time `json:"started_at"`
 	FinishedAt          time.Time `json:"finished_at,omitempty"`
 }
+
+func WriteManifest(root string, manifest Manifest) error {
+	dir := filepath.Join(root, manifest.RunID)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	return writeJSON(filepath.Join(dir, "manifest.json"), manifest)
+}
+
 type CaseResult struct {
 	CaseID            string        `json:"case_id"`
 	IncidentID        string        `json:"incident_id,omitempty"`

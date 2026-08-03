@@ -5,23 +5,12 @@ import (
 	"testing"
 	"time"
 
+	workflowgraph "github.com/kubepilot-aiops/kubepilot/graph"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/store"
 )
 
-type asyncTestExecutor struct{}
-
-func (asyncTestExecutor) Execute(context.Context, *domain.Incident, domain.RecoveryProposal) error {
-	time.Sleep(50 * time.Millisecond)
-	return nil
-}
-
-func (asyncTestExecutor) Verify(context.Context, *domain.Incident) (domain.Verification, error) {
-	time.Sleep(50 * time.Millisecond)
-	return domain.Verification{Success: true, Checks: map[string]bool{"ready": true}, CompletedAt: time.Now().UTC()}, nil
-}
-
-func TestApproveReturnsBeforeRecoveryCompletes(t *testing.T) {
+func TestApproveRejectsLegacyWorkflowWithoutEinoCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()
 	incident := &domain.Incident{
@@ -32,34 +21,24 @@ func TestApproveReturnsBeforeRecoveryCompletes(t *testing.T) {
 	if err := st.Create(ctx, incident); err != nil {
 		t.Fatal(err)
 	}
-	manager := &IncidentManager{Store: st, Executor: asyncTestExecutor{}, Hub: NewHub()}
-	started := time.Now()
-	approved, err := manager.Approve(ctx, incident.ID, incident.Proposal.ID, "approve", "test", "key-1")
+	manager := &IncidentManager{Store: st, Hub: NewHub()}
+	if _, err := manager.Approve(ctx, incident.ID, incident.Proposal.ID, "approve", "test", "key-1"); err == nil {
+		t.Fatal("expected approval without an Eino checkpoint to be rejected")
+	}
+	current, err := st.Get(ctx, incident.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(started); elapsed >= 50*time.Millisecond {
-		t.Fatalf("approval blocked for recovery: %s", elapsed)
+	if current.Status != domain.StatusNeedsAttention {
+		t.Fatalf("status=%s", current.Status)
 	}
-	if approved.Status != domain.StatusRecovering {
-		t.Fatalf("status=%s", approved.Status)
-	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		current, getErr := st.Get(ctx, incident.ID)
-		if getErr == nil && current.Status == domain.StatusResolved {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("recovery did not finish asynchronously")
 }
 
-func TestCorrelationBenchmarkDoesNotLaunchDiagnosis(t *testing.T) {
+func TestIngestWithoutRuntimeLeavesIncidentReceived(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()
 	manager := &IncidentManager{Store: st, Hub: NewHub()}
-	incident, err := manager.IngestAlert(ctx, domain.Alert{Fingerprint: "fp-1", Status: "firing", Labels: map[string]string{"benchmark_mode": "correlation"}}, "gateway-service", "kubepilot-benchmark", "warning", "gateway-service", "correlation benchmark")
+	incident, err := manager.IngestAlert(ctx, domain.Alert{Fingerprint: "fp-1", Status: "firing"}, "gateway-service", "production", "warning", "gateway-service", "service alert")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,24 +48,54 @@ func TestCorrelationBenchmarkDoesNotLaunchDiagnosis(t *testing.T) {
 		t.Fatal(err)
 	}
 	if current.Status != domain.StatusReceived {
-		t.Fatalf("correlation-only incident unexpectedly entered workflow: %s", current.Status)
+		t.Fatalf("incident unexpectedly entered an unavailable workflow: %s", current.Status)
 	}
 }
 
-func TestCorrelationRunsAreIsolated(t *testing.T) {
+func TestCorrelationDoesNotMergeNamespaces(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()
 	manager := &IncidentManager{Store: st, Hub: NewHub()}
 	startsAt := time.Now().UTC()
-	first, err := manager.IngestAlert(ctx, domain.Alert{Fingerprint: "fp-1", Status: "firing", StartsAt: startsAt, Labels: map[string]string{"benchmark_mode": "correlation", "correlation_run": "run-1"}}, "gateway-service", "kubepilot-benchmark", "warning", "gateway-service", "first")
+	first, err := manager.IngestAlert(ctx, domain.Alert{Fingerprint: "fp-1", Status: "firing", StartsAt: startsAt}, "gateway-service", "namespace-a", "warning", "gateway-service", "first")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := manager.IngestAlert(ctx, domain.Alert{Fingerprint: "fp-2", Status: "firing", StartsAt: startsAt, Labels: map[string]string{"benchmark_mode": "correlation", "correlation_run": "run-2"}}, "gateway-service", "kubepilot-benchmark", "warning", "gateway-service", "second")
+	second, err := manager.IngestAlert(ctx, domain.Alert{Fingerprint: "fp-2", Status: "firing", StartsAt: startsAt}, "gateway-service", "namespace-b", "warning", "gateway-service", "second")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.ID == second.ID {
-		t.Fatal("different correlation runs were merged")
+		t.Fatal("incidents from different namespaces were merged")
+	}
+}
+
+func TestWorkflowStatusEventIsImmediatelyVisible(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	now := time.Now().UTC()
+	incident := &domain.Incident{ID: "incident-status", Status: domain.StatusReceived, CreatedAt: now, UpdatedAt: now}
+	if err := st.Create(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	manager := &IncidentManager{Store: st, Hub: NewHub()}
+	transitionedAt := now.Add(time.Second)
+	manager.ObserveWorkflowEvent(ctx, workflowgraph.WorkflowEvent{
+		IncidentID: incident.ID,
+		RunID:      "run-status",
+		Type:       "status_transition",
+		Name:       string(domain.StatusCollecting),
+		Component:  "EinoGraph",
+		OccurredAt: transitionedAt,
+	})
+	current, err := st.Get(ctx, incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != domain.StatusCollecting {
+		t.Fatalf("status=%s", current.Status)
+	}
+	if !current.UpdatedAt.Equal(transitionedAt) {
+		t.Fatalf("updated_at=%s", current.UpdatedAt)
 	}
 }

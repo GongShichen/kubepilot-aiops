@@ -5,9 +5,12 @@ import (
 	"testing"
 )
 
-func TestIncidentLogQueryExcludesRetrievalDataset(t *testing.T) {
-	query := incidentLogQuery("kubepilot-benchmark", "gateway-service")
-	if !strings.Contains(query, `benchmark_dataset!="retrieval"`) {
-		t.Fatalf("query does not isolate retrieval corpus: %s", query)
+func TestIncidentLogQueryUsesOnlyOperationalScope(t *testing.T) {
+	query := incidentLogQuery("production", "gateway-service")
+	if query != `{namespace="production",service="gateway-service"} |~ "(?i)(error|exception|timeout|killed|failed)"` {
+		t.Fatalf("unexpected query: %s", query)
+	}
+	if strings.Contains(strings.ToLower(query), "benchmark") {
+		t.Fatalf("runtime query contains evaluation-specific logic: %s", query)
 	}
 }

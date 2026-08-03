@@ -3,18 +3,26 @@ package model
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	einomodel "github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
 )
 
 type clientSnapshotKey struct{}
-type pinnedClient struct{ client Client }
+type pinnedClient struct {
+	client Client
+	eino   einomodel.BaseChatModel
+}
 
 type HotClient struct {
 	path       string
@@ -25,6 +33,7 @@ type HotClient struct {
 	probeMu sync.Mutex
 	mu      sync.RWMutex
 	active  Client
+	eino    einomodel.BaseChatModel
 	desired config.ChatConfig
 	current config.ChatConfig
 
@@ -35,6 +44,7 @@ type HotClient struct {
 	loadedAt        time.Time
 	lastError       string
 	reloading       bool
+	pinnedByHash    map[string]pinnedClient
 }
 
 func NewHotClient(fallback config.ChatConfig, path string, pollEvery, retryEvery time.Duration) *HotClient {
@@ -44,7 +54,7 @@ func NewHotClient(fallback config.ChatConfig, path string, pollEvery, retryEvery
 	if retryEvery <= 0 {
 		retryEvery = 30 * time.Second
 	}
-	return &HotClient{path: path, fallback: fallback, desired: fallback, pollEvery: pollEvery, retryEvery: retryEvery}
+	return &HotClient{path: path, fallback: fallback, desired: fallback, pollEvery: pollEvery, retryEvery: retryEvery, pinnedByHash: map[string]pinnedClient{}}
 }
 
 func (c *HotClient) Run(ctx context.Context) {
@@ -91,6 +101,34 @@ func (c *HotClient) Complete(ctx context.Context, messages []Message, tools []To
 	return active.Complete(ctx, messages, tools)
 }
 
+// Generate implements Eino's BaseChatModel and delegates to the immutable
+// model snapshot pinned to the Incident workflow context.
+func (c *HotClient) Generate(ctx context.Context, messages []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
+	m := c.einoModel(ctx)
+	if m == nil {
+		return nil, errors.New("model is not ready")
+	}
+	return m.Generate(ctx, messages, opts...)
+}
+
+// Stream implements Eino's streaming model interface.
+func (c *HotClient) Stream(ctx context.Context, messages []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
+	m := c.einoModel(ctx)
+	if m == nil {
+		return nil, errors.New("model is not ready")
+	}
+	return m.Stream(ctx, messages, opts...)
+}
+
+func (c *HotClient) einoModel(ctx context.Context) einomodel.BaseChatModel {
+	if snapshot, ok := ctx.Value(clientSnapshotKey{}).(pinnedClient); ok {
+		return snapshot.eino
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.eino
+}
+
 func (c *HotClient) Probe(ctx context.Context) error {
 	_, err := c.refresh(ctx, true)
 	return err
@@ -111,8 +149,28 @@ func (c *HotClient) Protocol() string {
 func (c *HotClient) WithSnapshot(ctx context.Context) context.Context {
 	c.mu.RLock()
 	active := c.active
+	eino := c.eino
 	c.mu.RUnlock()
-	return context.WithValue(ctx, clientSnapshotKey{}, pinnedClient{client: active})
+	return context.WithValue(ctx, clientSnapshotKey{}, pinnedClient{client: active, eino: eino})
+}
+
+func (c *HotClient) WithSnapshotHash(ctx context.Context, hash string) (context.Context, error) {
+	c.mu.RLock()
+	pinned, ok := c.pinnedByHash[hash]
+	c.mu.RUnlock()
+	if !ok || pinned.eino == nil {
+		return ctx, errors.New("checkpoint model snapshot is unavailable; workflow requires operator retry")
+	}
+	return context.WithValue(ctx, clientSnapshotKey{}, pinned), nil
+}
+
+func (c *HotClient) SnapshotIdentity() (hash, protocol, modelName string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.eino == nil {
+		return "", c.desired.Protocol, c.desired.Model
+	}
+	return hex.EncodeToString(c.activeHash[:]), c.current.Protocol, c.current.Model
 }
 
 func (c *HotClient) Health() map[string]any {
@@ -179,12 +237,17 @@ func (c *HotClient) refresh(ctx context.Context, force bool) (bool, error) {
 	c.mu.Unlock()
 
 	candidate := New(desired)
-	probeTimeout := min(desired.Timeout, 45*time.Second)
+	einoCandidate, einoErr := NewEinoChatModel(ctx, desired)
+	if einoErr != nil {
+		c.setFailure(desired, einoErr, true)
+		return previousDesired != fingerprint, einoErr
+	}
+	probeTimeout := desired.Timeout
 	if probeTimeout <= 0 {
-		probeTimeout = 45 * time.Second
+		probeTimeout = 60 * time.Second
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-	err = candidate.Probe(probeCtx)
+	err = probeEinoToolCalling(probeCtx, einoCandidate)
 	cancel()
 	if err != nil {
 		err = safeModelError(err, desired.APIKey)
@@ -194,13 +257,51 @@ func (c *HotClient) refresh(ctx context.Context, force bool) (bool, error) {
 
 	c.mu.Lock()
 	c.active = candidate
+	c.eino = einoCandidate
 	c.current = desired
 	c.activeHash = fingerprint
+	c.pinnedByHash[hex.EncodeToString(fingerprint[:])] = pinnedClient{client: candidate, eino: einoCandidate}
 	c.loadedAt = time.Now().UTC()
 	c.lastError = ""
 	c.reloading = false
 	c.mu.Unlock()
 	return true, nil
+}
+
+func probeEinoToolCalling(ctx context.Context, chat einomodel.BaseChatModel) error {
+	probe := &schema.ToolInfo{Name: "kubepilot_capability_probe", Desc: "Return the supplied capability nonce.", ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{"nonce": {Type: schema.String, Required: true}})}
+	reader, err := chat.Stream(ctx, []*schema.Message{schema.UserMessage("Call kubepilot_capability_probe exactly once with nonce kubepilot-probe. Do not answer in text.")}, einomodel.WithTools([]*schema.ToolInfo{probe}))
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	var chunks []*schema.Message
+	for {
+		chunk, recvErr := reader.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			return recvErr
+		}
+		chunks = append(chunks, chunk)
+	}
+	message, err := schema.ConcatMessages(chunks)
+	if err != nil {
+		return err
+	}
+	for _, call := range message.ToolCalls {
+		if call.Function.Name != probe.Name {
+			continue
+		}
+		var arguments struct {
+			Nonce string `json:"nonce"`
+		}
+		if json.Unmarshal([]byte(call.Function.Arguments), &arguments) == nil && arguments.Nonce == "kubepilot-probe" {
+			return nil
+		}
+	}
+	return errors.New("model did not return the Eino capability probe tool call")
 }
 
 func (c *HotClient) loadCandidate() (config.ChatConfig, error) {
@@ -229,9 +330,14 @@ func chatFingerprint(chat config.ChatConfig) [32]byte {
 }
 
 func safeModelError(err error, apiKey string) error {
-	message := err.Error()
+	return errors.New(redactProviderError(err.Error(), apiKey))
+}
+
+var providerEndpointPattern = regexp.MustCompile(`https?://[^\s"']+`)
+
+func redactProviderError(message, apiKey string) string {
 	if apiKey != "" {
 		message = strings.ReplaceAll(message, apiKey, "[REDACTED]")
 	}
-	return errors.New(message)
+	return providerEndpointPattern.ReplaceAllString(message, "[REDACTED_ENDPOINT]")
 }

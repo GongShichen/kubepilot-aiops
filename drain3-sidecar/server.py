@@ -47,12 +47,20 @@ def parse_batch(request):
     records = request.get("records")
     if not isinstance(records, list) or len(records) > MAX_BATCH:
         raise ValueError(f"records must be a list with at most {MAX_BATCH} items")
-    results = []
+    # Validate the complete batch before mutating Drain3 state. Otherwise an
+    # invalid record late in a batch would partially increment clusters and a
+    # retry could count the valid prefix twice.
     for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("each record must be an object")
         record_id = record.get("record_id")
         message = record.get("message")
         if not record_id or not isinstance(message, str):
             raise ValueError("record_id and string message are required")
+    results = []
+    for record in records:
+        record_id = record.get("record_id")
+        message = record.get("message")
         result = miner.add_log_message(message)
         template = result["template_mined"]
         results.append({

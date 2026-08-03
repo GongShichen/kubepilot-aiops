@@ -11,3 +11,4 @@ coverage.out
 __pycache__/
 *.pyc
 .DS_Store
+Refactor.md

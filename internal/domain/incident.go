@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type IncidentStatus string
 
@@ -9,6 +12,7 @@ const (
 	StatusCorrelating      IncidentStatus = "CORRELATING"
 	StatusCollecting       IncidentStatus = "COLLECTING"
 	StatusDiagnosing       IncidentStatus = "DIAGNOSING"
+	StatusProposing        IncidentStatus = "PROPOSING"
 	StatusAwaitingApproval IncidentStatus = "AWAITING_APPROVAL"
 	StatusRecovering       IncidentStatus = "RECOVERING"
 	StatusVerifying        IncidentStatus = "VERIFYING"
@@ -33,8 +37,14 @@ type Incident struct {
 	RootCause            string            `json:"root_cause,omitempty"`
 	RootCauseCategory    string            `json:"root_cause_category,omitempty"`
 	RootCauseVariant     string            `json:"root_cause_variant,omitempty"`
+	RootCauseService     string            `json:"root_cause_service,omitempty"`
+	RootCauseResource    string            `json:"root_cause_resource,omitempty"`
 	RootCauseEvidenceIDs []string          `json:"root_cause_evidence_ids,omitempty"`
 	Confidence           float64           `json:"confidence,omitempty"`
+	ReasoningType        string            `json:"reasoning_type,omitempty"`
+	ModelProtocol        string            `json:"model_protocol,omitempty"`
+	ModelName            string            `json:"model_name,omitempty"`
+	ModelConfigHash      string            `json:"model_config_hash,omitempty"`
 	TraceID              string            `json:"trace_id,omitempty"`
 	CreatedAt            time.Time         `json:"created_at"`
 	UpdatedAt            time.Time         `json:"updated_at"`
@@ -42,6 +52,9 @@ type Incident struct {
 	Evidence             []Evidence        `json:"evidence,omitempty"`
 	Hypotheses           []Hypothesis      `json:"hypotheses,omitempty"`
 	Proposal             *RecoveryProposal `json:"recovery_proposal,omitempty"`
+	DryRun               *DryRunResult     `json:"dry_run,omitempty"`
+	ExecutionContext     *ExecutionContext `json:"execution_context,omitempty"`
+	WorkflowInterruptID  string            `json:"workflow_interrupt_id,omitempty"`
 	Verification         *Verification     `json:"verification,omitempty"`
 }
 
@@ -65,13 +78,28 @@ type Alert struct {
 	EndsAt      time.Time         `json:"ends_at,omitempty"`
 }
 
+type EvidenceSource = string
+type EvidenceType = string
+
 type Evidence struct {
-	ID         string         `json:"id"`
-	Source     string         `json:"source"`
-	Kind       string         `json:"kind"`
-	Summary    string         `json:"summary"`
-	Data       map[string]any `json:"data,omitempty"`
-	ObservedAt time.Time      `json:"observed_at"`
+	ID          string         `json:"id"`
+	Source      EvidenceSource `json:"source"`
+	Type        EvidenceType   `json:"type,omitempty"`
+	Kind        string         `json:"kind,omitempty"` // backward-compatible alias for Type
+	Timestamp   time.Time      `json:"timestamp,omitempty"`
+	WindowStart time.Time      `json:"window_start,omitempty"`
+	WindowEnd   time.Time      `json:"window_end,omitempty"`
+	Namespace   string         `json:"namespace,omitempty"`
+	Service     string         `json:"service,omitempty"`
+	Resource    string         `json:"resource,omitempty"`
+	Content     map[string]any `json:"content,omitempty"`
+	Data        map[string]any `json:"data,omitempty"` // backward-compatible alias for Content
+	Summary     string         `json:"summary"`
+	Confidence  float64        `json:"confidence,omitempty"`
+	TraceID     string         `json:"trace_id,omitempty"`
+	TemplateID  string         `json:"template_id,omitempty"`
+	CollectedAt time.Time      `json:"collected_at,omitempty"`
+	ObservedAt  time.Time      `json:"observed_at,omitempty"` // backward-compatible alias for Timestamp
 }
 
 type Hypothesis struct {
@@ -107,6 +135,32 @@ type RecoveryProposal struct {
 	ExpiresAt       time.Time      `json:"expires_at"`
 }
 
+type DryRunResult struct {
+	Success          bool           `json:"success"`
+	Action           RecoveryAction `json:"action"`
+	Target           string         `json:"target"`
+	Before           map[string]any `json:"before,omitempty"`
+	After            map[string]any `json:"after,omitempty"`
+	Risks            []string       `json:"risks,omitempty"`
+	MutationSpecHash string         `json:"mutation_spec_hash"`
+	ValidatedAt      time.Time      `json:"validated_at"`
+	Error            string         `json:"error,omitempty"`
+}
+
+type ExecutionContext struct {
+	NamespaceAllowlist []string  `json:"namespace_allowlist"`
+	IncidentID         string    `json:"incident_id"`
+	ProposalID         string    `json:"proposal_id"`
+	ApprovalID         string    `json:"approval_id"`
+	IdempotencyKey     string    `json:"idempotency_key"`
+	Operator           string    `json:"operator"`
+	TargetUID          string    `json:"target_uid"`
+	ResourceVersion    string    `json:"resource_version"`
+	MutationSpecHash   string    `json:"mutation_spec_hash"`
+	ApprovedAt         time.Time `json:"approved_at"`
+	ExpiresAt          time.Time `json:"expires_at"`
+}
+
 type Verification struct {
 	Success     bool            `json:"success"`
 	Checks      map[string]bool `json:"checks"`
@@ -124,13 +178,31 @@ type AuditEvent struct {
 }
 
 var transitions = map[IncidentStatus]map[IncidentStatus]bool{
-	StatusReceived:         {StatusCorrelating: true, StatusCancelled: true},
-	StatusCorrelating:      {StatusCollecting: true, StatusCancelled: true},
+	StatusReceived:         {StatusCorrelating: true, StatusNeedsAttention: true, StatusCancelled: true},
+	StatusCorrelating:      {StatusCollecting: true, StatusNeedsAttention: true, StatusCancelled: true},
 	StatusCollecting:       {StatusDiagnosing: true, StatusNeedsAttention: true, StatusCancelled: true},
-	StatusDiagnosing:       {StatusAwaitingApproval: true, StatusNeedsAttention: true, StatusCancelled: true},
-	StatusAwaitingApproval: {StatusRecovering: true, StatusRejected: true, StatusCancelled: true},
-	StatusRecovering:       {StatusVerifying: true, StatusRecoveryFailed: true},
-	StatusVerifying:        {StatusResolved: true, StatusRecoveryFailed: true},
+	StatusDiagnosing:       {StatusCollecting: true, StatusProposing: true, StatusNeedsAttention: true, StatusCancelled: true},
+	StatusProposing:        {StatusAwaitingApproval: true, StatusNeedsAttention: true, StatusCancelled: true},
+	StatusAwaitingApproval: {StatusRecovering: true, StatusNeedsAttention: true, StatusRejected: true, StatusCancelled: true},
+	StatusRecovering:       {StatusVerifying: true, StatusNeedsAttention: true, StatusRecoveryFailed: true},
+	StatusVerifying:        {StatusResolved: true, StatusNeedsAttention: true, StatusRecoveryFailed: true},
+	StatusNeedsAttention:   {StatusReceived: true},
+	StatusRecoveryFailed:   {StatusReceived: true},
 }
 
 func CanTransition(from, to IncidentStatus) bool { return transitions[from][to] }
+
+func Transition(in *Incident, to IncidentStatus) error {
+	if in == nil {
+		return fmt.Errorf("incident is required")
+	}
+	if in.Status == to {
+		return nil
+	}
+	if !CanTransition(in.Status, to) {
+		return fmt.Errorf("invalid incident transition %s -> %s", in.Status, to)
+	}
+	in.Status = to
+	in.UpdatedAt = time.Now().UTC()
+	return nil
+}

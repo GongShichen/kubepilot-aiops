@@ -24,6 +24,26 @@ func NewEmbedder(cfg config.EmbeddingConfig) *Embedder {
 	return &Embedder{cfg: cfg, http: &http.Client{Timeout: cfg.Timeout}}
 }
 func (e *Embedder) Embed(ctx context.Context, input []string) ([][]float32, error) {
+	if len(input) == 0 {
+		return [][]float32{}, nil
+	}
+	batchSize := e.cfg.BatchSize
+	if batchSize <= 0 || batchSize > 256 {
+		batchSize = 10
+	}
+	vectors := make([][]float32, 0, len(input))
+	for start := 0; start < len(input); start += batchSize {
+		end := min(start+batchSize, len(input))
+		batch, err := e.embedBatch(ctx, input[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("embedding provider: %s", redactProviderError(err.Error(), e.cfg.APIKey))
+		}
+		vectors = append(vectors, batch...)
+	}
+	return vectors, nil
+}
+
+func (e *Embedder) embedBatch(ctx context.Context, input []string) ([][]float32, error) {
 	body := struct {
 		Model      string   `json:"model"`
 		Input      []string `json:"input"`

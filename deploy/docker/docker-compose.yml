@@ -186,7 +186,7 @@ services:
       JAEGER_URL: http://jaeger:16686
       MILVUS_ADDRESS: milvus:19530
       HISTORY_COLLECTION: ${HISTORY_COLLECTION:-kubepilot_history_v2}
-      DRAIN3_WS_URL: ws://drain3:8081/ws/v1/parse
+      LOG_INDEX_COLLECTION: ${LOG_INDEX_COLLECTION:-kubepilot_log_templates_v1}
       OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
       KUBECONFIG: /runtime/kubeconfig
       CONFIG_ENV_FILE: /run/kubepilot/config/.env
@@ -201,8 +201,31 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       agent-redis: {condition: service_healthy}
-      drain3: {condition: service_healthy}
     ports: ["8080:8080"]
+
+  log-indexer:
+    image: kubepilot/agent:0.1.0
+    build:
+      context: ../..
+    entrypoint: ["/usr/local/bin/kubepilot-log-indexer"]
+    env_file:
+      - path: ../../.env.example
+      - path: ../../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://kubepilot:kubepilot@postgres:5432/kubepilot?sslmode=disable
+      REDIS_URL: redis://agent-redis:6379/0
+      LOKI_URL: http://loki:3100
+      MILVUS_ADDRESS: milvus:19530
+      LOG_INDEX_COLLECTION: ${LOG_INDEX_COLLECTION:-kubepilot_log_templates_v1}
+      DRAIN3_WS_URL: ws://drain3:8081/ws/v1/parse
+      LOG_INDEXER_INTERVAL: ${LOG_INDEXER_INTERVAL:-2s}
+    depends_on:
+      postgres: {condition: service_healthy}
+      agent-redis: {condition: service_healthy}
+      drain3: {condition: service_healthy}
+      loki: {condition: service_started}
+      milvus: {condition: service_started}
 
 volumes:
   postgres-data:

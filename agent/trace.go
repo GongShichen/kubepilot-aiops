@@ -9,9 +9,9 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-type TraceAgent struct{ Client *tools.JaegerClient }
+type TraceCollector struct{ Client *tools.JaegerClient }
 
-func (a TraceAgent) Collect(ctx context.Context, in *domain.Incident) ([]domain.Evidence, error) {
+func (a TraceCollector) Collect(ctx context.Context, in *domain.Incident) ([]domain.Evidence, error) {
 	start := in.EvidenceStartAt
 	if start.IsZero() {
 		start = in.CreatedAt.Add(-5 * time.Minute)

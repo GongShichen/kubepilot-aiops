@@ -96,12 +96,31 @@ func (k *KubernetesClient) Deployment(ctx context.Context, ns, name string) (*ap
 	return k.client.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
 }
 func (k *KubernetesClient) RestartDeployment(ctx context.Context, ns, name string) error {
+	return k.RestartDeploymentAt(ctx, ns, name, time.Now().UTC().Format(time.RFC3339Nano))
+}
+func (k *KubernetesClient) RestartDeploymentAt(ctx context.Context, ns, name, restartedAt string) error {
 	if err := k.namespace(ns); err != nil {
 		return err
 	}
-	patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"kubepilot.io/restartedAt":%q}}}}}`, time.Now().UTC().Format(time.RFC3339))
+	patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"kubepilot.io/restartedAt":%q}}}}}`, restartedAt)
 	_, err := k.client.AppsV1().Deployments(ns).Patch(ctx, name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
 	return err
+}
+
+func (k *KubernetesClient) DryRunRestartDeployment(ctx context.Context, ns, name, restartedAt string) (map[string]any, map[string]any, error) {
+	if err := k.namespace(ns); err != nil {
+		return nil, nil, err
+	}
+	dep, err := k.client.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, nil, err
+	}
+	patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"kubepilot.io/restartedAt":%q}}}}}`, restartedAt)
+	after, err := k.client.AppsV1().Deployments(ns).Patch(ctx, name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{DryRun: []string{metav1.DryRunAll}})
+	if err != nil {
+		return nil, nil, err
+	}
+	return deploymentMutationView(dep), deploymentMutationView(after), nil
 }
 func (k *KubernetesClient) ScaleDeployment(ctx context.Context, ns, name string, replicas int32) error {
 	if err := k.namespace(ns); err != nil {
@@ -118,6 +137,26 @@ func (k *KubernetesClient) ScaleDeployment(ctx context.Context, ns, name string,
 	_, err = k.client.AppsV1().Deployments(ns).UpdateScale(ctx, name, scale, metav1.UpdateOptions{})
 	return err
 }
+
+func (k *KubernetesClient) DryRunScaleDeployment(ctx context.Context, ns, name string, replicas int32) (map[string]any, map[string]any, error) {
+	if err := k.namespace(ns); err != nil {
+		return nil, nil, err
+	}
+	if replicas < 1 || replicas > 10 {
+		return nil, nil, fmt.Errorf("replicas must be between 1 and 10")
+	}
+	scale, err := k.client.AppsV1().Deployments(ns).GetScale(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, nil, err
+	}
+	before := map[string]any{"replicas": scale.Spec.Replicas, "resource_version": scale.ResourceVersion}
+	scale.Spec.Replicas = replicas
+	after, err := k.client.AppsV1().Deployments(ns).UpdateScale(ctx, name, scale, metav1.UpdateOptions{DryRun: []string{metav1.DryRunAll}})
+	if err != nil {
+		return nil, nil, err
+	}
+	return before, map[string]any{"replicas": after.Spec.Replicas, "resource_version": after.ResourceVersion}, nil
+}
 func (k *KubernetesClient) RollbackDeployment(ctx context.Context, ns, name string) error {
 	if err := k.namespace(ns); err != nil {
 		return err
@@ -126,13 +165,49 @@ func (k *KubernetesClient) RollbackDeployment(ctx context.Context, ns, name stri
 	if err != nil {
 		return err
 	}
-	selector, err := metav1.LabelSelectorAsSelector(dep.Spec.Selector)
+	template, _, err := k.previousRevision(ctx, dep)
 	if err != nil {
 		return err
 	}
-	sets, err := k.client.AppsV1().ReplicaSets(ns).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	dep.Spec.Template = template
+	dep.Spec.Paused = false
+	_, err = k.client.AppsV1().Deployments(ns).Update(ctx, dep, metav1.UpdateOptions{})
+	return err
+}
+
+func (k *KubernetesClient) DryRunRollbackDeployment(ctx context.Context, ns, name string) (map[string]any, map[string]any, error) {
+	if err := k.namespace(ns); err != nil {
+		return nil, nil, err
+	}
+	dep, err := k.client.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return err
+		return nil, nil, err
+	}
+	before := deploymentMutationView(dep)
+	template, revision, err := k.previousRevision(ctx, dep)
+	if err != nil {
+		return nil, nil, err
+	}
+	copy := dep.DeepCopy()
+	copy.Spec.Template = template
+	copy.Spec.Paused = false
+	after, err := k.client.AppsV1().Deployments(ns).Update(ctx, copy, metav1.UpdateOptions{DryRun: []string{metav1.DryRunAll}})
+	if err != nil {
+		return nil, nil, err
+	}
+	view := deploymentMutationView(after)
+	view["rollback_revision"] = revision
+	return before, view, nil
+}
+
+func (k *KubernetesClient) previousRevision(ctx context.Context, dep *appsv1.Deployment) (corev1.PodTemplateSpec, int, error) {
+	selector, err := metav1.LabelSelectorAsSelector(dep.Spec.Selector)
+	if err != nil {
+		return corev1.PodTemplateSpec{}, 0, err
+	}
+	sets, err := k.client.AppsV1().ReplicaSets(dep.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return corev1.PodTemplateSpec{}, 0, err
 	}
 	type revisionSet struct {
 		revision int
@@ -140,19 +215,25 @@ func (k *KubernetesClient) RollbackDeployment(ctx context.Context, ns, name stri
 	}
 	var candidates []revisionSet
 	for _, rs := range sets.Items {
-		rev, parseErr := strconv.Atoi(rs.Annotations["deployment.kubernetes.io/revision"])
+		revision, parseErr := strconv.Atoi(rs.Annotations["deployment.kubernetes.io/revision"])
 		if parseErr == nil {
-			candidates = append(candidates, revisionSet{rev, rs})
+			candidates = append(candidates, revisionSet{revision: revision, template: rs})
 		}
 	}
 	if len(candidates) < 2 {
-		return fmt.Errorf("no previous deployment revision available")
+		return corev1.PodTemplateSpec{}, 0, fmt.Errorf("no previous deployment revision available")
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].revision > candidates[j].revision })
-	dep.Spec.Template = candidates[1].template.Spec.Template
-	dep.Spec.Paused = false
-	_, err = k.client.AppsV1().Deployments(ns).Update(ctx, dep, metav1.UpdateOptions{})
-	return err
+	return candidates[1].template.Spec.Template, candidates[1].revision, nil
+}
+
+func deploymentMutationView(dep *appsv1.Deployment) map[string]any {
+	return map[string]any{
+		"uid":              string(dep.UID),
+		"resource_version": dep.ResourceVersion,
+		"replicas":         dep.Spec.Replicas,
+		"template":         dep.Spec.Template,
+	}
 }
 
 func (k *KubernetesClient) TargetState(ctx context.Context, ns, name string) (uid, resourceVersion string, ready bool, restarts int32, err error) {

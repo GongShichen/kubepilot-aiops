@@ -12,9 +12,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-type KubernetesEvidenceAgent struct{ Client *tools.KubernetesClient }
+type KubernetesEvidenceCollector struct{ Client *tools.KubernetesClient }
 
-func (a KubernetesEvidenceAgent) Collect(ctx context.Context, in *domain.Incident) ([]domain.Evidence, error) {
+func (a KubernetesEvidenceCollector) Collect(ctx context.Context, in *domain.Incident) ([]domain.Evidence, error) {
 	pods, err := a.Client.Pods(ctx, in.Namespace, tools.SelectorForService(in.Service))
 	if err != nil {
 		return nil, err
@@ -114,9 +114,6 @@ func sanitizeContainers(containers []corev1.Container) []map[string]any {
 		environment := make([]map[string]any, 0, len(container.Env))
 		for _, variable := range container.Env {
 			upperName := strings.ToUpper(variable.Name)
-			if upperName == "FAULT_MODE" || strings.HasPrefix(upperName, "BENCHMARK_") {
-				continue
-			}
 			item := map[string]any{"name": variable.Name}
 			if sensitiveEnvironmentName(upperName) {
 				item["value"] = "[REDACTED]"

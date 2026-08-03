@@ -36,6 +36,8 @@ type Response struct {
 	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
 	InputTokens  int        `json:"input_tokens,omitempty"`
 	OutputTokens int        `json:"output_tokens,omitempty"`
+	FinishReason string     `json:"finish_reason,omitempty"`
+	StreamEvents int        `json:"stream_events,omitempty"`
 }
 type Client interface {
 	Complete(context.Context, []Message, []Tool) (Response, error)
@@ -169,7 +171,8 @@ func (c *openAIClient) Complete(ctx context.Context, messages []Message, tools [
 	}
 	var out struct {
 		Choices []struct {
-			Message struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
 				Content   any `json:"content"`
 				ToolCalls []struct {
 					ID       string `json:"id"`
@@ -195,11 +198,11 @@ func (c *openAIClient) Complete(ctx context.Context, messages []Message, tools [
 	if out.Choices[0].Message.Content != nil {
 		content = fmt.Sprint(out.Choices[0].Message.Content)
 	}
-	r := Response{Content: content, InputTokens: out.Usage.Prompt, OutputTokens: out.Usage.Completion}
+	r := Response{Content: content, InputTokens: out.Usage.Prompt, OutputTokens: out.Usage.Completion, FinishReason: out.Choices[0].FinishReason}
 	for _, tc := range out.Choices[0].Message.ToolCalls {
-		arguments, normalizeErr := normalizeOpenAIArguments(tc.Function.Arguments)
+		arguments, normalizeErr := unwrapOpenAIArguments(tc.Function.Arguments)
 		if normalizeErr != nil {
-			return Response{}, fmt.Errorf("decode tool %s arguments: %w", tc.Function.Name, normalizeErr)
+			return Response{}, fmt.Errorf("decode tool %s arguments envelope: %w", tc.Function.Name, normalizeErr)
 		}
 		r.ToolCalls = append(r.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: arguments})
 	}
@@ -209,7 +212,7 @@ func (c *openAIClient) Complete(ctx context.Context, messages []Message, tools [
 // OpenAI-compatible providers normally encode function.arguments as a JSON
 // string, while a few gateways return the object directly. Normalize both
 // representations so downstream schema validation always receives JSON.
-func normalizeOpenAIArguments(raw json.RawMessage) (json.RawMessage, error) {
+func unwrapOpenAIArguments(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return json.RawMessage(`{}`), nil
 	}
@@ -220,9 +223,10 @@ func normalizeOpenAIArguments(raw json.RawMessage) (json.RawMessage, error) {
 		}
 		raw = json.RawMessage(encoded)
 	}
-	if !json.Valid(raw) {
-		return nil, errors.New("arguments are not valid JSON")
-	}
+	// Do not reject malformed function arguments here. The diagnosis layer owns
+	// the single schema-repair attempt and needs the original bytes to explain
+	// and repair an otherwise valid model response. Envelope/SSE JSON remains
+	// strictly decoded above, so this does not relax transport validation.
 	return raw, nil
 }
 
@@ -249,7 +253,8 @@ func decodeOpenAIStream(body io.Reader) (Response, error) {
 				Message string `json:"message"`
 			} `json:"error"`
 			Choices []struct {
-				Delta struct {
+				FinishReason string `json:"finish_reason"`
+				Delta        struct {
 					Content   any `json:"content"`
 					ToolCalls []struct {
 						Index    int    `json:"index"`
@@ -272,9 +277,13 @@ func decodeOpenAIStream(body io.Reader) (Response, error) {
 		if chunk.Error != nil {
 			return Response{}, fmt.Errorf("model stream error: %s", chunk.Error.Message)
 		}
+		result.StreamEvents++
 		result.InputTokens = max(result.InputTokens, chunk.Usage.Prompt)
 		result.OutputTokens = max(result.OutputTokens, chunk.Usage.Completion)
 		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				result.FinishReason = choice.FinishReason
+			}
 			if text, ok := choice.Delta.Content.(string); ok {
 				result.Content += text
 			}
@@ -312,14 +321,10 @@ func decodeOpenAIStream(body io.Reader) (Response, error) {
 		if len(arguments) == 0 {
 			arguments = json.RawMessage(`{}`)
 		}
-		arguments, err := normalizeOpenAIArguments(arguments)
-		if err != nil {
-			return Response{}, fmt.Errorf("decode tool %s arguments: %w", acc.name, err)
-		}
 		result.ToolCalls = append(result.ToolCalls, ToolCall{ID: acc.id, Name: acc.name, Arguments: arguments})
 	}
 	if result.Content == "" && len(result.ToolCalls) == 0 {
-		return Response{}, errors.New("model stream returned no content or tool calls")
+		return Response{}, fmt.Errorf("model stream returned no content or tool calls (finish_reason=%q events=%d)", result.FinishReason, result.StreamEvents)
 	}
 	return result, nil
 }
@@ -394,11 +399,12 @@ func (c *anthropicClient) Complete(ctx context.Context, messages []Message, tool
 			Input  int `json:"input_tokens"`
 			Output int `json:"output_tokens"`
 		} `json:"usage"`
+		StopReason string `json:"stop_reason"`
 	}
 	if err = json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return Response{}, err
 	}
-	r := Response{InputTokens: out.Usage.Input, OutputTokens: out.Usage.Output}
+	r := Response{InputTokens: out.Usage.Input, OutputTokens: out.Usage.Output, FinishReason: out.StopReason}
 	for _, block := range out.Content {
 		switch block.Type {
 		case "text":
@@ -471,6 +477,7 @@ func decodeAnthropicStream(body io.Reader) (Response, error) {
 			}
 			return Response{}, fmt.Errorf("model stream error: %s", message)
 		}
+		result.StreamEvents++
 		result.InputTokens = max(result.InputTokens, event.Message.Usage.Input)
 		result.OutputTokens = max(result.OutputTokens, event.Usage.Output)
 		switch event.Type {
@@ -488,6 +495,8 @@ func decodeAnthropicStream(body io.Reader) (Response, error) {
 			}
 			block.text += event.Delta.Text
 			block.arguments += event.Delta.PartialJSON
+		case "message_stop":
+			result.FinishReason = "message_stop"
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -508,14 +517,11 @@ func decodeAnthropicStream(body io.Reader) (Response, error) {
 			if len(arguments) == 0 {
 				arguments = json.RawMessage(`{}`)
 			}
-			if !json.Valid(arguments) {
-				return Response{}, fmt.Errorf("decode tool %s arguments: invalid JSON", block.name)
-			}
 			result.ToolCalls = append(result.ToolCalls, ToolCall{ID: block.id, Name: block.name, Arguments: arguments})
 		}
 	}
 	if result.Content == "" && len(result.ToolCalls) == 0 {
-		return Response{}, errors.New("model stream returned no content or tool calls")
+		return Response{}, fmt.Errorf("model stream returned no content or tool calls (finish_reason=%q events=%d)", result.FinishReason, result.StreamEvents)
 	}
 	return result, nil
 }

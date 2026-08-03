@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
 )
 
@@ -27,11 +29,24 @@ func TestHotClientSwitchesAtomicallyAndPinsWorkflowSnapshot(t *testing.T) {
 	if err := hot.Probe(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	firstHash, _, _ := hot.SnapshotIdentity()
 	pinned := hot.WithSnapshot(context.Background())
 
 	writeChatEnv(t, path, second.URL, "model-two")
 	if err := hot.Probe(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	secondHash, _, _ := hot.SnapshotIdentity()
+	if firstHash == "" || firstHash == secondHash {
+		t.Fatalf("model snapshot hashes did not change: %q %q", firstHash, secondHash)
+	}
+	hashContext, err := hot.WithSnapshotHash(context.Background(), firstHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashMessage, err := hot.Generate(hashContext, []*schema.Message{schema.UserMessage("test")})
+	if err != nil || hashMessage.Content != "first" {
+		t.Fatalf("checkpoint snapshot=%#v err=%v", hashMessage, err)
 	}
 	current, err := hot.Complete(context.Background(), []Message{{Role: "user", Content: "test"}}, nil)
 	if err != nil || current.Content != "second" {
@@ -103,15 +118,23 @@ func TestHotClientSnapshotPinsUnavailableState(t *testing.T) {
 	}
 }
 
+func TestSafeModelErrorRedactsKeyAndEndpoint(t *testing.T) {
+	err := safeModelError(errors.New(`POST "https://models.example.test/v1/chat": key=secret-key`), "secret-key")
+	if strings.Contains(err.Error(), "models.example.test") || strings.Contains(err.Error(), "secret-key") {
+		t.Fatalf("model error was not redacted: %s", err)
+	}
+}
+
 func modelServer(t *testing.T, content string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(string(body), "kubepilot_capability_probe") {
-			_, _ = io.WriteString(w, `{"choices":[{"message":{"content":null,"tool_calls":[{"id":"probe","type":"function","function":{"name":"kubepilot_capability_probe","arguments":"{\"nonce\":\"kubepilot-probe\"}"}}]}}]}`)
+		if strings.Contains(string(body), "kubepilot_capability_probe") && strings.Contains(string(body), `"stream":true`) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"id\":\"probe\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"probe\",\"type\":\"function\",\"function\":{\"name\":\"kubepilot_capability_probe\",\"arguments\":\"{\\\"nonce\\\":\\\"kubepilot-probe\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"content":%q}}]}`, content)
 	}))
 }

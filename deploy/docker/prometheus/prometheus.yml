@@ -16,6 +16,9 @@ scrape_configs:
       - targets: [drain3:9091]
   # make bootstrap generates minikube-targets.yml with API-server proxy targets.
   - job_name: minikube-proxy
+    # Preserve resource labels exported by kube-state-metrics. Without this,
+    # file_sd target labels rename the actual namespace to exported_namespace.
+    honor_labels: true
     file_sd_configs:
       - files: [/etc/prometheus/generated/minikube-targets.yml]
         refresh_interval: 30s

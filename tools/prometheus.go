@@ -35,6 +35,24 @@ func (c *PrometheusClient) Query(ctx context.Context, q string, at time.Time) (P
 		v.Set("time", at.Format(time.RFC3339))
 	}
 	u.RawQuery = v.Encode()
+	return c.execute(ctx, u, q)
+}
+
+func (c *PrometheusClient) QueryRange(ctx context.Context, q string, start, end time.Time, step time.Duration) (PromResult, error) {
+	u, err := url.Parse(c.base + "/api/v1/query_range")
+	if err != nil {
+		return PromResult{}, err
+	}
+	v := u.Query()
+	v.Set("query", q)
+	v.Set("start", start.Format(time.RFC3339))
+	v.Set("end", end.Format(time.RFC3339))
+	v.Set("step", fmt.Sprintf("%.0f", step.Seconds()))
+	u.RawQuery = v.Encode()
+	return c.execute(ctx, u, q)
+}
+
+func (c *PrometheusClient) execute(ctx context.Context, u *url.URL, q string) (PromResult, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -64,17 +82,17 @@ func (c *PrometheusClient) Query(ctx context.Context, q string, at time.Time) (P
 func MetricQueries(namespace, service string) map[string]string {
 	return map[string]string{
 		"cpu":                     fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{namespace=%q,pod=~%q}[5m]))`, namespace, service+".*"),
-		"cpu_current":             fmt.Sprintf(`sum(irate(container_cpu_usage_seconds_total{namespace=%q,pod=~%q}[1m]))`, namespace, service+".*"),
+		"cpu_current":             fmt.Sprintf(`sum(irate(container_cpu_usage_seconds_total{namespace=%q,pod=~%q}[30s]))`, namespace, service+".*"),
 		"cpu_throttling":          fmt.Sprintf(`sum(rate(container_cpu_cfs_throttled_periods_total{namespace=%q,pod=~%q}[5m])) / clamp_min(sum(rate(container_cpu_cfs_periods_total{namespace=%q,pod=~%q}[5m])), 1)`, namespace, service+".*", namespace, service+".*"),
-		"cpu_throttling_current":  fmt.Sprintf(`sum(irate(container_cpu_cfs_throttled_periods_total{namespace=%q,pod=~%q}[1m])) / clamp_min(sum(irate(container_cpu_cfs_periods_total{namespace=%q,pod=~%q}[1m])), 1)`, namespace, service+".*", namespace, service+".*"),
+		"cpu_throttling_current":  fmt.Sprintf(`sum(irate(container_cpu_cfs_throttled_periods_total{namespace=%q,pod=~%q}[30s])) / clamp_min(sum(irate(container_cpu_cfs_periods_total{namespace=%q,pod=~%q}[30s])), 1)`, namespace, service+".*", namespace, service+".*"),
 		"memory":                  fmt.Sprintf(`sum(container_memory_working_set_bytes{namespace=%q,pod=~%q})`, namespace, service+".*"),
 		"qps":                     fmt.Sprintf(`sum(rate(http_requests_total{namespace=%q,service=%q}[5m]))`, namespace, service),
-		"qps_current":             fmt.Sprintf(`sum(irate(http_requests_total{namespace=%q,service=%q}[1m]))`, namespace, service),
+		"qps_current":             fmt.Sprintf(`sum(irate(http_requests_total{namespace=%q,service=%q}[30s]))`, namespace, service),
 		"error_rate":              fmt.Sprintf(`sum(rate(http_requests_total{namespace=%q,service=%q,status=~"5.."}[5m])) / clamp_min(sum(rate(http_requests_total{namespace=%q,service=%q}[5m])), 1)`, namespace, service, namespace, service),
-		"error_rate_current":      fmt.Sprintf(`sum(irate(http_requests_total{namespace=%q,service=%q,status=~"5.."}[1m])) / clamp_min(sum(irate(http_requests_total{namespace=%q,service=%q}[1m])), 1)`, namespace, service, namespace, service),
+		"error_rate_current":      fmt.Sprintf(`sum(irate(http_requests_total{namespace=%q,service=%q,status=~"5.."}[30s])) / clamp_min(sum(irate(http_requests_total{namespace=%q,service=%q}[30s])), 1)`, namespace, service, namespace, service),
 		"p95_latency":             fmt.Sprintf(`histogram_quantile(0.95,sum by(le)(rate(http_request_duration_seconds_bucket{namespace=%q,service=%q}[5m])))`, namespace, service),
 		"p95_latency_current":     fmt.Sprintf(`histogram_quantile(0.95,sum by(le)(rate(http_request_duration_seconds_bucket{namespace=%q,service=%q}[30s])))`, namespace, service),
-		"restarts":                fmt.Sprintf(`sum(kube_pod_container_status_restarts_total{namespace=%q,pod=~%q})`, namespace, service+".*"),
-		"deployment_availability": fmt.Sprintf(`kube_deployment_status_replicas_available{namespace=%q,deployment=%q}`, namespace, service),
+		"restarts":                fmt.Sprintf(`sum(kube_pod_container_status_restarts_total{namespace=%q,pod=~%q} or kube_pod_container_status_restarts_total{exported_namespace=%q,pod=~%q})`, namespace, service+".*", namespace, service+".*"),
+		"deployment_availability": fmt.Sprintf(`kube_deployment_status_replicas_available{namespace=%q,deployment=%q} or kube_deployment_status_replicas_available{exported_namespace=%q,deployment=%q}`, namespace, service, namespace, service),
 	}
 }

@@ -5,11 +5,13 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kubepilot-server ./cmd/server && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kubepilot-benchmark ./cmd/benchmark && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kubepilot-log-indexer ./cmd/log-indexer && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/demo-service ./cmd/demo-service
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/kubepilot-server /usr/local/bin/kubepilot-server
 COPY --from=build /out/kubepilot-benchmark /usr/local/bin/kubepilot-benchmark
+COPY --from=build /out/kubepilot-log-indexer /usr/local/bin/kubepilot-log-indexer
 COPY --from=build /out/demo-service /usr/local/bin/demo-service
 COPY benchmark /app/benchmark
 WORKDIR /app

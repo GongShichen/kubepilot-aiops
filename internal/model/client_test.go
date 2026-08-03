@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -86,10 +87,27 @@ func TestOpenAICompatibleToolCallStringArguments(t *testing.T) {
 	}
 }
 
-func TestNormalizeOpenAIArgumentsObject(t *testing.T) {
-	raw, err := normalizeOpenAIArguments([]byte(`{"nonce":"kubepilot-probe"}`))
+func TestUnwrapOpenAIArgumentsObject(t *testing.T) {
+	raw, err := unwrapOpenAIArguments([]byte(`{"nonce":"kubepilot-probe"}`))
 	if err != nil || string(raw) != `{"nonce":"kubepilot-probe"}` {
 		t.Fatalf("raw=%s err=%v", raw, err)
+	}
+}
+
+func TestOpenAIStreamPreservesMalformedToolArgumentsForRepair(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"submit_diagnosis\",\"arguments\":\"{\\\"category\\\":\\\"cpu\\\"\"}}]}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer s.Close()
+	c := New(config.ChatConfig{Protocol: "openai-compatible", BaseURL: s.URL, APIPath: "/chat/completions", Model: "test", Timeout: time.Second})
+	result, err := c.Complete(context.Background(), []Message{{Role: "user", Content: "diagnose"}}, []Tool{{Name: "submit_diagnosis"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinishReason != "length" || len(result.ToolCalls) != 1 || json.Valid(result.ToolCalls[0].Arguments) {
+		t.Fatalf("result=%#v", result)
 	}
 }
 

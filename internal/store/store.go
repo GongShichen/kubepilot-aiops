@@ -22,6 +22,12 @@ type IncidentStore interface {
 	RecordApproval(context.Context, string, string, string, string, string) (bool, error)
 }
 
+// WorkflowStatusStore persists Graph transitions without replacing the richer
+// Incident payload that is still being assembled by the running workflow.
+type WorkflowStatusStore interface {
+	UpdateWorkflowStatus(context.Context, string, domain.IncidentStatus, time.Time) error
+}
+
 type MemoryStore struct {
 	mu        sync.RWMutex
 	incidents map[string]*domain.Incident
@@ -57,6 +63,17 @@ func (s *MemoryStore) Update(_ context.Context, in *domain.Incident) error {
 	}
 	cp := *in
 	s.incidents[in.ID] = &cp
+	return nil
+}
+func (s *MemoryStore) UpdateWorkflowStatus(_ context.Context, id string, status domain.IncidentStatus, occurredAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	in, ok := s.incidents[id]
+	if !ok {
+		return ErrNotFound
+	}
+	in.Status = status
+	in.UpdatedAt = occurredAt
 	return nil
 }
 func (s *MemoryStore) Get(_ context.Context, id string) (*domain.Incident, error) {

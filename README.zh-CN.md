@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-KubePilot 是一个面向本地 Kubernetes 事故诊断与恢复的 Agentic AIOps 系统。核心是类型安全的 Eino Graph，用于编排证据 Agent、历史检索、假设验证、受约束 Tool Calling、人工审批、恢复执行和恢复后验证。
+KubePilot 是一个 Eino-native Kubernetes AIOps Agent 系统。类型安全的 Eino Graph 负责确定性的 Incident 生命周期，三个 Eino ADK Agent 负责复杂决策，Eino ToolsNode 承载全部外部能力，Eino Interrupt 负责人工审批和可恢复执行。
 
 控制平面使用 Go、Gin 和 Eino 实现。系统接收 Alertmanager 事件、关联告警、收集指标/日志/Trace/Kubernetes 证据，执行基于证据的根因诊断，生成受约束的恢复方案，在人工审批后通过 `client-go` 执行动作并验证结果。Prometheus、Loki、Jaeger、Milvus、PostgreSQL、Redis 和官方 Drain3 解析器为 Agent 提供证据与状态基础设施。
 
@@ -12,46 +12,42 @@ KubePilot 是一个面向本地 Kubernetes 事故诊断与恢复的 Agentic AIOp
 Minikube：gateway → order → payment → MySQL/Redis
     │          指标 / 日志 / OTLP Trace
     ▼
-Docker Compose：Agent + PostgreSQL + Redis + Prometheus + Loki + Jaeger
-                + Grafana + Milvus + Drain3 WebSocket Sidecar
+Docker Compose：Agent + Log Indexer + PostgreSQL + Redis + Prometheus
+                + Loki + Jaeger + Grafana + Milvus + Drain3 Sidecar
 ```
 
-Go Log Agent 通过 `ws://drain3:8081/ws/v1/parse` 批量发送日志。请求具备版本号和幂等语义；Sidecar 会缓存最近十分钟的响应并持久化 Drain3 miner snapshot。
+Drain3 不在 Incident 查询关键路径中。独立 Go Log Indexer 持续消费 Loki，通过版本化、幂等的 WebSocket 批量调用 Drain3，使用用户配置的 BGE endpoint 生成向量，并将模板索引写入 PostgreSQL 和 Milvus。查询阶段只读取 Loki 与预构建索引；索引不新鲜时回退 Loki。
 
 ## Agent 架构
 
 ```mermaid
-flowchart LR
+flowchart TD
     A["Incident Intake"] --> B["Alert Correlator"]
-    B --> C["Evidence Planner"]
-    C --> D["并发证据采集"]
-    D --> M["Metric Agent"]
-    D --> L["Log Agent + Drain3"]
-    D --> T["Trace Agent"]
-    D --> K["Kubernetes Evidence Agent"]
-    M --> E["Evidence Merger"]
-    L --> E
-    T --> E
-    K --> E
-    E --> H["Historical Retriever"]
-    H --> G["Hypothesis Generator"]
-    G --> V["Hypothesis Verifier"]
-    V --> R["Root Cause Agent"]
-    R --> P["Recovery Agent"]
-    P --> I["人工审批中断点"]
-    I --> X["Action Executor"]
-    X --> Q["Verification Agent"]
+    B --> S["Supervisor Agent<br/>Evidence Plan"]
+    S --> T["并行 Evidence ToolsNode<br/>Prometheus · Loki · Jaeger · Kubernetes"]
+    T --> F["Evidence Fusion"]
+    F --> H["Historical Retrieval Tool"]
+    H --> D["Diagnosis Agent<br/>Hypothesis Verification"]
+    D -->|"最多补采一次"| T
+    D -->|"confidence < 0.80"| N["NEEDS_ATTENTION"]
+    D --> R["Recovery Agent<br/>只生成 Proposal"]
+    R --> V["Proposal Validation + Kubernetes DryRunAll"]
+    V --> I["Eino StatefulInterrupt<br/>人工审批"]
+    I -->|"ResumeWithData"| X["Action ToolsNode"]
+    X --> Q["Verification ToolsNode<br/>连续三次健康"]
 ```
 
-- **类型安全的 Eino 编排：** 使用 `compose.Graph[*WorkflowState, *WorkflowState]` 将 Incident 生命周期定义为显式节点，而不是不可观察的 Prompt Chain。证据节点并发调用四个专用 Collector，再合并为统一的类型化状态。
+- **Eino 是运行时，而不是包装层：** `compose.Graph` 是工作流运行时，`adk.NewChatModelAgent` 是 Agent 运行时，`compose.NewToolNode` 是能力运行时，`StatefulInterrupt`/`ResumeWithData` 是审批运行时。
+- **只有三个核心 Agent：** Supervisor 规划有界 Evidence，Diagnosis 执行基于证据的假设验证，Recovery 只创建安全 Proposal。采集、校验、执行和验证属于确定性 Workflow/Tool。
+- **类型安全且可恢复：** 版本化 WorkflowState、Evidence Schema、Dry-run 结果和服务端生成的 ExecutionContext 存入 Redis checkpoint；PostgreSQL 保存可审计的长期业务状态。
 - **基于证据的推理：** Diagnosis Agent 最多生成三个假设，为每个假设附带支持 Evidence ID 和可证伪条件；置信度低于 `0.80` 时进入 `NEEDS_ATTENTION`，不会强制输出结论。
-- **Schema 约束的 Tool Calling：** 诊断与恢复均使用 JSON Schema 工具和固定的 category/action 契约。未知证据引用、畸形参数、任意 Shell 和不支持的动作会被拒绝；结构修复最多执行一次。
-- **流式模型适配：** 同时支持 OpenAI-compatible 和 Anthropic-compatible 协议。系统增量聚合 SSE 文本与分片 Tool Calling 参数；URL、API Key 和模型名完全由用户配置。
+- **统一 Capability Registry：** 所有 Agent 可见的读取和修改能力都是 Eino Tool，具备 JSON Schema、节点 allowlist、timeout、输入/输出大小限制和 Action 审批中间件。Tool 不接受原始 SQL、PromQL、LogQL、kubectl、Shell、Milvus filter 或任意 Kubernetes manifest。
+- **官方流式模型组件：** OpenAI-compatible 和 Anthropic-compatible 均使用锁定版本的 Eino 扩展。Eino 负责合并流式 Tool Call 分片；URL、API Path、API Key 和模型名完全由用户配置。
 - **能力门控：** 启用恢复能力前，Agent 会执行无副作用的 Tool Calling 探测。无法生成指定结构化工具调用的 endpoint 不会进入真实恢复模式。
-- **Agentic Retrieval：** Log Agent 组合 Loki metadata filter、Drain3 模板、OpenAI-compatible Embedding 和 Milvus 历史记忆。历史数据与 Benchmark ground truth 隔离，避免评测泄漏。
-- **Human-in-the-loop 恢复：** Recovery Agent 只能提出 `restart_pod`、`scale_deployment` 或 `rollback_deployment`。执行要求 proposal 未过期、人工审批、幂等键、namespace allowlist，以及 Kubernetes UID/resourceVersion 前置校验。
-- **闭环验证：** 动作完成后，Verification Agent 连续采样工作负载健康状态，并将最终 Incident、恢复方案、审批、审计和验证状态持久化到 PostgreSQL。
-- **Agent 可观测性：** 每个 Eino 节点都会产生 OpenTelemetry span。Tool、工作流和基础设施错误会在 Incident 与 Benchmark 中分别统计，不会隐藏在模型输出中。
+- **预索引 Hybrid Log：** 查询 Tool 组合 Loki metadata/keyword 与持续维护的 Drain3/BGE/Milvus 索引，不会等待同步日志解析。
+- **Human-in-the-loop 恢复：** Recovery 只能提出 `restart_pod`、`scale_deployment` 或 `rollback_deployment`。Kubernetes `DryRunAll` 成功后才能审批；执行还必须校验服务端 ExecutionContext、幂等键、namespace allowlist、mutation hash、UID 和 resourceVersion。
+- **闭环验证：** 动作完成后，确定性的 Verification ToolsNode 连续采样工作负载健康状态，并将最终 Incident、Proposal、审批、审计和验证状态持久化到 PostgreSQL。
+- **Agent 可观测性：** Eino Callback 将 Graph/Agent/Node/Tool 生命周期写入 OpenTelemetry、Prometheus、PostgreSQL 审计与 tool_calls 表以及 Incident SSE，同时不记录隐藏推理、凭据或未裁剪原始日志。
 - **可消融评测：** 同一个 Runner 可以评测 `llm-only`、`vector-rag` 和完整 `kubepilot` 路径，从而量化历史检索与多源 Agent 带来的贡献。
 
 ## 环境要求
@@ -80,7 +76,7 @@ CHAT_BASE_URL=https://...
 CHAT_API_PATH=/chat/completions       # Anthropic 使用 /v1/messages
 CHAT_API_KEY=...
 CHAT_MODEL=...
-CHAT_MAX_RETRIES=1                    # timeout、429、5xx 最多重试一次
+CHAT_MAX_RETRIES=1                    # 临时传输错误、429、5xx 最多重试一次
 CHAT_REASONING_EFFORT=low             # reasoning 模型可选
 CONFIG_RELOAD_INTERVAL=2s             # 无需重启 Agent，轮询挂载的 .env
 CONFIG_RELOAD_RETRY_INTERVAL=30s      # 候选模型探测失败后的重试间隔
@@ -92,11 +88,12 @@ EMBEDDING_DIMENSIONS=1024
 EMBEDDING_BATCH_SIZE=10               # provider 限制批量输入时可调低
 EMBEDDING_REQUEST_INTERVAL=1s         # provider 限流节奏；429/5xx 会重试
 DRAIN3_TOKEN=...
+BUSINESS_PROBE_URL=...                # 可选的端到端恢复探针
 ```
 
 密钥只从环境变量或未纳入版本控制的 `.env` 读取。健康检查响应、日志、Trace 和 Benchmark manifest 均不会记录密钥；Docker 构建上下文也会排除 `.env`、运行时凭据和 Benchmark 产物。
 
-所有对话请求均设置 `stream: true`。OpenAI-compatible SSE 会聚合文本 delta 和按索引拆分的 Tool Calling 参数；Anthropic-compatible SSE 会聚合文本块和 `input_json_delta` 工具参数。忽略流式参数并返回普通 JSON 的兼容 provider 仍可使用。
+所有 Agent 模型节点都使用 Eino 流式接口。OpenAI-compatible SSE delta 和 Anthropic `input_json_delta` 分片由 Eino 合并后才会执行 Tool。
 
 Agent 会监听只读挂载的 `.env` 中的对话模型配置变化。候选 Client 在后台完成校验和 Tool Calling 探测，成功后才原子替换当前 Client；探测失败会继续保留旧模型，HTTP 启动不会被模型探测阻塞。每个 Incident 在工作流开始时固定一份模型快照，避免诊断中途切换；热加载健康状态和日志不会暴露 API Key。
 
@@ -117,7 +114,7 @@ make up
 3. 启动 PostgreSQL、Redis、Drain3、Prometheus、Alertmanager、Loki、Grafana、Jaeger、Milvus 及其依赖。
 4. 构建并加载 Go demo-service 镜像。
 5. 部署 demo、benchmark namespace，以及 Alloy 和 kube-state-metrics。
-6. 启动 Go Agent。
+6. 启动 Go Log Indexer 和 Go Agent。
 
 本地服务入口：
 
@@ -215,7 +212,7 @@ Kubernetes Injector 只能执行编译进 Runner 的动作类型，拒绝操作 
 
 每次运行会在 `artifacts/benchmark/<run-id>/` 下生成 manifest、case JSONL、summary JSON、CSV 表格和 Markdown 报告。Manifest 包含场景 hash、模型协议/名称、endpoint hash、seed 和版本，但不包含凭据。`artifacts/` 中的运行报告和日志不会提交到版本库。
 
-指标包括严格根因准确率、category/service/resource 准确率、Evidence Recall、恢复决策准确率、工具成功率、诊断/恢复延迟、告警分组 Precision/Recall/F1、检索 Recall@K/MRR 和 P50/P95/P99。`PLAN.md` 中的数值仅为示例，报告只使用实际测量结果。
+指标包括严格根因准确率、category/service/resource 准确率、Evidence Recall、恢复决策准确率、工具成功率、诊断/恢复延迟、告警分组 Precision/Recall/F1、检索 Recall@K/MRR 和 P50/P95/P99。正式报告只使用实际测量结果。
 
 Diagnosis 对比在相同 Kubernetes 故障场景上评估三种方法：`llm-only` 只接收 Incident metadata；`vector-rag` 接收 Incident metadata 和历史 Incident；`kubepilot` 收集 Metric、Log、Trace、Kubernetes 和历史证据。根因定位要求 category、21 种 canonical variant 之一、service 和 resource 完全匹配；严格准确率还要求 required-evidence recall 至少为 50%。报告包含分类 Precision/Recall/F1、混淆矩阵、Evidence Precision/Recall/Groundedness、Brier Score、ECE、高置信错误率和十档置信度校准。
 
@@ -244,6 +241,6 @@ kubectl kustomize deploy/kubernetes/overlays/benchmark >/dev/null
 - Agent 无法访问 Kubernetes 时，在 Minikube 重启后重新执行 `make runtime`；Kubernetes API 端口可能发生变化。
 - Prometheus 没有 Minikube 数据时，检查 `deploy/docker/prometheus/generated/` 和 `minikube-proxy` target。
 - Loki 没有数据时，检查 `kubectl logs -n kubepilot-system daemonset/alloy`，并确认 `host.minikube.internal:3100` 可访问。
-- Drain3 不可用时，检查 `docker compose ... logs drain3`；Agent 会将日志证据标记为不可用，不会伪造结果。
+- Drain3 不可用时，检查 `drain3` 和 `log-indexer` 服务。Incident 诊断会继续使用 Loki metadata，并将模板/向量索引标记为 stale；查询链路不会临时解析日志。
 - Diagnosis 进入 `NEEDS_ATTENTION` 时，应检查证据错误和模型探测结果，不要降低置信度阈值。
 - Benchmark 清理失败时，应先恢复 benchmark namespace 再继续。Runner 会拒绝在脏环境中执行后续 case。

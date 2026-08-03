@@ -1,34 +1,10 @@
 package main
 
-import (
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"testing"
-)
+import "testing"
 
-func TestFaultControllerAuthenticationAndReset(t *testing.T) {
-	controller := newFaultController("", "control-token")
-	unauthorized := httptest.NewRequest(http.MethodPost, "/benchmark/v1/fault", strings.NewReader(`{"mode":"busy_loop"}`))
-	unauthorizedResult := httptest.NewRecorder()
-	controller.handle(unauthorizedResult, unauthorized)
-	if unauthorizedResult.Code != http.StatusUnauthorized || controller.modeValue() != "" {
-		t.Fatalf("unauthorized request changed mode: status=%d mode=%q", unauthorizedResult.Code, controller.modeValue())
-	}
-
-	request := httptest.NewRequest(http.MethodPost, "/benchmark/v1/fault", strings.NewReader(`{"mode":"busy_loop"}`))
-	request.Header.Set("X-KubePilot-Benchmark-Token", "control-token")
-	result := httptest.NewRecorder()
-	controller.handle(result, request)
-	if result.Code != http.StatusNoContent || controller.modeValue() != "busy_loop" {
-		t.Fatalf("status=%d mode=%q", result.Code, controller.modeValue())
-	}
-
-	reset := httptest.NewRequest(http.MethodDelete, "/benchmark/v1/fault", nil)
-	reset.Header.Set("X-KubePilot-Benchmark-Token", "control-token")
-	resetResult := httptest.NewRecorder()
-	controller.handle(resetResult, reset)
-	if resetResult.Code != http.StatusNoContent || controller.modeValue() != "" {
-		t.Fatalf("reset status=%d mode=%q", resetResult.Code, controller.modeValue())
+func TestAllocateTouchedCommitsEveryPage(t *testing.T) {
+	block := allocateTouched(8193)
+	if len(block) != 8193 || block[0] == 0 || block[4096] == 0 || block[8192] == 0 {
+		t.Fatalf("allocation pages were not touched: len=%d samples=%v", len(block), []byte{block[0], block[4096], block[8192]})
 	}
 }

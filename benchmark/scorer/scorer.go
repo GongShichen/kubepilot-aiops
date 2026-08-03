@@ -21,7 +21,12 @@ type Score struct {
 }
 
 func Incident(s scenarios.Scenario, in *domain.Incident) Score {
-	out := Score{CategoryCorrect: equal(s.GroundTruth.RootCauseCategory, in.RootCauseCategory), VariantCorrect: equal(s.Variant, in.RootCauseVariant), ServiceCorrect: equal(s.GroundTruth.Service, in.Service), ResourceCorrect: equal(s.GroundTruth.Resource, in.Resource)}
+	out := Score{
+		CategoryCorrect: equalNonEmpty(s.GroundTruth.RootCauseCategory, in.RootCauseCategory),
+		VariantCorrect:  equalNonEmpty(s.Variant, in.RootCauseVariant),
+		ServiceCorrect:  equalNonEmpty(s.GroundTruth.Service, in.RootCauseService),
+		ResourceCorrect: equalNonEmpty(s.GroundTruth.Resource, in.RootCauseResource),
+	}
 	byID := map[string]domain.Evidence{}
 	for _, e := range in.Evidence {
 		byID[e.ID] = e
@@ -40,7 +45,8 @@ func Incident(s scenarios.Scenario, in *domain.Incident) Score {
 		groundedCitations++
 		matched := false
 		for _, value := range []string{evidence.Kind, evidence.Source} {
-			key := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), "_current")
+			key := strings.ToLower(strings.TrimSpace(value))
+			key = strings.TrimSuffix(strings.TrimSuffix(key, "_current"), "_trend")
 			if required[key] {
 				covered[key] = true
 				matched = true
@@ -69,6 +75,9 @@ func Incident(s scenarios.Scenario, in *domain.Incident) Score {
 	return out
 }
 func equal(a, b string) bool { return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b)) }
+func equalNonEmpty(a, b string) bool {
+	return strings.TrimSpace(a) != "" && strings.TrimSpace(b) != "" && equal(a, b)
+}
 
 type CorrelationScore struct {
 	ExactAccuracy float64 `json:"exact_accuracy"`

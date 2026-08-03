@@ -11,25 +11,28 @@ import (
 )
 
 type Config struct {
-	HTTPAddr          string
-	APIToken          string
-	WebhookToken      string
-	DatabaseURL       string
-	RedisURL          string
-	Chat              ChatConfig
-	Embedding         EmbeddingConfig
-	PrometheusURL     string
-	LokiURL           string
-	JaegerURL         string
-	MilvusAddress     string
-	HistoryCollection string
-	Drain3URL         string
-	Drain3Token       string
-	Kubeconfig        string
-	AllowedNamespaces []string
-	ConfigEnvFile     string
-	ConfigReloadEvery time.Duration
-	ConfigRetryEvery  time.Duration
+	HTTPAddr           string
+	APIToken           string
+	WebhookToken       string
+	DatabaseURL        string
+	RedisURL           string
+	Chat               ChatConfig
+	Embedding          EmbeddingConfig
+	PrometheusURL      string
+	LokiURL            string
+	JaegerURL          string
+	MilvusAddress      string
+	HistoryCollection  string
+	LogIndexCollection string
+	LogIndexerInterval time.Duration
+	BusinessProbeURL   string
+	Drain3URL          string
+	Drain3Token        string
+	Kubeconfig         string
+	AllowedNamespaces  []string
+	ConfigEnvFile      string
+	ConfigReloadEvery  time.Duration
+	ConfigRetryEvery   time.Duration
 }
 
 type ChatConfig struct {
@@ -51,6 +54,7 @@ type EmbeddingConfig struct {
 	APIKey          string
 	Model           string
 	Dimensions      int
+	BatchSize       int
 	Timeout         time.Duration
 	RequestInterval time.Duration
 }
@@ -76,6 +80,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	logIndexerInterval, err := duration("LOG_INDEXER_INTERVAL", 2*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
 	maxTokens, err := integer("CHAT_MAX_TOKENS", 4096)
 	if err != nil {
 		return Config{}, err
@@ -85,6 +93,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	dimensions, err := integer("EMBEDDING_DIMENSIONS", 1024)
+	if err != nil {
+		return Config{}, err
+	}
+	embeddingBatchSize, err := integer("EMBEDDING_BATCH_SIZE", 10)
 	if err != nil {
 		return Config{}, err
 	}
@@ -100,8 +112,8 @@ func Load() (Config, error) {
 		DatabaseURL:   os.Getenv("DATABASE_URL"),
 		RedisURL:      os.Getenv("REDIS_URL"),
 		Chat:          ChatConfig{Protocol: get("CHAT_PROTOCOL", "openai-compatible"), BaseURL: os.Getenv("CHAT_BASE_URL"), APIPath: get("CHAT_API_PATH", "/chat/completions"), APIKey: os.Getenv("CHAT_API_KEY"), Model: os.Getenv("CHAT_MODEL"), Timeout: chatTimeout, MaxTokens: maxTokens, Temperature: temperature, ReasoningEffort: os.Getenv("CHAT_REASONING_EFFORT"), MaxRetries: maxRetries},
-		Embedding:     EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: get("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: dimensions, Timeout: embedTimeout, RequestInterval: embedRequestInterval},
-		PrometheusURL: get("PROMETHEUS_URL", "http://localhost:9090"), LokiURL: get("LOKI_URL", "http://localhost:3100"), JaegerURL: get("JAEGER_URL", "http://localhost:16686"), MilvusAddress: get("MILVUS_ADDRESS", "localhost:19530"), HistoryCollection: get("HISTORY_COLLECTION", "kubepilot_history_v2"),
+		Embedding:     EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: get("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: dimensions, BatchSize: embeddingBatchSize, Timeout: embedTimeout, RequestInterval: embedRequestInterval},
+		PrometheusURL: get("PROMETHEUS_URL", "http://localhost:9090"), LokiURL: get("LOKI_URL", "http://localhost:3100"), JaegerURL: get("JAEGER_URL", "http://localhost:16686"), MilvusAddress: get("MILVUS_ADDRESS", "localhost:19530"), HistoryCollection: get("HISTORY_COLLECTION", "kubepilot_history_v2"), LogIndexCollection: get("LOG_INDEX_COLLECTION", "kubepilot_log_templates_v1"), LogIndexerInterval: logIndexerInterval, BusinessProbeURL: os.Getenv("BUSINESS_PROBE_URL"),
 		Drain3URL: get("DRAIN3_WS_URL", "ws://localhost:8081/ws/v1/parse"), Drain3Token: os.Getenv("DRAIN3_TOKEN"), Kubeconfig: os.Getenv("KUBECONFIG"), AllowedNamespaces: split(get("ALLOWED_NAMESPACES", "kubepilot-demo,kubepilot-benchmark")),
 		ConfigEnvFile: os.Getenv("CONFIG_ENV_FILE"), ConfigReloadEvery: configReloadEvery, ConfigRetryEvery: configRetryEvery,
 	}
@@ -159,6 +171,9 @@ func (c Config) ValidateEmbedding() error {
 	}
 	if c.Embedding.Dimensions <= 0 {
 		return errors.New("EMBEDDING_DIMENSIONS must be positive")
+	}
+	if c.Embedding.BatchSize <= 0 || c.Embedding.BatchSize > 256 {
+		return errors.New("EMBEDDING_BATCH_SIZE must be between 1 and 256")
 	}
 	return nil
 }
