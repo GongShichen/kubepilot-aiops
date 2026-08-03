@@ -2,9 +2,9 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-KubePilot 是一个面向本地 Kubernetes 环境的事故诊断与恢复平台，采用 Go、Gin、Eino Graph、Prometheus、Loki、Jaeger、Milvus、PostgreSQL、Redis 和官方 Drain3 解析器 Sidecar 构建。
+KubePilot 是一个面向本地 Kubernetes 事故诊断与恢复的 Agentic AIOps 系统。核心是类型安全的 Eino Graph，用于编排证据 Agent、历史检索、假设验证、受约束 Tool Calling、人工审批、恢复执行和恢复后验证。
 
-平台接收 Alertmanager 事件、关联告警、收集指标/日志/Trace/Kubernetes 证据，通过假设驱动的方式诊断根因，生成受约束的恢复方案，在人工审批后使用 `client-go` 执行动作并验证恢复结果。
+控制平面使用 Go、Gin 和 Eino 实现。系统接收 Alertmanager 事件、关联告警、收集指标/日志/Trace/Kubernetes 证据，执行基于证据的根因诊断，生成受约束的恢复方案，在人工审批后通过 `client-go` 执行动作并验证结果。Prometheus、Loki、Jaeger、Milvus、PostgreSQL、Redis 和官方 Drain3 解析器为 Agent 提供证据与状态基础设施。
 
 ## 架构
 
@@ -17,6 +17,42 @@ Docker Compose：Agent + PostgreSQL + Redis + Prometheus + Loki + Jaeger
 ```
 
 Go Log Agent 通过 `ws://drain3:8081/ws/v1/parse` 批量发送日志。请求具备版本号和幂等语义；Sidecar 会缓存最近十分钟的响应并持久化 Drain3 miner snapshot。
+
+## Agent 架构
+
+```mermaid
+flowchart LR
+    A["Incident Intake"] --> B["Alert Correlator"]
+    B --> C["Evidence Planner"]
+    C --> D["并发证据采集"]
+    D --> M["Metric Agent"]
+    D --> L["Log Agent + Drain3"]
+    D --> T["Trace Agent"]
+    D --> K["Kubernetes Evidence Agent"]
+    M --> E["Evidence Merger"]
+    L --> E
+    T --> E
+    K --> E
+    E --> H["Historical Retriever"]
+    H --> G["Hypothesis Generator"]
+    G --> V["Hypothesis Verifier"]
+    V --> R["Root Cause Agent"]
+    R --> P["Recovery Agent"]
+    P --> I["人工审批中断点"]
+    I --> X["Action Executor"]
+    X --> Q["Verification Agent"]
+```
+
+- **类型安全的 Eino 编排：** 使用 `compose.Graph[*WorkflowState, *WorkflowState]` 将 Incident 生命周期定义为显式节点，而不是不可观察的 Prompt Chain。证据节点并发调用四个专用 Collector，再合并为统一的类型化状态。
+- **基于证据的推理：** Diagnosis Agent 最多生成三个假设，为每个假设附带支持 Evidence ID 和可证伪条件；置信度低于 `0.80` 时进入 `NEEDS_ATTENTION`，不会强制输出结论。
+- **Schema 约束的 Tool Calling：** 诊断与恢复均使用 JSON Schema 工具和固定的 category/action 契约。未知证据引用、畸形参数、任意 Shell 和不支持的动作会被拒绝；结构修复最多执行一次。
+- **流式模型适配：** 同时支持 OpenAI-compatible 和 Anthropic-compatible 协议。系统增量聚合 SSE 文本与分片 Tool Calling 参数；URL、API Key 和模型名完全由用户配置。
+- **能力门控：** 启用恢复能力前，Agent 会执行无副作用的 Tool Calling 探测。无法生成指定结构化工具调用的 endpoint 不会进入真实恢复模式。
+- **Agentic Retrieval：** Log Agent 组合 Loki metadata filter、Drain3 模板、OpenAI-compatible Embedding 和 Milvus 历史记忆。历史数据与 Benchmark ground truth 隔离，避免评测泄漏。
+- **Human-in-the-loop 恢复：** Recovery Agent 只能提出 `restart_pod`、`scale_deployment` 或 `rollback_deployment`。执行要求 proposal 未过期、人工审批、幂等键、namespace allowlist，以及 Kubernetes UID/resourceVersion 前置校验。
+- **闭环验证：** 动作完成后，Verification Agent 连续采样工作负载健康状态，并将最终 Incident、恢复方案、审批、审计和验证状态持久化到 PostgreSQL。
+- **Agent 可观测性：** 每个 Eino 节点都会产生 OpenTelemetry span。Tool、工作流和基础设施错误会在 Incident 与 Benchmark 中分别统计，不会隐藏在模型输出中。
+- **可消融评测：** 同一个 Runner 可以评测 `llm-only`、`vector-rag` 和完整 `kubepilot` 路径，从而量化历史检索与多源 Agent 带来的贡献。
 
 ## 环境要求
 

@@ -2,9 +2,9 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-KubePilot is a local-first Kubernetes incident diagnosis and recovery platform built with Go, Gin, Eino Graph, Prometheus, Loki, Jaeger, Milvus, PostgreSQL, Redis, and an official Drain3 parser sidecar.
+KubePilot is an agentic AIOps system for local Kubernetes incident diagnosis and recovery. Its core is a typed Eino Graph that coordinates evidence agents, retrieval, hypothesis verification, constrained Tool Calling, human approval, recovery, and post-action verification.
 
-It receives Alertmanager events, correlates alerts, collects metrics/logs/traces/Kubernetes evidence, performs hypothesis-driven diagnosis, proposes a constrained recovery action, pauses for approval, executes through `client-go`, and verifies the result.
+The control plane is implemented in Go with Gin and Eino. It receives Alertmanager events, correlates alerts, collects metrics/logs/traces/Kubernetes evidence, performs evidence-grounded diagnosis, proposes a constrained recovery action, pauses for approval, executes through `client-go`, and verifies the result. Prometheus, Loki, Jaeger, Milvus, PostgreSQL, Redis, and the official Drain3 parser provide the Agent's evidence and state infrastructure.
 
 ## Architecture
 
@@ -17,6 +17,42 @@ Docker Compose: Agent + PostgreSQL + Redis + Prometheus + Loki + Jaeger
 ```
 
 The Go Log Agent sends batches to Drain3 over `ws://drain3:8081/ws/v1/parse`. Requests are versioned and idempotent; the sidecar keeps a ten-minute response cache and persists its miner snapshot.
+
+## Agent architecture
+
+```mermaid
+flowchart LR
+    A["Incident Intake"] --> B["Alert Correlator"]
+    B --> C["Evidence Planner"]
+    C --> D["Concurrent Evidence Collection"]
+    D --> M["Metric Agent"]
+    D --> L["Log Agent + Drain3"]
+    D --> T["Trace Agent"]
+    D --> K["Kubernetes Evidence Agent"]
+    M --> E["Evidence Merger"]
+    L --> E
+    T --> E
+    K --> E
+    E --> H["Historical Retriever"]
+    H --> G["Hypothesis Generator"]
+    G --> V["Hypothesis Verifier"]
+    V --> R["Root Cause Agent"]
+    R --> P["Recovery Agent"]
+    P --> I["Human Approval Interrupt"]
+    I --> X["Action Executor"]
+    X --> Q["Verification Agent"]
+```
+
+- **Typed Eino orchestration:** `compose.Graph[*WorkflowState, *WorkflowState]` defines the Incident lifecycle as explicit nodes instead of an opaque prompt chain. The evidence node fans out to four specialized collectors concurrently and merges their results into one typed state.
+- **Evidence-grounded reasoning:** the Diagnosis Agent generates at most three hypotheses, attaches supporting Evidence IDs and falsification conditions, and routes confidence below `0.80` to `NEEDS_ATTENTION` instead of forcing an answer.
+- **Schema-constrained Tool Calling:** diagnosis and recovery use JSON Schema tools with fixed action/category contracts. Unknown evidence citations, malformed arguments, arbitrary shell commands, and unsupported actions are rejected; structural repair is bounded to one attempt.
+- **Streaming model adapters:** both OpenAI-compatible and Anthropic-compatible protocols are supported. SSE text and fragmented Tool Calling arguments are assembled incrementally, while URL, API key, and model name remain user-configured.
+- **Capability gating:** the Agent performs a side-effect-free Tool Calling probe before enabling recovery. A chat endpoint that cannot produce the required structured tool call remains diagnosis-disabled rather than executing an unsafe fallback.
+- **Agentic retrieval:** the Log Agent combines Loki metadata filtering, Drain3 templates, OpenAI-compatible embeddings, and Milvus history. Historical memory is held out from Benchmark ground truth to prevent evaluation leakage.
+- **Human-in-the-loop recovery:** the Recovery Agent can propose only `restart_pod`, `scale_deployment`, or `rollback_deployment`. Execution requires an unexpired proposal, approval, idempotency key, namespace allowlist, and Kubernetes UID/resourceVersion preconditions.
+- **Closed-loop verification:** after execution, the Verification Agent samples workload health repeatedly and persists the final Incident, proposal, approval, audit, and verification state in PostgreSQL.
+- **Agent observability:** every Eino node emits an OpenTelemetry span. Tool, workflow, and infrastructure failures are separated in Incident and Benchmark results rather than being hidden inside model output.
+- **Ablation-ready design:** the same runner can evaluate `llm-only`, `vector-rag`, and full `kubepilot` paths, making the contribution of retrieval and multi-source agents measurable.
 
 ## Prerequisites
 
