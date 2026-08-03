@@ -27,6 +27,8 @@ type Runner struct {
 	DiagnosisMethod string
 }
 
+const cleanupTimeout = 2 * time.Minute
+
 func (r *Runner) Run(ctx context.Context, items []scenarios.Scenario) []reporter.CaseResult {
 	out := make([]reporter.CaseResult, 0, len(items))
 	for _, s := range items {
@@ -64,11 +66,9 @@ func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter
 	defer func() {
 		res.Duration = time.Since(started)
 		if !cleaned {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := h.RestoreBaseline(cleanupCtx, s); err != nil {
+			if err := restoreAndVerify(h, s); err != nil {
 				res.Status = "cleanup_failed"
-				res.Error = join(res.Error, "baseline restore: "+err.Error())
+				res.Error = join(res.Error, err.Error())
 			}
 		}
 	}()
@@ -134,21 +134,31 @@ func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter
 		}
 		_ = in
 	}
-	if err = h.RestoreBaseline(ctx, s); err != nil {
+	if err = restoreAndVerify(h, s); err != nil {
 		res.Status = "cleanup_failed"
-		res.Error = "baseline restore: " + err.Error()
+		res.Error = err.Error()
 		return res
 	}
 	cleaned = true
-	if err = h.Healthy(ctx, s); err != nil {
-		res.Status = "cleanup_failed"
-		res.Error = "post-cleanup health: " + err.Error()
-		return res
-	}
 	if res.Score.StrictRootCause {
 		res.Status = "passed"
 	}
 	return res
+}
+
+// restoreAndVerify deliberately uses a fresh lifecycle context. A case context
+// may already be expired when fault visibility, diagnosis, or recovery times
+// out, but cleanup must still restore and verify the shared benchmark baseline.
+func restoreAndVerify(h injector.Injector, s scenarios.Scenario) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := h.RestoreBaseline(cleanupCtx, s); err != nil {
+		return fmt.Errorf("baseline restore: %w", err)
+	}
+	if err := h.Healthy(cleanupCtx, s); err != nil {
+		return fmt.Errorf("post-cleanup health: %w", err)
+	}
+	return nil
 }
 func (r *Runner) waitDiagnosis(ctx context.Context, id string) (*domain.Incident, error) {
 	for {

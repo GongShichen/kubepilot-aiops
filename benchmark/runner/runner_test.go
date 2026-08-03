@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/injector"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
@@ -25,5 +26,50 @@ func TestRunner(t *testing.T) {
 	items := (&Runner{Registry: reg, Client: client, PollInterval: time.Millisecond}).Run(context.Background(), []scenarios.Scenario{s})
 	if len(items) != 1 || items[0].Status != "passed" {
 		t.Fatalf("%#v", items)
+	}
+}
+
+type cleanupContextInjector struct {
+	cleanupContextUsable bool
+}
+
+func (f *cleanupContextInjector) Preflight(context.Context, scenarios.Scenario) error { return nil }
+func (f *cleanupContextInjector) Inject(context.Context, scenarios.Scenario) error    { return nil }
+func (f *cleanupContextInjector) Cleanup(context.Context, scenarios.Scenario) error   { return nil }
+func (f *cleanupContextInjector) Healthy(context.Context, scenarios.Scenario) error   { return nil }
+func (f *cleanupContextInjector) RestoreBaseline(ctx context.Context, _ scenarios.Scenario) error {
+	f.cleanupContextUsable = ctx.Err() == nil
+	return nil
+}
+
+type timeoutClient struct{}
+
+func (*timeoutClient) Create(ctx context.Context, _ scenarios.Scenario) (*domain.Incident, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (*timeoutClient) Get(context.Context, string) (*domain.Incident, error) {
+	return nil, errors.New("unexpected get")
+}
+func (*timeoutClient) Approve(context.Context, *domain.Incident) error { return nil }
+
+func TestRunnerCleanupUsesFreshContextAfterCaseTimeout(t *testing.T) {
+	reg := injector.NewRegistry()
+	probe := &cleanupContextInjector{}
+	reg.Register("service_fault", probe)
+	s := scenarios.Scenario{
+		ID: "timeout", Namespace: "kubepilot-benchmark", Service: "gateway-service",
+		Target: "gateway-service", Injector: "service_fault",
+		Timeouts: scenarios.Timeouts{FaultVisible: time.Nanosecond},
+	}
+	result := (&Runner{Registry: reg, Client: &timeoutClient{}}).Run(context.Background(), []scenarios.Scenario{s})
+	if len(result) != 1 {
+		t.Fatalf("expected one result, got %d", len(result))
+	}
+	if !probe.cleanupContextUsable {
+		t.Fatal("cleanup inherited an expired case context")
+	}
+	if result[0].Status == "cleanup_failed" {
+		t.Fatalf("cleanup should succeed with a fresh context: %#v", result[0])
 	}
 }

@@ -52,7 +52,12 @@ func (k *Kubernetes) Preflight(ctx context.Context, s scenarios.Scenario) error 
 	return err
 }
 func (k *Kubernetes) RestoreBaseline(ctx context.Context, s scenarios.Scenario) error {
-	if err := k.Cleanup(ctx, s); err != nil {
+	// Restore Kubernetes resources before contacting an in-process fault
+	// controller. Memory faults can restart every endpoint, so attempting the
+	// proxy call first can consume the entire cleanup deadline while the
+	// workload remains unavailable. normalizeBaseline clears fault state after
+	// the Deployment and Service are back on their known-good definitions.
+	if err := k.cleanup(ctx, s, false); err != nil {
 		return err
 	}
 	return k.normalizeBaseline(ctx, s)
@@ -267,12 +272,18 @@ func applyLowResourceLimit(container *corev1.Container, category string) {
 	container.Resources.Limits[corev1.ResourceCPU] = low
 }
 func (k *Kubernetes) Cleanup(ctx context.Context, s scenarios.Scenario) error {
+	return k.cleanup(ctx, s, true)
+}
+
+func (k *Kubernetes) cleanup(ctx context.Context, s scenarios.Scenario, clearProcessFault bool) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	key := k.key(s)
 	if s.Injector == "service_fault" || s.Injector == "traffic" {
-		if err := k.controlFault(ctx, s.Namespace, s.Service, ""); err != nil {
-			return err
+		if clearProcessFault {
+			if err := k.controlFault(ctx, s.Namespace, s.Service, ""); err != nil {
+				return err
+			}
 		}
 		delete(k.restarts, key)
 	}
