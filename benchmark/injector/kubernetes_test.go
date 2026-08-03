@@ -1,7 +1,11 @@
 package injector
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
 	corev1 "k8s.io/api/core/v1"
@@ -15,6 +19,32 @@ func TestLoadJobNameIsRFC1123(t *testing.T) {
 	}
 	if len(got) > 63 {
 		t.Fatalf("name exceeds 63 characters: %d", len(got))
+	}
+}
+
+func TestRetryServiceProxyWaitsForTransientEndpoint(t *testing.T) {
+	attempts := 0
+	err := retryServiceProxy(context.Background(), func() error {
+		attempts++
+		if attempts < 3 {
+			return fmt.Errorf("no endpoints available for service")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts=%d", attempts)
+	}
+}
+
+func TestRetryServiceProxyStopsOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := retryServiceProxy(ctx, func() error { return fmt.Errorf("no endpoints available for service") })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v", err)
 	}
 }
 

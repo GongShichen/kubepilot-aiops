@@ -10,6 +10,13 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/store"
 )
 
+type blockingCorrelationFallback struct{}
+
+func (blockingCorrelationFallback) Correlate(ctx context.Context, _ domain.Alert, _, _, _ string, _ []domain.Incident) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
 func TestApproveRejectsLegacyWorkflowWithoutEinoCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()
@@ -97,5 +104,21 @@ func TestWorkflowStatusEventIsImmediatelyVisible(t *testing.T) {
 	}
 	if !current.UpdatedAt.Equal(transitionedAt) {
 		t.Fatalf("updated_at=%s", current.UpdatedAt)
+	}
+}
+
+func TestCorrelationFallbackHasIndependentDeadline(t *testing.T) {
+	manager := &IncidentManager{
+		Store:                      store.NewMemoryStore(),
+		Hub:                        NewHub(),
+		CorrelationFallback:        blockingCorrelationFallback{},
+		CorrelationFallbackTimeout: 20 * time.Millisecond,
+	}
+	started := time.Now()
+	if incident := manager.correlate(context.Background(), domain.Alert{}, "gateway", "production", "gateway"); incident != nil {
+		t.Fatal("unexpected correlation")
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("fallback exceeded deadline: %s", elapsed)
 	}
 }

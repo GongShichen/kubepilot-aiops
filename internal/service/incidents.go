@@ -31,6 +31,7 @@ type IncidentManager struct {
 	CorrelationFallback interface {
 		Correlate(context.Context, domain.Alert, string, string, string, []domain.Incident) (string, error)
 	}
+	CorrelationFallbackTimeout time.Duration
 }
 
 func (m *IncidentManager) ObserveWorkflowEvent(ctx context.Context, event workflowgraph.WorkflowEvent) {
@@ -183,7 +184,13 @@ func (m *IncidentManager) correlate(ctx context.Context, alert domain.Alert, ser
 		}
 	}
 	if m.CorrelationFallback != nil {
-		candidateID, fallbackErr := m.CorrelationFallback.Correlate(ctx, alert, service, namespace, resource, items)
+		fallbackTimeout := m.CorrelationFallbackTimeout
+		if fallbackTimeout <= 0 {
+			fallbackTimeout = 5 * time.Second
+		}
+		fallbackCtx, cancel := context.WithTimeout(ctx, fallbackTimeout)
+		candidateID, fallbackErr := m.CorrelationFallback.Correlate(fallbackCtx, alert, service, namespace, resource, items)
+		cancel()
 		if fallbackErr == nil && candidateID != "" {
 			for index := range items {
 				if items[index].ID == candidateID {

@@ -63,11 +63,6 @@ func (k *Kubernetes) RestoreBaseline(ctx context.Context, s scenarios.Scenario) 
 // where fields written by client-go are intentionally not removed by kubectl
 // apply because they belong to a different field manager.
 func (k *Kubernetes) normalizeBaseline(ctx context.Context, s scenarios.Scenario) error {
-	for _, service := range []string{"gateway-service", "order-service", "payment-service"} {
-		if err := k.controlFault(ctx, s.Namespace, service, ""); err != nil {
-			return fmt.Errorf("clear stale in-process fault for %s: %w", service, err)
-		}
-	}
 	selector := "kubepilot.io/scenario"
 	deleteOptions := metav1.DeleteOptions{PropagationPolicy: ptr(metav1.DeletePropagationBackground)}
 	if err := k.client.BatchV1().Jobs(s.Namespace).DeleteCollection(ctx, deleteOptions, metav1.ListOptions{LabelSelector: selector}); err != nil {
@@ -94,6 +89,15 @@ func (k *Kubernetes) normalizeBaseline(ctx context.Context, s scenarios.Scenario
 		return err
 	}); err != nil {
 		return fmt.Errorf("restore MySQL baseline: %w", err)
+	}
+	// A broken selector, failed image, probe, or resource limit can leave the
+	// Service without endpoints. Restore Kubernetes objects before using the
+	// Service proxy to clear process-local fault state, then tolerate the short
+	// endpoint propagation window during rollout.
+	for _, service := range []string{"gateway-service", "order-service", "payment-service"} {
+		if err := k.controlFault(ctx, s.Namespace, service, ""); err != nil {
+			return fmt.Errorf("clear stale in-process fault for %s: %w", service, err)
+		}
 	}
 	return nil
 }
@@ -337,25 +341,54 @@ func (k *Kubernetes) controlFault(ctx context.Context, namespace, service, mode 
 	if token == "" {
 		return fmt.Errorf("benchmark control token is empty")
 	}
-	request := k.client.CoreV1().RESTClient().Delete()
-	if mode != "" {
-		body, marshalErr := json.Marshal(map[string]string{"mode": mode})
-		if marshalErr != nil {
-			return marshalErr
+	err = retryServiceProxy(ctx, func() error {
+		request := k.client.CoreV1().RESTClient().Delete()
+		if mode != "" {
+			body, marshalErr := json.Marshal(map[string]string{"mode": mode})
+			if marshalErr != nil {
+				return marshalErr
+			}
+			request = k.client.CoreV1().RESTClient().Post().Body(body).SetHeader("Content-Type", "application/json")
 		}
-		request = k.client.CoreV1().RESTClient().Post().Body(body).SetHeader("Content-Type", "application/json")
-	}
-	result := request.Namespace(namespace).
-		Resource("services").
-		SubResource("proxy").
-		Name("http:"+service+":http").
-		Suffix("benchmark", "v1", "fault").
-		SetHeader("X-KubePilot-Benchmark-Token", token).
-		Do(ctx)
-	if err = result.Error(); err != nil {
+		return request.Namespace(namespace).
+			Resource("services").
+			SubResource("proxy").
+			Name("http:"+service+":http").
+			Suffix("benchmark", "v1", "fault").
+			SetHeader("X-KubePilot-Benchmark-Token", token).
+			Do(ctx).Error()
+	})
+	if err != nil {
 		return fmt.Errorf("set in-process fault %q on %s: %w", mode, service, err)
 	}
 	return nil
+}
+
+func retryServiceProxy(ctx context.Context, operation func() error) error {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		lastErr = operation()
+		if lastErr == nil || !transientServiceProxyError(lastErr) {
+			return lastErr
+		}
+		delay := min(time.Duration(attempt+1)*250*time.Millisecond, 2*time.Second)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("%w: %v", ctx.Err(), lastErr)
+		case <-timer.C:
+		}
+	}
+}
+
+func transientServiceProxyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return apierrors.IsServiceUnavailable(err) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) ||
+		strings.Contains(message, "no endpoints available") || strings.Contains(message, "service unavailable")
 }
 
 type faultStatus struct {
