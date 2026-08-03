@@ -1,0 +1,46 @@
+- targets: ["host.docker.internal:8443"]
+  labels:
+    __metrics_path__: /api/v1/nodes/minikube/proxy/metrics/cadvisor
+    cluster: kubepilot-local
+- targets: ["host.docker.internal:8443"]
+  labels:
+    __metrics_path__: /api/v1/namespaces/kubepilot-system/services/http:kube-state-metrics:http/proxy/metrics
+    cluster: kubepilot-local
+    namespace: kubepilot-system
+    service: kube-state-metrics
+- targets: ["host.docker.internal:8443"]
+  labels:
+    __metrics_path__: /api/v1/namespaces/kubepilot-demo/services/http:gateway-service:http/proxy/metrics
+    cluster: kubepilot-local
+    namespace: kubepilot-demo
+    service: gateway-service
+- targets: ["host.docker.internal:8443"]
+  labels:
+    __metrics_path__: /api/v1/namespaces/kubepilot-demo/services/http:order-service:http/proxy/metrics
+    cluster: kubepilot-local
+    namespace: kubepilot-demo
+    service: order-service
+- targets: ["host.docker.internal:8443"]
+  labels:
+    __metrics_path__: /api/v1/namespaces/kubepilot-demo/services/http:payment-service:http/proxy/metrics
+    cluster: kubepilot-local
+    namespace: kubepilot-demo
+    service: payment-service
+- targets: ["host.docker.internal:8443"]
+  labels:
+    __metrics_path__: /api/v1/namespaces/kubepilot-benchmark/services/http:gateway-service:http/proxy/metrics
+    cluster: kubepilot-local
+    namespace: kubepilot-benchmark
+    service: gateway-service
+- targets: ["host.docker.internal:8443"]
+  labels:
+    __metrics_path__: /api/v1/namespaces/kubepilot-benchmark/services/http:order-service:http/proxy/metrics
+    cluster: kubepilot-local
+    namespace: kubepilot-benchmark
+    service: order-service
+- targets: ["host.docker.internal:8443"]
+  labels:
+    __metrics_path__: /api/v1/namespaces/kubepilot-benchmark/services/http:payment-service:http/proxy/metrics
+    cluster: kubepilot-local
+    namespace: kubepilot-benchmark
+    service: payment-service

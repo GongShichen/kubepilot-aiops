@@ -1,0 +1,11 @@
+FROM golang:1.26.2-alpine3.23 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/demo-service ./cmd/demo-service
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/demo-service ./cmd/demo-service
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/demo-service /usr/local/bin/demo-service
+USER nonroot:nonroot
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/demo-service"]

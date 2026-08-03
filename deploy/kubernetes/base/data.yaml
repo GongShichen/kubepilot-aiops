@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Secret
+metadata: {name: demo-secrets}
+type: Opaque
+stringData:
+  mysql-root-password: kubepilot-root
+  mysql-user: kubepilot
+  mysql-password: kubepilot
+  benchmark-control-token: kubepilot-benchmark-control-v1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: mysql}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: mysql}}
+  template:
+    metadata: {labels: {app: mysql, service: mysql}}
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4.6
+          env:
+            - {name: MYSQL_DATABASE, value: kubepilot}
+            - {name: MYSQL_USER, valueFrom: {secretKeyRef: {name: demo-secrets, key: mysql-user}}}
+            - {name: MYSQL_PASSWORD, valueFrom: {secretKeyRef: {name: demo-secrets, key: mysql-password}}}
+            - {name: MYSQL_ROOT_PASSWORD, valueFrom: {secretKeyRef: {name: demo-secrets, key: mysql-root-password}}}
+          ports: [{name: mysql, containerPort: 3306}]
+          readinessProbe: {exec: {command: [mysqladmin, ping, -h, 127.0.0.1]}, initialDelaySeconds: 10, periodSeconds: 5}
+          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: "1", memory: 1Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: mysql}
+spec: {selector: {app: mysql}, ports: [{name: mysql, port: 3306, targetPort: mysql}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: redis}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: redis}}
+  template:
+    metadata: {labels: {app: redis, service: redis}}
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4.5-alpine
+          ports: [{name: redis, containerPort: 6379}]
+          readinessProbe: {exec: {command: [redis-cli, ping]}, initialDelaySeconds: 3, periodSeconds: 5}
+          resources: {requests: {cpu: 25m, memory: 32Mi}, limits: {cpu: 250m, memory: 128Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: redis}
+spec: {selector: {app: redis}, ports: [{name: redis, port: 6379, targetPort: redis}]}

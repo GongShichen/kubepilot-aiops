@@ -1,0 +1,13 @@
+.env
+PLAN.md
+.runtime/
+artifacts/
+deploy/docker/prometheus/generated/client.crt
+deploy/docker/prometheus/generated/client.key
+deploy/docker/prometheus/generated/minikube-targets.yml
+bin/
+coverage.out
+*.log
+__pycache__/
+*.pyc
+.DS_Store

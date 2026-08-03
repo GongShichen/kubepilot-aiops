@@ -1,0 +1,23 @@
+groups:
+  - name: kubepilot-demo
+    rules:
+      - alert: HighErrorRate
+        expr: sum by(service,namespace) (rate(http_requests_total{status=~"5.."}[2m])) / clamp_min(sum by(service,namespace) (rate(http_requests_total[2m])), 1) > 0.1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} HTTP 5xx rate is high"
+      - alert: PodRestarting
+        expr: increase(kube_pod_container_status_restarts_total{namespace=~"kubepilot-demo|kubepilot-benchmark"}[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod restart detected"
+      - alert: DeploymentUnavailable
+        expr: kube_deployment_status_replicas_available{namespace=~"kubepilot-demo|kubepilot-benchmark"} < kube_deployment_spec_replicas
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Deployment has unavailable replicas"

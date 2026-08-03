@@ -1,0 +1,119 @@
+openapi: 3.0.3
+info:
+  title: KubePilot-AIOps API
+  version: 0.1.0
+servers: [{url: http://localhost:8080}]
+security: [{bearerAuth: []}]
+paths:
+  /healthz:
+    get: {security: [], responses: {'200': {description: Healthy}}}
+  /readyz:
+    get: {security: [], responses: {'200': {description: Ready}}}
+  /metrics:
+    get: {security: [], responses: {'200': {description: Prometheus metrics}}}
+  /api/v1/alerts/alertmanager:
+    post:
+      summary: Receive Alertmanager webhook
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/AlertmanagerWebhook'}}}}
+      responses: {'202': {description: Accepted}, '401': {description: Unauthorized}}
+  /api/v1/incidents:
+    get:
+      summary: List incidents
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, default: 50}}
+        - {name: offset, in: query, schema: {type: integer, default: 0}}
+      responses: {'200': {description: Incident list}}
+    post:
+      summary: Create a manual incident
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ManualIncident'}}}}
+      responses: {'200': {description: Incident, content: {application/json: {schema: {$ref: '#/components/schemas/Incident'}}}}}
+  /api/v1/incidents/{id}:
+    get:
+      parameters: [{$ref: '#/components/parameters/IncidentID'}]
+      responses: {'200': {description: Incident}, '404': {description: Not found}}
+  /api/v1/incidents/{id}/alerts:
+    get: {parameters: [{$ref: '#/components/parameters/IncidentID'}], responses: {'200': {description: Alerts}}}
+  /api/v1/incidents/{id}/evidence:
+    get: {parameters: [{$ref: '#/components/parameters/IncidentID'}], responses: {'200': {description: Evidence}}}
+  /api/v1/incidents/{id}/events:
+    get: {parameters: [{$ref: '#/components/parameters/IncidentID'}], responses: {'200': {description: Audit events}}}
+  /api/v1/incidents/{id}/stream:
+    get: {parameters: [{$ref: '#/components/parameters/IncidentID'}], responses: {'200': {description: Server-sent events}}}
+  /api/v1/incidents/{id}/approval:
+    post:
+      parameters:
+        - {$ref: '#/components/parameters/IncidentID'}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string}}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Approval'}}}}
+      responses: {'200': {description: Updated incident}, '409': {description: Invalid state}}
+  /api/v1/incidents/{id}/retry:
+    post: {parameters: [{$ref: '#/components/parameters/IncidentID'}], responses: {'200': {description: Diagnosis restarted}, '409': {description: Invalid state}}}
+  /api/v1/model/health:
+    get: {responses: {'200': {description: Redacted model configuration status}}}
+  /api/v1/model/probe:
+    post: {responses: {'200': {description: Model probe passed}, '502': {description: Probe failed}}}
+  /api/v1/benchmarks/runs:
+    get: {responses: {'200': {description: Benchmark runs}}}
+    post:
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [profile], properties: {profile: {type: string, enum: [smoke, standard, robustness, correlation, retrieval, full]}, auto_approve: {type: boolean}}}}}}
+      responses: {'200': {description: Benchmark run created}}
+  /api/v1/benchmarks/runs/{id}:
+    get: {parameters: [{name: id, in: path, required: true, schema: {type: string}}], responses: {'200': {description: Benchmark run}}}
+  /api/v1/benchmarks/runs/{id}/stream:
+    get: {parameters: [{name: id, in: path, required: true, schema: {type: string}}], responses: {'200': {description: Benchmark SSE}}}
+  /api/v1/benchmarks/runs/{id}/cancel:
+    post: {parameters: [{name: id, in: path, required: true, schema: {type: string}}], responses: {'200': {description: Cancellation requested}}}
+  /api/v1/benchmarks/runs/{id}/results:
+    get: {parameters: [{name: id, in: path, required: true, schema: {type: string}}], responses: {'200': {description: Machine-readable results}}}
+  /api/v1/benchmarks/runs/{id}/artifacts:
+    get: {parameters: [{name: id, in: path, required: true, schema: {type: string}}], responses: {'200': {description: Artifact manifest}}}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    IncidentID: {name: id, in: path, required: true, schema: {type: string}}
+  schemas:
+    ManualIncident:
+      type: object
+      required: [service, namespace, summary]
+      properties:
+        severity: {type: string}
+        service: {type: string}
+        namespace: {type: string}
+        resource: {type: string}
+        summary: {type: string}
+        diagnosis_method: {type: string, enum: [llm-only, vector-rag, kubepilot], default: kubepilot}
+        evidence_start_at: {type: string, format: date-time, description: Optional start of the incident observation window}
+    Approval:
+      type: object
+      required: [proposal_id, decision]
+      properties:
+        proposal_id: {type: string}
+        decision: {type: string, enum: [approve, reject]}
+        comment: {type: string}
+    Incident:
+      type: object
+      required: [id, status, service, namespace, created_at]
+      properties:
+        id: {type: string}
+        status: {type: string}
+        severity: {type: string}
+        service: {type: string}
+        namespace: {type: string}
+        resource: {type: string}
+        summary: {type: string}
+        diagnosis_method: {type: string, enum: [llm-only, vector-rag, kubepilot]}
+        diagnosis_error: {type: string, description: Workflow failure kept separate from an incorrect diagnosis}
+        evidence_start_at: {type: string, format: date-time}
+        root_cause: {type: string}
+        root_cause_category: {type: string, enum: [cpu, memory, database, network, deployment]}
+        root_cause_variant: {type: string, description: Exact benchmark taxonomy variant selected by the diagnosis agent}
+        root_cause_evidence_ids: {type: array, items: {type: string}}
+        confidence: {type: number}
+        created_at: {type: string, format: date-time}
+    AlertmanagerWebhook:
+      type: object
+      required: [status, alerts]
+      properties:
+        status: {type: string}
+        alerts: {type: array, items: {type: object}}

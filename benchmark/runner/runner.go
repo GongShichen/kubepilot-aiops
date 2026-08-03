@@ -1,0 +1,201 @@
+package runner
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/kubepilot-aiops/kubepilot/benchmark/injector"
+	"github.com/kubepilot-aiops/kubepilot/benchmark/reporter"
+	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
+	"github.com/kubepilot-aiops/kubepilot/benchmark/scorer"
+	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+)
+
+type IncidentClient interface {
+	Create(context.Context, scenarios.Scenario) (*domain.Incident, error)
+	Get(context.Context, string) (*domain.Incident, error)
+	Approve(context.Context, *domain.Incident) error
+}
+type Runner struct {
+	Registry        *injector.Registry
+	Client          IncidentClient
+	AutoApprove     bool
+	PollInterval    time.Duration
+	OnResult        func(reporter.CaseResult)
+	DiagnosisMethod string
+}
+
+func (r *Runner) Run(ctx context.Context, items []scenarios.Scenario) []reporter.CaseResult {
+	out := make([]reporter.CaseResult, 0, len(items))
+	for _, s := range items {
+		if ctx.Err() != nil {
+			break
+		}
+		caseCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		result := r.runOne(caseCtx, s)
+		cancel()
+		// A process-level interruption is not a completed benchmark case. The
+		// deferred baseline restore has already run, so omit the partial result
+		// and let a supervised resume execute the same case from the beginning.
+		if ctx.Err() != nil && result.Status != "cleanup_failed" {
+			break
+		}
+		out = append(out, result)
+		if r.OnResult != nil {
+			r.OnResult(result)
+		}
+		if result.Status == "cleanup_failed" {
+			break
+		}
+	}
+	return out
+}
+func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter.CaseResult) {
+	started := time.Now()
+	res = reporter.CaseResult{CaseID: s.ID, Category: s.Category, Status: "failed", DiagnosisMethod: r.DiagnosisMethod}
+	h, err := r.Registry.Get(s.Injector)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	cleaned := false
+	defer func() {
+		res.Duration = time.Since(started)
+		if !cleaned {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := h.RestoreBaseline(cleanupCtx, s); err != nil {
+				res.Status = "cleanup_failed"
+				res.Error = join(res.Error, "baseline restore: "+err.Error())
+			}
+		}
+	}()
+	if err = h.Preflight(ctx, s); err != nil {
+		res.Error = "preflight: " + err.Error()
+		return res
+	}
+	if err = h.RestoreBaseline(ctx, s); err != nil {
+		res.Error = "baseline: " + err.Error()
+		return res
+	}
+	if err = h.Healthy(ctx, s); err != nil {
+		res.Error = "unhealthy baseline: " + err.Error()
+		return res
+	}
+	if err = h.Inject(ctx, s); err != nil {
+		res.Error = "inject: " + err.Error()
+		return res
+	}
+	faultCtx, cancel := context.WithTimeout(ctx, s.Timeouts.FaultVisible)
+	defer cancel()
+	if waiter, ok := h.(interface {
+		WaitVisible(context.Context, scenarios.Scenario) error
+	}); ok {
+		if err = waiter.WaitVisible(faultCtx, s); err != nil {
+			res.Error = "fault visibility: " + err.Error()
+			return res
+		}
+	}
+	in, err := r.Client.Create(faultCtx, s)
+	if err != nil {
+		res.Error = "create incident: " + err.Error()
+		return res
+	}
+	res.IncidentID = in.ID
+	diagnosisCtx, diagnosisCancel := context.WithTimeout(ctx, s.Timeouts.Diagnosis)
+	defer diagnosisCancel()
+	in, err = r.waitDiagnosis(diagnosisCtx, in.ID)
+	if err != nil {
+		res.Error = "diagnosis: " + err.Error()
+		return res
+	}
+	res.Score = scorer.Incident(s, in)
+	res.RootCauseCategory = in.RootCauseCategory
+	res.RootCauseVariant = in.RootCauseVariant
+	res.Service = in.Service
+	res.Resource = in.Resource
+	res.Confidence = in.Confidence
+	if in.DiagnosisError != "" {
+		res.Error = "diagnosis workflow: " + in.DiagnosisError
+	}
+	if r.AutoApprove && res.Score.DecisionCorrect && in.Status == domain.StatusAwaitingApproval {
+		if err = r.Client.Approve(ctx, in); err != nil {
+			res.Error = "approve: " + err.Error()
+			return res
+		}
+		recoveryCtx, recoveryCancel := context.WithTimeout(ctx, s.Timeouts.Recovery)
+		defer recoveryCancel()
+		in, err = r.waitFinal(recoveryCtx, in.ID)
+		if err != nil {
+			res.Error = "recovery: " + err.Error()
+			return res
+		}
+		_ = in
+	}
+	if err = h.RestoreBaseline(ctx, s); err != nil {
+		res.Status = "cleanup_failed"
+		res.Error = "baseline restore: " + err.Error()
+		return res
+	}
+	cleaned = true
+	if err = h.Healthy(ctx, s); err != nil {
+		res.Status = "cleanup_failed"
+		res.Error = "post-cleanup health: " + err.Error()
+		return res
+	}
+	if res.Score.StrictRootCause {
+		res.Status = "passed"
+	}
+	return res
+}
+func (r *Runner) waitDiagnosis(ctx context.Context, id string) (*domain.Incident, error) {
+	for {
+		in, err := r.Client.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		switch in.Status {
+		case domain.StatusAwaitingApproval, domain.StatusNeedsAttention, domain.StatusRejected, domain.StatusRecoveryFailed, domain.StatusResolved:
+			return in, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(r.interval()):
+		}
+	}
+}
+func (r *Runner) waitFinal(ctx context.Context, id string) (*domain.Incident, error) {
+	for {
+		in, err := r.Client.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		switch in.Status {
+		case domain.StatusResolved, domain.StatusRecoveryFailed, domain.StatusRejected:
+			return in, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(r.interval()):
+		}
+	}
+}
+func (r *Runner) interval() time.Duration {
+	if r.PollInterval <= 0 {
+		return time.Second
+	}
+	return r.PollInterval
+}
+func join(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + "; " + b
+}
+
+var _ = errors.Is
+var _ = fmt.Sprint

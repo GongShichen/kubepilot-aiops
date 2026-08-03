@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: kubepilot-agent}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: kubepilot-agent}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, services, endpoints, configmaps]
+    verbs: [get, list, watch, patch, update]
+  - apiGroups: [apps]
+    resources: [deployments, deployments/scale, replicasets]
+    verbs: [get, list, watch, patch, update]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, create, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, create, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kubepilot-agent}
+subjects: [{kind: ServiceAccount, name: kubepilot-agent}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: kubepilot-agent}

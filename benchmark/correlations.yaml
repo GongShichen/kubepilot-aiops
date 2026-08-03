@@ -1,0 +1,14 @@
+version: "1"
+groups: 100
+min_alerts: 2
+max_alerts: 8
+seed: 20260803
+patterns:
+  - same_fault_multi_source
+  - upstream_propagation
+  - unrelated_temporal_noise
+  - duplicate_firing
+  - resolved_notification
+  - different_revision
+  - same_namespace_different_service
+  - shared_database_fanout

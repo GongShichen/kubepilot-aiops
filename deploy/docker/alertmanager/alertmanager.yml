@@ -1,0 +1,15 @@
+route:
+  receiver: kubepilot
+  group_by: [alertname, namespace, service, deployment]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 5m
+receivers:
+  - name: kubepilot
+    webhook_configs:
+      - url: http://kubepilot-agent:8080/api/v1/alerts/alertmanager
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials: change-alert-token

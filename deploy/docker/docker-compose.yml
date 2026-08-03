@@ -1,0 +1,217 @@
+name: kubepilot
+services:
+  drain3-init:
+    image: busybox:1.37.0
+    command: [sh, -c, "chown -R 65532:65532 /data"]
+    user: "0:0"
+    volumes: [drain3-data:/data]
+
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: kubepilot
+      POSTGRES_PASSWORD: kubepilot
+      POSTGRES_DB: kubepilot
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U kubepilot]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  agent-redis:
+    image: redis:7.4.5-alpine
+    command: [redis-server, --appendonly, "yes"]
+    volumes: [agent-redis-data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  drain3:
+    image: kubepilot/drain3:0.1.0
+    build:
+      context: ../../drain3-sidecar
+    environment:
+      DRAIN3_TOKEN: ${DRAIN3_TOKEN:-change-drain3-token}
+      DRAIN3_STATE_PATH: /data/drain3.bin
+    volumes: [drain3-data:/data]
+    depends_on:
+      drain3-init: {condition: service_completed_successfully}
+    ports: ["8081:8081", "8082:8082", "9091:9091"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8082/readyz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Retrieval benchmark parser uses ephemeral state and is force-recreated for
+  # every formal run. This keeps clustering independent from Agent logs and
+  # earlier benchmark attempts.
+  drain3-benchmark:
+    profiles: [benchmark]
+    image: kubepilot/drain3:0.1.0
+    build:
+      context: ../../drain3-sidecar
+    environment:
+      DRAIN3_TOKEN: ${DRAIN3_TOKEN:-change-drain3-token}
+      DRAIN3_STATE_PATH: /tmp/drain3-benchmark.bin
+    ports: ["8181:8081", "8182:8082", "9191:9091"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8082/readyz')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  loki-benchmark:
+    profiles: [benchmark]
+    image: grafana/loki:3.7.4
+    command: [-config.file=/etc/loki/loki.yml]
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - retrieval-loki-data:/loki
+    ports: ["${RETRIEVAL_LOKI_PORT:-3200}:3100"]
+
+  etcd-benchmark:
+    profiles: [benchmark]
+    image: quay.io/coreos/etcd:v3.5.18
+    command: [etcd, --advertise-client-urls=http://etcd-benchmark:2379, --listen-client-urls=http://0.0.0.0:2379]
+    volumes: [retrieval-etcd-data:/etcd]
+
+  minio-benchmark:
+    profiles: [benchmark]
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: [minio, server, /minio_data]
+    environment:
+      MINIO_ACCESS_KEY: retrievalminio
+      MINIO_SECRET_KEY: retrievalminio
+    volumes: [retrieval-minio-data:/minio_data]
+
+  milvus-benchmark:
+    profiles: [benchmark]
+    image: milvusdb/milvus:v3.0.0
+    command: [milvus, run, standalone]
+    environment:
+      ETCD_ENDPOINTS: etcd-benchmark:2379
+      MINIO_ADDRESS: minio-benchmark:9000
+    depends_on: [etcd-benchmark, minio-benchmark]
+    volumes: [retrieval-milvus-data:/var/lib/milvus]
+    ports: ["${RETRIEVAL_MILVUS_PORT:-19531}:19530", "${RETRIEVAL_MILVUS_HEALTH_PORT:-9094}:9091"]
+
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=7d, --web.enable-lifecycle]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - ./prometheus/generated:/etc/prometheus/generated:ro
+      - prometheus-data:/prometheus
+    ports: ["9090:9090"]
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command: [--config.file=/etc/alertmanager/alertmanager.yml]
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    ports: ["9093:9093"]
+
+  loki:
+    image: grafana/loki:3.7.4
+    command: [-config.file=/etc/loki/loki.yml]
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    ports: ["3100:3100"]
+
+  jaeger:
+    image: jaegertracing/jaeger:2.20.0
+    command: [--config, /etc/jaeger/jaeger.yml]
+    volumes:
+      - ./jaeger/jaeger.yml:/etc/jaeger/jaeger.yml:ro
+    ports: ["16686:16686", "4317:4317", "4318:4318", "13133:13133"]
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    command: [etcd, --advertise-client-urls=http://etcd:2379, --listen-client-urls=http://0.0.0.0:2379]
+    volumes: [etcd-data:/etcd]
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: [minio, server, /minio_data, --console-address, :9001]
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes: [minio-data:/minio_data]
+    ports: ["9001:9001"]
+
+  milvus:
+    image: milvusdb/milvus:v3.0.0
+    command: [milvus, run, standalone]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    depends_on: [etcd, minio]
+    volumes: [milvus-data:/var/lib/milvus]
+    ports: ["19530:19530", "9092:9091"]
+
+  grafana:
+    image: grafana/grafana:13.1.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-kubepilot}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+
+  kubepilot-agent:
+    image: kubepilot/agent:0.1.0
+    build:
+      context: ../..
+    env_file:
+      - path: ../../.env.example
+      - path: ../../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://kubepilot:kubepilot@postgres:5432/kubepilot?sslmode=disable
+      REDIS_URL: redis://agent-redis:6379/0
+      PROMETHEUS_URL: http://prometheus:9090
+      LOKI_URL: http://loki:3100
+      JAEGER_URL: http://jaeger:16686
+      MILVUS_ADDRESS: milvus:19530
+      HISTORY_COLLECTION: ${HISTORY_COLLECTION:-kubepilot_history_v2}
+      DRAIN3_WS_URL: ws://drain3:8081/ws/v1/parse
+      OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+      KUBECONFIG: /runtime/kubeconfig
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ../../.runtime/kubeconfig:/runtime/kubeconfig:ro
+      - ../../artifacts:/app/artifacts
+    depends_on:
+      postgres: {condition: service_healthy}
+      agent-redis: {condition: service_healthy}
+      drain3: {condition: service_healthy}
+    ports: ["8080:8080"]
+
+volumes:
+  postgres-data:
+  agent-redis-data:
+  drain3-data:
+  prometheus-data:
+  alertmanager-data:
+  loki-data:
+  grafana-data:
+  etcd-data:
+  minio-data:
+  milvus-data:
+  retrieval-loki-data:
+  retrieval-etcd-data:
+  retrieval-minio-data:
+  retrieval-milvus-data:

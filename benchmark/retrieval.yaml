@@ -1,0 +1,13 @@
+version: "1"
+seed: 20260803
+records: 500000
+queries: 500
+normal_ratio: 0.8
+fault_templates: 100
+normal_templates: 50
+batch_size: 500
+strategies:
+  - loki_keyword
+  - milvus_semantic
+  - hybrid
+metrics: [recall_at_1, recall_at_5, recall_at_10, mrr, p50, p95, p99]

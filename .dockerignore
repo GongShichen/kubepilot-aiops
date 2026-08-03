@@ -1,0 +1,11 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.runtime
+artifacts
+coverage.out
+*.log
+**/__pycache__
+**/*.pyc

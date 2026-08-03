@@ -1,0 +1,127 @@
+version: "1"
+namespace: kubepilot-benchmark
+defaults:
+  fault_visible: 90s
+  diagnosis: 180s
+  recovery: 120s
+categories:
+  - name: cpu
+    repetitions: 5
+    variants:
+      - name: busy_loop
+        injector: service_fault
+        root_cause: uncontrolled CPU busy loop
+        required_evidence: [cpu, p95_latency, trace]
+        allowed_actions: [scale_deployment, restart_pod]
+      - name: cpu_limit_low
+        injector: resource_patch
+        root_cause: CPU limit configured below workload demand
+        required_evidence: [cpu, cpu_throttling, kubernetes]
+        allowed_actions: [rollback_deployment, scale_deployment]
+      - name: traffic_overload
+        injector: traffic
+        root_cause: request traffic exceeds service capacity
+        required_evidence: [qps, cpu, p95_latency]
+        allowed_actions: [scale_deployment]
+      - name: worker_fanout
+        injector: service_fault
+        root_cause: unbounded worker concurrency
+        required_evidence: [cpu, log_template, trace]
+        allowed_actions: [restart_pod, rollback_deployment]
+  - name: memory
+    repetitions: 5
+    variants:
+      - name: memory_leak
+        injector: service_fault
+        root_cause: continuously retained memory
+        required_evidence: [memory, log_template, kubernetes]
+        allowed_actions: [restart_pod, rollback_deployment]
+      - name: memory_burst
+        injector: service_fault
+        root_cause: burst allocation exceeds memory limit
+        required_evidence: [memory, restarts, kubernetes]
+        allowed_actions: [restart_pod]
+      - name: unbounded_cache
+        injector: service_fault
+        root_cause: application cache has no capacity bound
+        required_evidence: [memory, log_template, trace]
+        allowed_actions: [restart_pod, rollback_deployment]
+      - name: memory_limit_low
+        injector: resource_patch
+        root_cause: memory limit configured below steady-state usage
+        required_evidence: [memory, restarts, kubernetes]
+        allowed_actions: [rollback_deployment]
+  - name: database
+    repetitions: 5
+    variants:
+      - name: pool_exhausted
+        injector: service_fault
+        root_cause: database connection pool exhausted
+        required_evidence: [log_template, error_rate, trace]
+        allowed_actions: [restart_pod, rollback_deployment]
+      - name: mysql_unavailable
+        injector: dependency_scale
+        root_cause: MySQL workload unavailable
+        required_evidence: [kubernetes, log_template, trace]
+        allowed_actions: [restart_pod]
+      - name: invalid_credentials
+        injector: config_patch
+        root_cause: invalid database credentials
+        required_evidence: [log_template, kubernetes, error_rate]
+        allowed_actions: [rollback_deployment]
+      - name: lock_wait
+        injector: service_fault
+        root_cause: database lock wait causes request timeout
+        required_evidence: [p95_latency, log_template, trace]
+        allowed_actions: [restart_pod]
+  - name: network
+    repetitions: 5
+    variants:
+      - name: network_policy_deny
+        injector: network_policy
+        root_cause: NetworkPolicy denies downstream traffic
+        required_evidence: [kubernetes, log_template, trace]
+        allowed_actions: [rollback_deployment]
+      - name: selector_mismatch
+        injector: service_patch
+        root_cause: Service selector does not match healthy pods
+        required_evidence: [kubernetes, error_rate, trace]
+        allowed_actions: [rollback_deployment]
+      - name: wrong_port
+        injector: service_patch
+        root_cause: Service routes to an invalid target port
+        required_evidence: [kubernetes, log_template, trace]
+        allowed_actions: [rollback_deployment]
+      - name: downstream_timeout
+        injector: service_fault
+        root_cause: downstream network latency exceeds timeout
+        required_evidence: [p95_latency, log_template, trace]
+        allowed_actions: [restart_pod, rollback_deployment]
+  - name: deployment
+    repetitions: 4
+    variants:
+      - name: bad_image
+        injector: deployment_patch
+        root_cause: deployment references an unavailable image
+        required_evidence: [kubernetes, unavailable_replicas]
+        allowed_actions: [rollback_deployment]
+      - name: faulty_v2
+        injector: deployment_patch
+        root_cause: newly deployed application revision is faulty
+        required_evidence: [deployment_revision, error_rate, log_template]
+        allowed_actions: [rollback_deployment]
+      - name: probe_failure
+        injector: deployment_patch
+        root_cause: health probe configuration rejects healthy process
+        required_evidence: [kubernetes, unavailable_replicas]
+        allowed_actions: [rollback_deployment]
+      - name: invalid_config
+        injector: config_patch
+        root_cause: deployment configuration is invalid
+        required_evidence: [kubernetes, log_template]
+        allowed_actions: [rollback_deployment]
+      - name: revision_regression
+        injector: deployment_patch
+        root_cause: current deployment revision regressed
+        required_evidence: [deployment_revision, error_rate, trace]
+        allowed_actions: [rollback_deployment]

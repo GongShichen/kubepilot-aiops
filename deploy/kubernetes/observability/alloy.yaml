@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: Namespace
+metadata: {name: kubepilot-system}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: alloy, namespace: kubepilot-system}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: kubepilot-alloy}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, namespaces, nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: kubepilot-alloy}
+subjects: [{kind: ServiceAccount, name: alloy, namespace: kubepilot-system}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kubepilot-alloy}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: alloy-config, namespace: kubepilot-system}
+data:
+  config.alloy: |
+    logging {
+      level  = "info"
+      format = "logfmt"
+    }
+    discovery.kubernetes "pods" {
+      role = "pod"
+    }
+    discovery.relabel "kubepilot" {
+      targets = discovery.kubernetes.pods.targets
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        regex         = "kubepilot-(demo|benchmark)"
+        action        = "keep"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_service"]
+        target_label  = "service"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "pod"
+      }
+    }
+    loki.source.kubernetes "pods" {
+      targets = discovery.relabel.kubepilot.output
+      forward_to = [loki.write.local.receiver]
+    }
+    loki.write "local" {
+      endpoint {
+        url = "http://host.minikube.internal:3100/loki/api/v1/push"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: alloy, namespace: kubepilot-system}
+spec:
+  selector: {matchLabels: {app: alloy}}
+  template:
+    metadata: {labels: {app: alloy}}
+    spec:
+      serviceAccountName: alloy
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.11.0
+          args: [run, /etc/alloy/config.alloy, --server.http.listen-addr=0.0.0.0:12345]
+          volumeMounts: [{name: config, mountPath: /etc/alloy}]
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 300m, memory: 256Mi}}
+      volumes:
+        - name: config
+          configMap: {name: alloy-config}

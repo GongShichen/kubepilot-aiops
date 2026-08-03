@@ -1,0 +1,130 @@
+version: "1"
+namespace: kubepilot-benchmark
+services: [gateway-service, order-service, payment-service]
+incidents:
+  - id: compute-spin-legacy
+    category: cpu
+    variant: busy_loop
+    observations: ["CPU stayed saturated while request volume remained flat", "profiles showed application threads continuously runnable"]
+    root_cause: "a compute loop failed to yield after an error path"
+    recovery: restart_pod
+  - id: compute-quota-legacy
+    category: cpu
+    variant: cpu_limit_low
+    observations: ["container throttling rose with stable traffic", "latency followed throttled CPU time"]
+    root_cause: "the workload CPU quota was below its normal processing requirement"
+    recovery: rollback_deployment
+  - id: capacity-surge-legacy
+    category: cpu
+    variant: traffic_overload
+    observations: ["request rate exceeded the prior capacity envelope", "CPU and queueing latency increased together"]
+    root_cause: "incoming demand exceeded available service capacity"
+    recovery: scale_deployment
+  - id: goroutine-growth-legacy
+    category: cpu
+    variant: worker_fanout
+    observations: ["worker count expanded without a matching rise in completed work", "concurrent background activity consumed CPU"]
+    root_cause: "worker creation was not bounded by a concurrency limit"
+    recovery: restart_pod
+  - id: retained-heap-legacy
+    category: memory
+    variant: memory_leak
+    observations: ["working-set memory increased monotonically across quiet intervals", "heap objects remained reachable after requests completed"]
+    root_cause: "application objects were retained beyond their intended lifetime"
+    recovery: restart_pod
+  - id: allocation-spike-legacy
+    category: memory
+    variant: memory_burst
+    observations: ["a short allocation spike preceded container termination", "the replacement container started with a low working set"]
+    root_cause: "a burst allocation exceeded the container memory envelope"
+    recovery: restart_pod
+  - id: cache-growth-legacy
+    category: memory
+    variant: unbounded_cache
+    observations: ["memory tracked the number of distinct keys", "no eviction events occurred as the cache grew"]
+    root_cause: "an in-process cache had no capacity or eviction bound"
+    recovery: rollback_deployment
+  - id: memory-quota-legacy
+    category: memory
+    variant: memory_limit_low
+    observations: ["containers restarted near the configured memory ceiling", "steady-state demand was higher than the declared limit"]
+    root_cause: "the deployment memory limit was lower than normal steady-state usage"
+    recovery: rollback_deployment
+  - id: db-pool-legacy
+    category: database
+    variant: pool_exhausted
+    observations: ["requests waited while all database leases were active", "acquisition deadlines expired before a connection became free"]
+    root_cause: "the database connection pool had no available connections"
+    recovery: restart_pod
+  - id: db-workload-down-legacy
+    category: database
+    variant: mysql_unavailable
+    observations: ["database endpoints disappeared", "client spans ended before a server-side database span existed"]
+    root_cause: "the MySQL workload had no available serving instance"
+    recovery: restart_pod
+  - id: db-auth-legacy
+    category: database
+    variant: invalid_credentials
+    observations: ["new database sessions were rejected during authentication", "the failure began after a configuration revision"]
+    root_cause: "the application database credentials were not accepted"
+    recovery: rollback_deployment
+  - id: db-lock-legacy
+    category: database
+    variant: lock_wait
+    observations: ["transaction duration accumulated in lock wait", "upstream requests timed out with database sessions still open"]
+    root_cause: "a conflicting transaction held locks beyond the request deadline"
+    recovery: restart_pod
+  - id: egress-policy-legacy
+    category: network
+    variant: network_policy_deny
+    observations: ["a newly active egress policy selected the calling pods", "downstream connections stopped while endpoints remained ready"]
+    root_cause: "network policy rules denied the required downstream flow"
+    recovery: rollback_deployment
+  - id: endpoint-selection-legacy
+    category: network
+    variant: selector_mismatch
+    observations: ["the Service had no ready endpoint addresses", "ready application pods carried labels outside the Service selector"]
+    root_cause: "the Service selector did not match the intended pods"
+    recovery: rollback_deployment
+  - id: service-port-legacy
+    category: network
+    variant: wrong_port
+    observations: ["endpoints were present but connections reached a port with no listener", "the Service target port differed from the container port"]
+    root_cause: "the Service routed traffic to an invalid target port"
+    recovery: rollback_deployment
+  - id: remote-timeout-legacy
+    category: network
+    variant: downstream_timeout
+    observations: ["client spans consumed the full downstream deadline", "the callee remained healthy but responses arrived too late"]
+    root_cause: "downstream response latency exceeded the caller timeout"
+    recovery: restart_pod
+  - id: image-fetch-legacy
+    category: deployment
+    variant: bad_image
+    observations: ["new pods remained waiting during image acquisition", "the referenced image could not be resolved by the runtime"]
+    root_cause: "the deployment referenced an unavailable container image"
+    recovery: rollback_deployment
+  - id: release-defect-legacy
+    category: deployment
+    variant: faulty_v2
+    observations: ["errors began on pods from a new revision", "the previous revision did not reproduce the handler failure"]
+    root_cause: "the newly released application revision contained a runtime defect"
+    recovery: rollback_deployment
+  - id: healthcheck-legacy
+    category: deployment
+    variant: probe_failure
+    observations: ["the process served its internal health endpoint while Kubernetes marked it unready", "probe events referenced a mismatched path or threshold"]
+    root_cause: "the deployment health probe configuration rejected a working process"
+    recovery: rollback_deployment
+  - id: runtime-settings-legacy
+    category: deployment
+    variant: invalid_config
+    observations: ["request handling failed immediately after a configuration change", "pods stayed running but initialization-dependent operations were unavailable"]
+    root_cause: "the active deployment configuration was invalid for the application"
+    recovery: rollback_deployment
+  - id: revision-regression-legacy
+    category: deployment
+    variant: revision_regression
+    observations: ["service-level errors correlated with the current rollout revision", "traffic shifted back to the preceding revision recovered behavior"]
+    root_cause: "the current deployment revision regressed previously working behavior"
+    recovery: rollback_deployment

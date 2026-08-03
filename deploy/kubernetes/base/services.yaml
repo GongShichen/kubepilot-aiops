@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: gateway-service}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: gateway-service}}
+  template:
+    metadata: {labels: {app: gateway-service, service: gateway-service}}
+    spec:
+      containers:
+        - name: gateway
+          image: kubepilot/demo-service:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: SERVICE_NAME, value: gateway-service}
+            - {name: BENCHMARK_CONTROL_TOKEN, valueFrom: {secretKeyRef: {name: demo-secrets, key: benchmark-control-token}}}
+            - {name: ORDER_URL, value: "http://order-service:8080/orders"}
+            - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "host.minikube.internal:4317"}
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /readyz, port: http}, initialDelaySeconds: 2, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, initialDelaySeconds: 5, periodSeconds: 10}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: gateway-service, labels: {service: gateway-service}}
+spec: {selector: {app: gateway-service}, ports: [{name: http, port: 8080, targetPort: http}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: order-service}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: order-service}}
+  template:
+    metadata: {labels: {app: order-service, service: order-service}}
+    spec:
+      containers:
+        - name: order
+          image: kubepilot/demo-service:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: SERVICE_NAME, value: order-service}
+            - {name: BENCHMARK_CONTROL_TOKEN, valueFrom: {secretKeyRef: {name: demo-secrets, key: benchmark-control-token}}}
+            - {name: PAYMENT_URL, value: "http://payment-service:8080/pay"}
+            - {name: REDIS_ADDR, value: "redis:6379"}
+            - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "host.minikube.internal:4317"}
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /readyz, port: http}, initialDelaySeconds: 2, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, initialDelaySeconds: 5, periodSeconds: 10}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: order-service, labels: {service: order-service}}
+spec: {selector: {app: order-service}, ports: [{name: http, port: 8080, targetPort: http}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: payment-service}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: payment-service}}
+  template:
+    metadata: {labels: {app: payment-service, service: payment-service}}
+    spec:
+      containers:
+        - name: payment
+          image: kubepilot/demo-service:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: SERVICE_NAME, value: payment-service}
+            - {name: BENCHMARK_CONTROL_TOKEN, valueFrom: {secretKeyRef: {name: demo-secrets, key: benchmark-control-token}}}
+            - {name: DB_ADDR, value: "mysql:3306"}
+            - {name: DB_NAME, value: kubepilot}
+            - {name: DB_USER, valueFrom: {secretKeyRef: {name: demo-secrets, key: mysql-user}}}
+            - {name: DB_PASSWORD, valueFrom: {secretKeyRef: {name: demo-secrets, key: mysql-password}}}
+            - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "host.minikube.internal:4317"}
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /readyz, port: http}, initialDelaySeconds: 2, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, initialDelaySeconds: 5, periodSeconds: 10}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: payment-service, labels: {service: payment-service}}
+spec: {selector: {app: payment-service}, ports: [{name: http, port: 8080, targetPort: http}]}
