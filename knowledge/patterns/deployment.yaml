@@ -1,0 +1,8 @@
+patterns:
+  - id: deployment-regression
+    category: deployment
+    cause: deployment_regression
+    chain: [new_revision, probe_failure, pod_unready, request_error]
+    required_evidence: [kubernetes_event, deployment_status]
+    contradictions: [rollout_healthy]
+    confidence: 0.86

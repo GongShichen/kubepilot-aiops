@@ -4,7 +4,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/kubepilot-aiops/kubepilot/internal/causal"
+	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	"github.com/kubepilot-aiops/kubepilot/internal/topology"
 )
 
 type Collector interface {
@@ -26,6 +29,11 @@ type WorkflowState struct {
 	CandidateLists     map[string][]domain.RetrievalCandidate `json:"candidate_lists,omitempty"`
 	Candidates         []domain.RetrievalCandidate            `json:"candidates,omitempty"`
 	CausalPatterns     []domain.CausalPattern                 `json:"causal_patterns,omitempty"`
+	IncidentGraph      *topology.IncidentGraph                `json:"incident_graph,omitempty"`
+	CausalMatches      []causal.PatternMatch                  `json:"causal_matches,omitempty"`
+	CausalEvidence     []causal.HypothesisCausalEvidence      `json:"causal_evidence,omitempty"`
+	CausalProposal     *causalknowledge.Proposal              `json:"causal_proposal,omitempty"`
+	CausalValidation   *causalknowledge.ValidationResult      `json:"causal_validation,omitempty"`
 	HypothesisDrafts   []domain.HypothesisDraft               `json:"hypothesis_drafts,omitempty"`
 	VerifiedHypotheses []domain.VerifiedHypothesis            `json:"verified_hypotheses,omitempty"`
 	DiagnosisLedger    domain.DiagnosisLedger                 `json:"diagnosis_ledger"`
@@ -77,6 +85,19 @@ type VerificationState struct {
 	StartedAt          time.Time `json:"started_at,omitempty"`
 	ConsecutiveSuccess int       `json:"consecutive_success"`
 	Attempts           int       `json:"attempts"`
+}
+
+type graphBuildRequest struct{}
+
+type causalPathRequest struct {
+	PatternID    string `json:"pattern_id,omitempty"`
+	HypothesisID string `json:"hypothesis_id,omitempty"`
+}
+
+type causalPatternProposalRequest struct {
+	Cause       string   `json:"cause" jsonschema:"required"`
+	Path        []string `json:"causal_path" jsonschema:"required,minItems=2"`
+	EvidenceIDs []string `json:"evidence_ids" jsonschema:"required,minItems=2"`
 }
 type Executor interface {
 	Execute(context.Context, *domain.Incident, domain.RecoveryProposal) error

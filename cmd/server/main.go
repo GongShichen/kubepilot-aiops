@@ -7,12 +7,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/kubepilot-aiops/kubepilot/agent"
 	"github.com/kubepilot-aiops/kubepilot/internal/api"
+	"github.com/kubepilot-aiops/kubepilot/internal/causal"
+	causaldiscovery "github.com/kubepilot-aiops/kubepilot/internal/causal/discovery"
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	llm "github.com/kubepilot-aiops/kubepilot/internal/model"
@@ -67,6 +70,14 @@ func main() {
 	if err = pg.SeedCausalPatterns(ctx, patternSeed.Patterns); err != nil {
 		slog.Error("seed causal patterns", "error", err)
 		os.Exit(1)
+	}
+	causalMatcher := causal.DefaultMatcher()
+	if paths, globErr := filepath.Glob(filepath.Join(cfg.Reasoning.CausalPatternDirectory, "*.yaml")); globErr == nil && len(paths) > 0 {
+		if loaded, loadErr := causal.Load(paths...); loadErr == nil {
+			causalMatcher = loaded
+		} else {
+			slog.Warn("load topology causal patterns failed; using built-in patterns", "error", loadErr)
+		}
 	}
 	redisStore, err := store.NewRedis(cfg.RedisURL)
 	if err != nil {
@@ -149,12 +160,18 @@ func main() {
 	}
 	var neuralReranker rerankerclient.Service = hotReranker
 	go hotReranker.Run(ctx)
-	supervisor, err := agent.NewSupervisor(ctx, agent.SupervisorDeps{Collectors: collectors, HistoricalCandidates: historical, Knowledge: pg, Reasoning: reasoningEngine, Agents: agents, Executor: executor, Checkpoints: checkpointStore, Reranker: neuralReranker, RankingPolicy: &rankingPolicy})
+	topologyPatterns := store.NewPostgresTopologyPatternStore(pg)
+	causalPatterns := store.NewPostgresCausalKnowledgeStore(pg)
+	discoveredCandidates := store.NewPostgresCausalCandidateStore(pg)
+	discoveryEngine := causaldiscovery.NewEngine(discoveredCandidates, causalPatterns)
+	discoveryEngine.Patterns = causalPatterns
+	discoveryEngine.Explainer = causaldiscovery.NewChatExplainer(chat)
+	supervisor, err := agent.NewSupervisor(ctx, agent.SupervisorDeps{Collectors: collectors, HistoricalCandidates: historical, Knowledge: pg, Reasoning: reasoningEngine, Agents: agents, Executor: executor, Checkpoints: checkpointStore, Reranker: neuralReranker, RankingPolicy: &rankingPolicy, Causal: causalMatcher, GraphStore: store.NewPostgresGraphStore(pg), TopologyPatterns: topologyPatterns, CausalPatterns: causalPatterns, DiscoveredPatterns: discoveredCandidates})
 	if err != nil {
 		slog.Error("compile Eino graph", "error", err)
 		os.Exit(1)
 	}
-	learner := service.CausalLearner{Store: pg, ConfidenceThreshold: cfg.Reasoning.CausalAutoActivateConfidence, Namespaces: cfg.Reasoning.CausalLearningNamespaces, EmbeddingVersion: cfg.Embedding.Model, Embedder: learnerEmbedder, Vectors: learnerVectors}
+	learner := service.CausalLearner{Store: pg, ConfidenceThreshold: cfg.Reasoning.CausalAutoActivateConfidence, Namespaces: cfg.Reasoning.CausalLearningNamespaces, EmbeddingVersion: cfg.Embedding.Model, Embedder: learnerEmbedder, Vectors: learnerVectors, TopologyPatterns: topologyPatterns, CausalPatterns: causalPatterns, Discovery: discoveryEngine, IncidentHistory: pg}
 	manager := &service.IncidentManager{Store: pg, Supervisor: supervisor, Executor: executor, Hub: service.NewHub(), ModelSnapshotter: chat, Checkpoints: checkpointStore, AllowedNamespaces: cfg.AllowedNamespaces, CorrelationFallback: correlator, Learner: learner}
 	supervisor.SetEventSink(manager.ObserveWorkflowEvent)
 	if err = manager.ReconcileLegacyWorkflows(ctx); err != nil {

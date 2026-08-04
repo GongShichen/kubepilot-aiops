@@ -49,6 +49,7 @@ type ReasoningConfig struct {
 	CausalAutoActivateConfidence float64
 	CausalLearningNamespaces     []string
 	CausalPatternFile            string
+	CausalPatternDirectory       string
 	RankingPolicyFile            string
 	ToolCostFile                 string
 }
@@ -103,6 +104,7 @@ type EmbeddingConfig struct {
 	Model           string
 	Dimensions      int
 	BatchSize       int
+	Concurrency     int
 	Timeout         time.Duration
 	RequestInterval time.Duration
 }
@@ -145,6 +147,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	embeddingBatchSize, err := integer("EMBEDDING_BATCH_SIZE", 10)
+	if err != nil {
+		return Config{}, err
+	}
+	embeddingConcurrency, err := integer("EMBEDDING_CONCURRENCY", 1)
 	if err != nil {
 		return Config{}, err
 	}
@@ -212,11 +218,11 @@ func Load() (Config, error) {
 		DatabaseURL:   os.Getenv("DATABASE_URL"),
 		RedisURL:      os.Getenv("REDIS_URL"),
 		Chat:          ChatConfig{Protocol: get("CHAT_PROTOCOL", "openai-compatible"), BaseURL: os.Getenv("CHAT_BASE_URL"), APIPath: get("CHAT_API_PATH", "/chat/completions"), APIKey: os.Getenv("CHAT_API_KEY"), Model: os.Getenv("CHAT_MODEL"), Timeout: chatTimeout, MaxTokens: maxTokens, Temperature: temperature, ReasoningEffort: os.Getenv("CHAT_REASONING_EFFORT"), MaxRetries: maxRetries},
-		Embedding:     EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: get("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: dimensions, BatchSize: embeddingBatchSize, Timeout: embedTimeout, RequestInterval: embedRequestInterval},
+		Embedding:     EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: get("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: dimensions, BatchSize: embeddingBatchSize, Concurrency: embeddingConcurrency, Timeout: embedTimeout, RequestInterval: embedRequestInterval},
 		PrometheusURL: get("PROMETHEUS_URL", "http://localhost:9090"), LokiURL: get("LOKI_URL", "http://localhost:3100"), JaegerURL: get("JAEGER_URL", "http://localhost:16686"), MilvusAddress: get("MILVUS_ADDRESS", "localhost:19530"), HistoryCollection: get("HISTORY_COLLECTION", "kubepilot_history"), LogIndexCollection: get("LOG_INDEX_COLLECTION", "kubepilot_log_templates"), LogIndexerInterval: logIndexerInterval, BusinessProbeURL: os.Getenv("BUSINESS_PROBE_URL"),
 		Drain3URL: get("DRAIN3_WS_URL", "ws://localhost:8081/ws/v1/parse"), Drain3Token: os.Getenv("DRAIN3_TOKEN"), Kubeconfig: os.Getenv("KUBECONFIG"), AllowedNamespaces: split(get("ALLOWED_NAMESPACES", "kubepilot-demo,kubepilot-benchmark")),
 		ConfigEnvFile: os.Getenv("CONFIG_ENV_FILE"), ConfigReloadEvery: configReloadEvery, ConfigRetryEvery: configRetryEvery,
-		Reasoning:    ReasoningConfig{SemanticTopK: semanticTopK, LexicalTopK: lexicalTopK, TopologyTopK: topologyTopK, RRFK: rrfK, RerankTopK: rerankTopK, ModelEvidenceMaxItems: maxEvidence, ModelContextMaxBytes: maxContextBytes, CausalAutoActivateConfidence: activateConfidence, CausalLearningNamespaces: split(get("CAUSAL_LEARNING_NAMESPACES", "kubepilot-demo")), CausalPatternFile: get("CAUSAL_PATTERN_FILE", "knowledge/causal_patterns.yaml"), RankingPolicyFile: get("RANKING_POLICY_FILE", "knowledge/ranking_policy.yaml"), ToolCostFile: get("TOOL_COST_FILE", "internal/agent/skills/tool_costs.yaml")},
+		Reasoning:    ReasoningConfig{SemanticTopK: semanticTopK, LexicalTopK: lexicalTopK, TopologyTopK: topologyTopK, RRFK: rrfK, RerankTopK: rerankTopK, ModelEvidenceMaxItems: maxEvidence, ModelContextMaxBytes: maxContextBytes, CausalAutoActivateConfidence: activateConfidence, CausalLearningNamespaces: split(get("CAUSAL_LEARNING_NAMESPACES", "kubepilot-demo")), CausalPatternFile: get("CAUSAL_PATTERN_FILE", "knowledge/causal_patterns.yaml"), CausalPatternDirectory: get("CAUSAL_PATTERN_DIR", "knowledge/patterns"), RankingPolicyFile: get("RANKING_POLICY_FILE", "knowledge/ranking_policy.yaml"), ToolCostFile: get("TOOL_COST_FILE", "internal/agent/skills/tool_costs.yaml")},
 		Reranker:     RerankerConfig{Enabled: boolean("RERANKER_ENABLED", false), Protocol: get("RERANKER_PROTOCOL", "openai-compatible"), BaseURL: os.Getenv("RERANKER_BASE_URL"), APIPath: get("RERANKER_API_PATH", "/reranks"), APIKey: os.Getenv("RERANKER_API_KEY"), Model: os.Getenv("RERANKER_MODEL"), Timeout: rerankerTimeout, MaxRetries: rerankerRetries, MaxDocumentBytes: rerankerDocumentBytes, MaxPayloadBytes: rerankerPayloadBytes},
 		AgentBudgets: budgets,
 	}
@@ -363,6 +369,9 @@ func (c Config) ValidateEmbedding() error {
 	}
 	if c.Embedding.BatchSize <= 0 || c.Embedding.BatchSize > 256 {
 		return errors.New("EMBEDDING_BATCH_SIZE must be between 1 and 256")
+	}
+	if c.Embedding.Concurrency <= 0 || c.Embedding.Concurrency > 64 {
+		return errors.New("EMBEDDING_CONCURRENCY must be between 1 and 64")
 	}
 	return nil
 }

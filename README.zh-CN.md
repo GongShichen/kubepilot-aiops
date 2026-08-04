@@ -48,6 +48,9 @@ flowchart TD
 - **可选 Neural Reranker API：** Evidence 与历史 Incident 使用两套独立的排序策略和融合公式：Evidence 为 `0.70 deterministic + 0.30 neural`，历史 Incident 为 `0.45 deterministic + 0.55 neural`。用户可配置 OpenAI-compatible Reranker API 补充神经相关度；未启用时明确标记并重新归一化确定性权重，不伪造神经分数。结果持久化 `EvidenceRankBreakdown` 与 `IncidentRankBreakdown`，配置支持热加载并通过 hash 固定到 Incident。
 - **Topology-aware Reasoning：** Jaeger 调用关系、Kubernetes Service/Endpoint 与 Owner 关系、已知数据依赖和错误传播路径构成 Incident Dependency Graph，因此不同服务通过相同关键依赖失败时也能跨服务召回。
 - **因果知识：** 内置和增量学习的 cause-to-symptom 路径保存在 PostgreSQL 并保留审计。只有配置允许的非评测 namespace 中，经过审批且连续验证成功的高置信 Incident 才能提供学习样本；同一规范化模式至少需要两个独立 Incident 才能自动激活。
+- **持续演化的 Incident Knowledge：** Resolved Incident 经过独立 Knowledge Evolution Layer。Trace/Kubernetes/Evidence 图会把 Pod/IP 等实例归一化为可复用的 `business-service → database/cache/queue` 模式，按确定性签名合并并服务后续拓扑检索。Causal Proposal 必须来自已接受的 Hypothesis Ledger 和真实 Evidence，经过完整路径、独立来源、反证与重复支持校验后才能进入 pending/active 知识。Agent Tool 只能读取、提出和校验，只有服务端 Resolved-Incident Extractor 可以写入。
+- **因果模式发现：** 独立的服务端 Discovery Engine 将多个已验证的 Resolved Incident 提取为 Incident Causal Graph，挖掘重复因果路径并记录反例，使用确定性评分后复用现有 Causal Validator；只有通过校验的候选模式才能入库。Diagnosis 只能通过 `retrieve_discovered_causal_patterns` 读取已接受模式，不能写入或提升模式状态。
+- **发现评测：** `go run ./cmd/benchmark intelligence` 包含固定的 100 个 Resolved Incident 发现数据集，输出 Pattern Precision/Recall 和 Confidence Calibration；该评测与生产知识学习及正式故障注入评分隔离。
 - **统一 Capability Registry：** 所有 Agent 可见的业务能力都是 Eino Tool，具备 JSON Schema、Agent allowlist、timeout、输入/输出限制和固定 Cost。Tool 不接受原始 SQL、PromQL、LogQL、kubectl、Shell、Milvus filter 或任意 Kubernetes manifest；AST 测试禁止生产 Agent 主链路手工构造 `schema.ToolCall`。
 - **官方流式模型组件：** OpenAI-compatible 和 Anthropic-compatible 均使用锁定版本的 Eino 扩展。Eino 负责合并流式 Tool Call 分片；URL、API Path、API Key 和模型名完全由用户配置。
 - **能力门控：** 启用恢复能力前，Agent 会执行无副作用的 Tool Calling 探测。无法生成指定结构化工具调用的 endpoint 不会进入真实恢复模式。
@@ -191,6 +194,20 @@ curl -X POST http://localhost:8080/api/v1/incidents \
 ```
 
 ## Benchmark
+
+### Autonomous Incident Benchmark
+
+除现有的真实故障注入档位外，仓库新增了隔离的评测框架，代码位于 `benchmark/component`、`benchmark/reasoning`、`benchmark/agent`、`benchmark/incident`、`benchmark/evolution`、`benchmark/evaluator` 和 `benchmark/reports`。它通过公开 Incident API 测量从输入、诊断、Proposal、审批、执行、验证到知识演化的完整生命周期，不导入 Agent Runtime。`benchmark/manifests/v2.yaml` 保存可复现实验契约。
+
+评测器将期望根因、证据、恢复动作和因果路径保留在 Agent 上下文之外。Incident Harness 只向公开 Agent 接口发送观测数据；可选的知识演化接收器也只接收已观测到的 RESOLVED 结果。`benchmark/isolation` 提供隔离测试，并统一计算 Recall@K、Precision@K、MRR、NDCG、Hypothesis、Tool Efficiency、自动修正、恢复安全、验证成功、MTTD/MTTR、Topology 和因果演化指标。
+
+只校验契约而不启动线上 Benchmark：
+
+```bash
+go run ./cmd/benchmark validate-v2
+```
+
+正式全量运行仍需显式使用现有 `make benchmark-*` 命令；生成的报告和运行日志不会进入源码目录或版本库。
 
 场景目录不允许包含任意 Shell 命令。`benchmark/incidents.yaml` 会确定性展开为 100 个强类型场景：
 

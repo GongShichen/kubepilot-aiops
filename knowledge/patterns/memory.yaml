@@ -1,0 +1,8 @@
+patterns:
+  - id: memory-leak
+    category: memory
+    cause: memory_leak
+    chain: [memory_growth, oom_killed, pod_restart, error_rate_increase]
+    required_evidence: [memory_metric, kubernetes_event]
+    contradictions: [stable_memory]
+    confidence: 0.90

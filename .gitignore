@@ -2,6 +2,10 @@
 PLAN.md
 .runtime/
 artifacts/
+benchmark/reports/*.json
+benchmark/reports/*.md
+benchmark/reports/*.csv
+benchmark/reports/traces/
 deploy/docker/prometheus/generated/client.crt
 deploy/docker/prometheus/generated/client.key
 deploy/docker/prometheus/generated/minikube-targets.yml

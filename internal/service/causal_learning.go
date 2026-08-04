@@ -7,8 +7,15 @@ import (
 	"fmt"
 	"strings"
 
+	causaldiscovery "github.com/kubepilot-aiops/kubepilot/internal/causal/discovery"
+	causalextractor "github.com/kubepilot-aiops/kubepilot/internal/causal/extractor"
+	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
+	causalvalidator "github.com/kubepilot-aiops/kubepilot/internal/causal/validator"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/store"
+	"github.com/kubepilot-aiops/kubepilot/internal/topology"
+	topologyextractor "github.com/kubepilot-aiops/kubepilot/internal/topology/extractor"
+	topologyknowledge "github.com/kubepilot-aiops/kubepilot/internal/topology/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
 )
 
@@ -19,6 +26,17 @@ type CausalLearner struct {
 	EmbeddingVersion    string
 	Embedder            retrieval.EmbeddingClient
 	Vectors             retrieval.VectorStore
+	TopologyPatterns    topologyknowledge.PatternStore
+	CausalPatterns      causalknowledge.PatternStore
+	Discovery           *causaldiscovery.Engine
+	IncidentHistory     ResolvedIncidentReader
+}
+
+// ResolvedIncidentReader is intentionally separate from the Agent capability
+// interfaces. Only the server-side learning path can enumerate historical
+// incidents for discovery; Diagnosis receives a read-only candidate Reader.
+type ResolvedIncidentReader interface {
+	ListResolvedIncidents(context.Context, []string, int) ([]*domain.Incident, error)
 }
 
 func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
@@ -73,6 +91,51 @@ func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
 	}
 	if selected == nil || selected.ContradictionScore > .10 {
 		return nil
+	}
+	// Knowledge evolution is deliberately outside the Agent runtime. Agents
+	// can read patterns and submit proposals, but only this resolved-Incident
+	// service path can extract, validate and merge them.
+	if l.TopologyPatterns != nil {
+		graph := topology.Build(in, in.Evidence)
+		if in.DiagnosisLedger != nil && len(in.DiagnosisLedger.Candidates) > 0 {
+			observed := in.DiagnosisLedger.Candidates[0].Features.TopologyGraph
+			if len(observed.Nodes) > 0 || len(observed.Edges) > 0 {
+				graph = topology.Merge(graph, topology.FromDependencyGraph(in.ID, observed))
+			}
+		}
+		if _, err := topologyextractor.Merge(ctx, in, graph, l.TopologyPatterns); err != nil {
+			return fmt.Errorf("evolve topology knowledge: %w", err)
+		}
+	}
+	if l.CausalPatterns != nil {
+		proposal, ok := causalextractor.Propose(in)
+		if ok {
+			validator := causalvalidator.New(l.CausalPatterns)
+			validation, err := validator.Validate(ctx, in, proposal)
+			if err != nil {
+				return fmt.Errorf("validate causal knowledge proposal: %w", err)
+			}
+			if validation.Valid {
+				proposal.Pattern.Confidence = validation.Confidence
+				if validation.Accepted {
+					proposal.Pattern.Status = "active"
+				} else {
+					proposal.Pattern.Status = "pending"
+				}
+				if _, err := l.CausalPatterns.Merge(ctx, proposal.Pattern); err != nil {
+					return fmt.Errorf("evolve causal knowledge: %w", err)
+				}
+			}
+		}
+	}
+	if l.Discovery != nil && l.IncidentHistory != nil {
+		resolved, err := l.IncidentHistory.ListResolvedIncidents(ctx, l.Namespaces, 500)
+		if err != nil {
+			return fmt.Errorf("load resolved incidents for causal discovery: %w", err)
+		}
+		if _, err := l.Discovery.Discover(ctx, resolved); err != nil {
+			return fmt.Errorf("discover causal patterns: %w", err)
+		}
 	}
 	features := featuresFromLedger(in)
 	if err := l.Store.UpsertIncidentKnowledge(ctx, in, features, l.EmbeddingVersion); err != nil {

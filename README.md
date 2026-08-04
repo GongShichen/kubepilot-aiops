@@ -48,6 +48,9 @@ flowchart TD
 - **Optional neural reranking API:** evidence and historical incidents have separate ranking policies and fusion formulas: `0.70 deterministic + 0.30 neural` for evidence, and `0.45 deterministic + 0.55 neural` for historical incidents. A user-configured OpenAI-compatible reranking API can add neural relevance; unavailable neural ranking is explicitly marked and deterministic weights are renormalized rather than fabricating a score. Both `EvidenceRankBreakdown` and `IncidentRankBreakdown` are persisted for reproducibility. The endpoint is hot-reloaded and pinned by configuration hash.
 - **Topology-aware reasoning:** Jaeger call relationships, Kubernetes Service/Endpoint and owner links, known data dependencies, and error propagation paths form an Incident Dependency Graph. This supports cross-service retrieval when different workloads fail through the same critical dependency.
 - **Causal knowledge:** built-in and learned cause-to-symptom paths are stored in PostgreSQL with audit history. Only high-confidence, approved, successfully verified incidents from configured non-evaluation namespaces can contribute, and two independent incidents are required before a learned pattern becomes active.
+- **Evolving incident knowledge:** resolved Incidents pass through a server-side Knowledge Evolution Layer. Trace/Kubernetes/Evidence graphs normalize pod/IP identities into reusable `business-service → database/cache/queue` patterns, merge them by deterministic signatures, and expose them to topology retrieval. Causal proposals are grounded in the accepted hypothesis ledger and real Evidence, then validated for complete paths, independent sources, contradiction, and repeated support before entering pending/active knowledge. Agent Tools can read, propose, and validate; only the resolved-Incident extractor can write.
+- **Causal pattern discovery:** a separate server-side discovery engine extracts Incident Causal Graphs from independently verified resolutions, mines repeated paths, records explicit counter-observations, scores candidates deterministically, and persists only candidates that pass the existing causal validator. Diagnosis can read accepted discovered patterns through `retrieve_discovered_causal_patterns`; it cannot write or promote them.
+- **Discovery evaluation:** `go run ./cmd/benchmark intelligence` includes a deterministic 100-resolved-Incident discovery corpus and reports pattern precision/recall plus confidence calibration; this evaluator is isolated from production learning and formal fault-injection scoring.
 - **Central capability registry:** every Agent-visible business capability is an Eino Tool with JSON Schema, Agent allowlist, timeout, argument/output bounds, and pinned cost. Tools never accept raw SQL, PromQL, LogQL, kubectl, shell, Milvus filters, or arbitrary Kubernetes manifests. Production Agent code is AST-tested to reject hand-built `schema.ToolCall` values.
 - **Official streaming model components:** OpenAI-compatible and Anthropic-compatible protocols use the pinned Eino extension packages. Eino assembles fragmented streaming Tool Calls; URL, API path, key, and model remain user-configured.
 - **Capability gating:** the Agent performs a side-effect-free Tool Calling probe before enabling recovery. A chat endpoint that cannot produce the required structured tool call remains diagnosis-disabled rather than executing an unsafe fallback.
@@ -192,6 +195,20 @@ curl -X POST http://localhost:8080/api/v1/incidents \
 ```
 
 ## Benchmark
+
+### Autonomous Incident Benchmark
+
+In addition to the existing live fault-injection profiles, the repository contains an isolated evaluator framework under `benchmark/component`, `benchmark/reasoning`, `benchmark/agent`, `benchmark/incident`, `benchmark/evolution`, `benchmark/evaluator`, and `benchmark/reports`. It measures the complete public lifecycle—incident input, diagnosis, proposal, approval, execution, verification, and observed knowledge evolution—without importing the Agent runtime. `benchmark/manifests/v2.yaml` records the reproducibility contract.
+
+The evaluator keeps expected root cause, evidence, recovery, and causal-path labels outside the Agent payload. The public incident harness accepts only observations, and the optional evolution sink receives observed resolved incidents only. This provides explicit isolation tests in `benchmark/isolation` and deterministic Recall@K, Precision@K, MRR, NDCG, hypothesis, tool-efficiency, correction, recovery-safety, verification, MTTD/MTTR, topology, and causal-evolution metrics.
+
+Validate the contract without starting a live benchmark:
+
+```bash
+go run ./cmd/benchmark validate-v2
+```
+
+Formal full runs remain opt-in and still use the existing `make benchmark-*` commands; no generated report or runtime log is part of the source tree.
 
 The scenario catalog is not a collection of arbitrary shell commands. `benchmark/incidents.yaml` expands deterministically into exactly 100 typed cases:
 

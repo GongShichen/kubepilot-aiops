@@ -163,6 +163,7 @@ type RankBreakdown struct {
 type IncidentRankBreakdown struct {
 	IncidentID          string             `json:"incident_id"`
 	DeterministicScore  float64            `json:"deterministic_score"`
+	TopologyScore       float64            `json:"topology_score"`
 	NeuralScore         float64            `json:"neural_score,omitempty"`
 	DeterministicWeight float64            `json:"deterministic_weight"`
 	NeuralWeight        float64            `json:"neural_weight"`

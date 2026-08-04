@@ -1,0 +1,8 @@
+patterns:
+  - id: database-unavailable
+    category: database
+    cause: database_unavailable
+    chain: [connection_error, endpoint_unavailable, request_error]
+    required_evidence: [database_error, kubernetes_event]
+    contradictions: [database_healthy]
+    confidence: 0.88

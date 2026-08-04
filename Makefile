@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: doctor bootstrap cluster-up infra-up demo-up runtime up down destroy test lint migrate benchmark-validate benchmark-history-seed benchmark-smoke benchmark-reset-diagnosis benchmark-standard benchmark-diagnosis-compare benchmark-correlation benchmark-retrieval benchmark-full
+.PHONY: doctor bootstrap cluster-up infra-up demo-up runtime up down destroy test lint migrate benchmark-validate benchmark-validate-v2 benchmark-history-seed benchmark-smoke benchmark-reset-diagnosis benchmark-standard benchmark-diagnosis-compare benchmark-correlation benchmark-retrieval benchmark-full
 
 doctor:
 	sh scripts/doctor.sh
@@ -61,6 +61,9 @@ lint:
 
 benchmark-validate:
 	go run ./cmd/benchmark validate
+
+benchmark-validate-v2:
+	go run ./cmd/benchmark validate-v2
 
 benchmark-history-seed:
 	set -a; [ ! -f .env ] || . ./.env; set +a; go run ./cmd/benchmark seed-history --milvus-url localhost:19530

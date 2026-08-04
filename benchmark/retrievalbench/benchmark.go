@@ -170,6 +170,7 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		})
 	}
 	documentEmbeddingStarted := time.Now()
+	progress(cfg, "document_embeddings", 0, len(texts))
 	vectors, calls, err := embedBatches(ctx, cfg.Embedder, texts, cfg.EmbeddingBatchSize)
 	documentEmbeddingDuration := time.Since(documentEmbeddingStarted)
 	if err != nil {
@@ -192,6 +193,7 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		queryTexts[i] = queries[i].Text
 	}
 	queryEmbeddingStarted := time.Now()
+	progress(cfg, "query_embeddings", 0, len(queryTexts))
 	queryVectors, queryCalls, err := embedBatches(ctx, cfg.Embedder, queryTexts, cfg.EmbeddingBatchSize)
 	queryEmbeddingDuration := time.Since(queryEmbeddingStarted)
 	if err != nil {
@@ -510,18 +512,17 @@ func generateQueries() []Query {
 }
 
 func embedBatches(ctx context.Context, embedder retrieval.EmbeddingClient, texts []string, size int) ([][]float32, int, error) {
-	var out [][]float32
-	calls := 0
-	for i := 0; i < len(texts); i += size {
-		end := min(i+size, len(texts))
-		vectors, err := embedder.Embed(ctx, texts[i:end])
-		if err != nil {
-			return nil, calls, err
-		}
-		out = append(out, vectors...)
-		calls++
+	if len(texts) == 0 {
+		return [][]float32{}, 0, nil
 	}
-	return out, calls, nil
+	if size <= 0 {
+		size = 10
+	}
+	vectors, err := embedder.Embed(ctx, texts)
+	if err != nil {
+		return nil, 0, err
+	}
+	return vectors, (len(texts) + size - 1) / size, nil
 }
 
 func upsertBatches(ctx context.Context, store *retrieval.MilvusStore, docs []retrieval.Document, size int) error {

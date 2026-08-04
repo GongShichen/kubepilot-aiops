@@ -10,23 +10,35 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
+	"github.com/kubepilot-aiops/kubepilot/internal/causal"
+	causaldiscovery "github.com/kubepilot-aiops/kubepilot/internal/causal/discovery"
+	causalextractor "github.com/kubepilot-aiops/kubepilot/internal/causal/extractor"
+	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
+	causalvalidator "github.com/kubepilot-aiops/kubepilot/internal/causal/validator"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	rankpolicy "github.com/kubepilot-aiops/kubepilot/internal/reasoning/evidence"
 	"github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
 	"github.com/kubepilot-aiops/kubepilot/internal/safety"
+	"github.com/kubepilot-aiops/kubepilot/internal/topology"
+	topologyknowledge "github.com/kubepilot-aiops/kubepilot/internal/topology/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
 	captools "github.com/kubepilot-aiops/kubepilot/tools"
 )
 
 type constrainedToolDeps struct {
-	Collectors map[string]Collector
-	Historical HistoricalCandidateRetriever
-	Knowledge  CausalPatternReader
-	Reasoning  *reasoning.Engine
-	Executor   Executor
-	Reranker   reranker.Service
-	Policy     *rankpolicy.Policy
-	Transition func(context.Context, *domain.Incident, domain.IncidentStatus) error
+	Collectors         map[string]Collector
+	Historical         HistoricalCandidateRetriever
+	Knowledge          CausalPatternReader
+	Reasoning          *reasoning.Engine
+	Executor           Executor
+	Reranker           reranker.Service
+	Policy             *rankpolicy.Policy
+	Causal             *causal.Matcher
+	GraphStore         topology.GraphStore
+	TopologyPatterns   topologyknowledge.Reader
+	CausalPatterns     causalknowledge.Reader
+	DiscoveredPatterns causaldiscovery.Reader
+	Transition         func(context.Context, *domain.Incident, domain.IncidentStatus) error
 }
 
 type investigationRequest struct {
@@ -47,14 +59,22 @@ type hypothesisSelection struct {
 type emptyToolInput struct{}
 
 type constrainedToolOutput struct {
-	OK         bool                        `json:"ok"`
-	Message    string                      `json:"message,omitempty"`
-	Evidence   []domain.Evidence           `json:"evidence,omitempty"`
-	Candidates []domain.RetrievalCandidate `json:"candidates,omitempty"`
-	Patterns   []domain.CausalPattern      `json:"patterns,omitempty"`
-	Verified   []domain.VerifiedHypothesis `json:"verified,omitempty"`
-	Feedback   *domain.SafetyFeedback      `json:"safety_feedback,omitempty"`
-	DryRun     *domain.DryRunResult        `json:"dry_run,omitempty"`
+	OK                      bool                                       `json:"ok"`
+	Message                 string                                     `json:"message,omitempty"`
+	Evidence                []domain.Evidence                          `json:"evidence,omitempty"`
+	Candidates              []domain.RetrievalCandidate                `json:"candidates,omitempty"`
+	Patterns                []domain.CausalPattern                     `json:"patterns,omitempty"`
+	Verified                []domain.VerifiedHypothesis                `json:"verified,omitempty"`
+	Feedback                *domain.SafetyFeedback                     `json:"safety_feedback,omitempty"`
+	DryRun                  *domain.DryRunResult                       `json:"dry_run,omitempty"`
+	Graph                   *topology.IncidentGraph                    `json:"incident_graph,omitempty"`
+	Matches                 []causal.PatternMatch                      `json:"causal_matches,omitempty"`
+	CausalScore             *causal.HypothesisScore                    `json:"causal_score,omitempty"`
+	TopologyPatterns        []topologyknowledge.ServiceTopologyPattern `json:"topology_patterns,omitempty"`
+	CausalKnowledgePatterns []causalknowledge.CausalPattern            `json:"causal_knowledge_patterns,omitempty"`
+	DiscoveredPatterns      []causaldiscovery.CausalPatternCandidate   `json:"discovered_causal_patterns,omitempty"`
+	CausalProposal          *causalknowledge.Proposal                  `json:"causal_proposal,omitempty"`
+	CausalValidation        *causalknowledge.ValidationResult          `json:"causal_validation,omitempty"`
 }
 
 func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, error) {
@@ -81,6 +101,12 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		case func(context.Context, HypothesisSubmission) (constrainedToolOutput, error):
 			candidate, err = toolutils.InferTool(name, description, typed)
 		case func(context.Context, hypothesisSelection) (constrainedToolOutput, error):
+			candidate, err = toolutils.InferTool(name, description, typed)
+		case func(context.Context, graphBuildRequest) (constrainedToolOutput, error):
+			candidate, err = toolutils.InferTool(name, description, typed)
+		case func(context.Context, causalPathRequest) (constrainedToolOutput, error):
+			candidate, err = toolutils.InferTool(name, description, typed)
+		case func(context.Context, causalPatternProposalRequest) (constrainedToolOutput, error):
 			candidate, err = toolutils.InferTool(name, description, typed)
 		default:
 			return fmt.Errorf("unsupported constrained tool %s", name)
@@ -140,6 +166,156 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		return constrainedToolOutput{OK: true, Evidence: compactToolEvidence(items, 32<<10)}, nil
 	}); err != nil {
 		return nil, err
+	}
+
+	if err := add("build_incident_graph", "Build the current Incident dependency graph from server-owned evidence. The graph is observational and cannot authorize mutations.", func(ctx context.Context, _ graphBuildRequest) (constrainedToolOutput, error) {
+		runtime, err := runtimeFromContext(ctx)
+		if err != nil {
+			return constrainedToolOutput{}, err
+		}
+		runtime.mu.Lock()
+		graph := topology.Build(runtime.state.Incident, runtime.state.Incident.Evidence)
+		runtime.state.IncidentGraph = &graph
+		runtime.state.Features.TopologyGraph = graph.ToDependencyGraph(runtime.state.Incident.Service)
+		if deps.GraphStore != nil {
+			if storeErr := deps.GraphStore.Put(ctx, graph); storeErr != nil {
+				runtime.state.DiagnosisLedger.InfrastructureErrors = append(runtime.state.DiagnosisLedger.InfrastructureErrors, "incident graph persistence unavailable")
+				runtime.mu.Unlock()
+				return constrainedToolOutput{OK: false, Graph: &graph, Message: "incident graph built but persistence is unavailable"}, nil
+			}
+		}
+		runtime.mu.Unlock()
+		return constrainedToolOutput{OK: true, Graph: &graph, Message: "incident graph built from current observations"}, nil
+	}); err != nil {
+		return nil, err
+	}
+
+	if deps.TopologyPatterns != nil {
+		if err := add("retrieve_topology_patterns", "Retrieve bounded reusable topology patterns from resolved Incident knowledge. Concrete pod and IP identities are not returned.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
+			runtime, err := runtimeFromContext(ctx)
+			if err != nil {
+				return constrainedToolOutput{}, err
+			}
+			runtime.mu.Lock()
+			graph := topology.IncidentGraph{}
+			if runtime.state.IncidentGraph != nil {
+				graph = *runtime.state.IncidentGraph
+			} else {
+				graph = topology.Build(runtime.state.Incident, runtime.state.Incident.Evidence)
+			}
+			runtime.mu.Unlock()
+			limit := in.Limit
+			if limit <= 0 || limit > 20 {
+				limit = 10
+			}
+			patterns, callErr := deps.TopologyPatterns.Search(ctx, graph, limit)
+			if callErr != nil {
+				return constrainedToolOutput{OK: false, Message: "topology knowledge unavailable"}, nil
+			}
+			return constrainedToolOutput{OK: true, TopologyPatterns: patterns}, nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	if deps.CausalPatterns != nil {
+		if err := add("retrieve_causal_patterns", "Retrieve bounded validated causal patterns. Patterns are observational knowledge and cannot be modified by the Agent.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
+			limit := in.Limit
+			if limit <= 0 || limit > 20 {
+				limit = 10
+			}
+			patterns, callErr := deps.CausalPatterns.List(ctx, "active", limit)
+			if callErr != nil {
+				return constrainedToolOutput{OK: false, Message: "causal knowledge unavailable"}, nil
+			}
+			return constrainedToolOutput{OK: true, CausalKnowledgePatterns: patterns}, nil
+		}); err != nil {
+			return nil, err
+		}
+		if err := add("propose_causal_pattern", "Propose a causal pattern from observed Evidence. This returns an unpersisted proposal for deterministic validation.", func(ctx context.Context, in causalPatternProposalRequest) (constrainedToolOutput, error) {
+			runtime, err := runtimeFromContext(ctx)
+			if err != nil {
+				return constrainedToolOutput{}, err
+			}
+			runtime.mu.Lock()
+			incident := *runtime.state.Incident
+			runtime.mu.Unlock()
+			proposal, ok := causalknowledge.ProposalFromDraft(&incident, in.Cause, in.Path, in.EvidenceIDs, incident.Confidence)
+			if !ok {
+				return safetyObservation(ctx, runtime, DiagnosisAgentName, domain.SafetyScopeDiagnosis, "causal_proposal_insufficient", "the submitted causal proposal is not grounded in current Incident Evidence", []string{"a causal path and independent observed Evidence are required"})
+			}
+			runtime.mu.Lock()
+			runtime.state.CausalProposal = &proposal
+			runtime.mu.Unlock()
+			return constrainedToolOutput{OK: true, CausalProposal: &proposal, Message: "proposal is not persisted until validation and service-side merge"}, nil
+		}); err != nil {
+			return nil, err
+		}
+		if err := add("validate_causal_pattern", "Validate a causal pattern proposal against current Incident Evidence and knowledge repetition. Validation never writes the knowledge store.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+			runtime, err := runtimeFromContext(ctx)
+			if err != nil {
+				return constrainedToolOutput{}, err
+			}
+			runtime.mu.Lock()
+			incident := *runtime.state.Incident
+			runtime.mu.Unlock()
+			runtime.mu.Lock()
+			proposal := causalknowledge.Proposal{}
+			if runtime.state.CausalProposal != nil {
+				proposal = *runtime.state.CausalProposal
+			}
+			runtime.mu.Unlock()
+			ok := proposal.Pattern.PatternID != ""
+			if !ok {
+				proposal, ok = causalextractor.Propose(&incident)
+			}
+			if !ok {
+				return safetyObservation(ctx, runtime, DiagnosisAgentName, domain.SafetyScopeDiagnosis, "causal_proposal_insufficient", "there is no grounded causal proposal to validate", []string{"a grounded causal proposal is required"})
+			}
+			result, callErr := causalvalidator.New(deps.CausalPatterns).Validate(ctx, &incident, proposal)
+			if callErr != nil {
+				return constrainedToolOutput{OK: false, Message: "causal validation unavailable"}, nil
+			}
+			if !result.Valid {
+				runtime.mu.Lock()
+				runtime.state.CausalValidation = &result
+				runtime.mu.Unlock()
+				return constrainedToolOutput{OK: false, CausalValidation: &result, Message: "causal proposal rejected by deterministic validation"}, nil
+			}
+			runtime.mu.Lock()
+			runtime.state.CausalValidation = &result
+			runtime.mu.Unlock()
+			return constrainedToolOutput{OK: true, CausalValidation: &result, Message: "causal proposal validated; persistence remains outside Agent permissions"}, nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	if deps.DiscoveredPatterns != nil {
+		if err := add("retrieve_discovered_causal_patterns", "Retrieve bounded accepted causal patterns discovered from independent resolved Incidents. Results are observational and cannot be modified by the Agent.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
+			runtime, err := runtimeFromContext(ctx)
+			if err != nil {
+				return constrainedToolOutput{}, err
+			}
+			runtime.mu.Lock()
+			incident := *runtime.state.Incident
+			runtime.mu.Unlock()
+			limit := in.Limit
+			if limit <= 0 || limit > 20 {
+				limit = 10
+			}
+			terms := []string{incident.RootCause, incident.RootCauseCategory, incident.RootCauseVariant, incident.Service, incident.Resource}
+			for _, evidence := range incident.Evidence {
+				terms = append(terms, evidence.Summary, evidence.TemplateID)
+			}
+			patterns, callErr := deps.DiscoveredPatterns.Search(ctx, nonEmptyTerms(terms), limit)
+			if callErr != nil {
+				return constrainedToolOutput{OK: false, Message: "discovered causal knowledge unavailable"}, nil
+			}
+			return constrainedToolOutput{OK: true, DiscoveredPatterns: patterns}, nil
+		}); err != nil {
+			return nil, err
+		}
 	}
 
 	for _, spec := range []struct {
@@ -214,8 +390,19 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		if err != nil {
 			return constrainedToolOutput{}, err
 		}
-		if deps.Knowledge == nil {
+		if deps.Knowledge == nil && deps.Causal == nil {
 			return constrainedToolOutput{OK: true}, nil
+		}
+		if deps.Causal != nil {
+			runtime.mu.Lock()
+			evidence := runtime.state.RankedEvidence
+			if len(evidence) == 0 {
+				evidence = runtime.state.Incident.Evidence
+			}
+			matches := deps.Causal.MatchEvidence(evidence)
+			runtime.state.CausalMatches = matches
+			runtime.mu.Unlock()
+			return constrainedToolOutput{OK: true, Matches: matches}, nil
 		}
 		patterns, err := deps.Knowledge.ListCausalPatterns(ctx, "active")
 		if err != nil {
@@ -226,6 +413,66 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		runtime.state.CausalPatterns = deps.Reasoning.MatchCausalPatterns(runtime.state.Features, runtime.state.RankedEvidence, patterns)
 		runtime.state.DiagnosisLedger.CausalPatterns = runtime.state.CausalPatterns
 		return constrainedToolOutput{OK: true, Patterns: runtime.state.CausalPatterns}, nil
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := add("expand_causal_path", "Expand a selected causal pattern against the current observations and report missing nodes.", func(ctx context.Context, in causalPathRequest) (constrainedToolOutput, error) {
+		runtime, err := runtimeFromContext(ctx)
+		if err != nil {
+			return constrainedToolOutput{}, err
+		}
+		if deps.Causal == nil {
+			return constrainedToolOutput{OK: false, Message: "causal matcher unavailable"}, nil
+		}
+		runtime.mu.Lock()
+		evidence := append([]domain.Evidence(nil), runtime.state.RankedEvidence...)
+		if len(evidence) == 0 {
+			evidence = append([]domain.Evidence(nil), runtime.state.Incident.Evidence...)
+		}
+		runtime.mu.Unlock()
+		match, ok := deps.Causal.Expand(in.PatternID, evidence)
+		if !ok {
+			return safetyObservation(ctx, runtime, DiagnosisAgentName, domain.SafetyScopeDiagnosis, "causal_pattern_not_found", "the requested causal pattern is not available", []string{"a known causal pattern is required"})
+		}
+		runtime.mu.Lock()
+		runtime.state.CausalMatches = append(runtime.state.CausalMatches, match)
+		runtime.mu.Unlock()
+		return constrainedToolOutput{OK: true, Matches: []causal.PatternMatch{match}}, nil
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := add("score_hypothesis_causality", "Score one hypothesis using observed support, causal coverage, topology, history, prior, and contradiction without trusting model confidence.", func(ctx context.Context, in hypothesisSelection) (constrainedToolOutput, error) {
+		runtime, err := runtimeFromContext(ctx)
+		if err != nil {
+			return constrainedToolOutput{}, err
+		}
+		if deps.Causal == nil {
+			return constrainedToolOutput{OK: false, Message: "causal scorer unavailable"}, nil
+		}
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		for index := range runtime.state.VerifiedHypotheses {
+			verified := &runtime.state.VerifiedHypotheses[index]
+			if verified.Draft.ID != in.HypothesisID {
+				continue
+			}
+			if len(runtime.state.CausalMatches) > 0 {
+				best := runtime.state.CausalMatches[0]
+				if best.Coverage > verified.CausalPathCoverage {
+					verified.CausalPathCoverage = best.Coverage
+				}
+				verified.MissingCausalNodes = append([]string(nil), best.MissingNodes...)
+				runtime.state.CausalEvidence = append(runtime.state.CausalEvidence, causal.HypothesisCausalEvidence{HypothesisID: in.HypothesisID, CausalPath: append([]string(nil), best.CausalPath...), Coverage: best.Coverage, MissingNodes: append([]string(nil), best.MissingNodes...)})
+			}
+			score := causal.ScoreHypothesis(causal.ScoreInput{ModelPrior: verified.Draft.PriorProbability, EvidenceSupport: verified.SupportingScore, CausalCoverage: verified.CausalPathCoverage, TopologyMatch: verified.TopologyRelevance, HistoricalSimilarity: verified.HistoricalRelevance, Contradiction: verified.ContradictionScore})
+			verified.FinalScore = score.Score
+			verified.ConfidenceHistory = append(verified.ConfidenceHistory, domain.HypothesisConfidenceRecord{HypothesisID: in.HypothesisID, Sequence: len(verified.ConfidenceHistory) + 1, Score: score.Score, SupportingScore: verified.SupportingScore, ContradictionScore: verified.ContradictionScore, CausalPathCoverage: verified.CausalPathCoverage, HistoricalRelevance: verified.HistoricalRelevance, TopologyRelevance: verified.TopologyRelevance, ComputedAt: time.Now().UTC()})
+			runtime.state.DiagnosisLedger.Verified = runtime.state.VerifiedHypotheses
+			return constrainedToolOutput{OK: true, CausalScore: &score, Message: "causal hypothesis score computed from server observations"}, nil
+		}
+		return safetyObservationLocked(ctx, runtime, DiagnosisAgentName, domain.SafetyScopeDiagnosis, "hypothesis_not_found", "the selected hypothesis is not present in the verified ledger", []string{"a verified hypothesis identity is required"})
 	}); err != nil {
 		return nil, err
 	}
@@ -264,6 +511,20 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		return nil, err
 	}
 	return registerConstrainedToolSet(context.Background(), result, "diagnosis_react", captools.CategoryDecision)
+}
+
+func nonEmptyTerms(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func buildConstrainedRecoveryTools(deps constrainedToolDeps) ([]tool.BaseTool, error) {

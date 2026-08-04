@@ -30,6 +30,36 @@ func NewPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
 }
 func (s *PostgresStore) Close() { s.pool.Close() }
 
+// ListResolvedIncidents is used only by the server-side Knowledge Evolution
+// layer. It returns bounded, resolved payloads and never crosses the Agent Tool
+// boundary.
+func (s *PostgresStore) ListResolvedIncidents(ctx context.Context, namespaces []string, limit int) ([]*domain.Incident, error) {
+	if len(namespaces) == 0 {
+		return []*domain.Incident{}, nil
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	rows, err := s.pool.Query(ctx, `SELECT payload FROM incidents WHERE status=$1 AND namespace=ANY($2::text[]) ORDER BY updated_at DESC LIMIT $3`, domain.StatusResolved, namespaces, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []*domain.Incident{}
+	for rows.Next() {
+		var raw []byte
+		var incident domain.Incident
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(raw, &incident); err != nil {
+			return nil, err
+		}
+		result = append(result, &incident)
+	}
+	return result, rows.Err()
+}
+
 func (s *PostgresStore) Create(ctx context.Context, in *domain.Incident) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

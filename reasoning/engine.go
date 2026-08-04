@@ -879,7 +879,7 @@ func (e *Engine) Rerank(features domain.IncidentFeatures, candidates []domain.Re
 // not used when a graph is available.
 func topologySimilarity(current, candidate domain.IncidentFeatures) float64 {
 	if hasTopologyGraph(current.TopologyGraph) && hasTopologyGraph(candidate.TopologyGraph) {
-		return topologyretrieval.Similarity(current.TopologyGraph, candidate.TopologyGraph)
+		return topologyretrieval.GraphCandidateScore(current.TopologyGraph, candidate.TopologyGraph)
 	}
 	return jaccard(current.TopologyServices, candidate.TopologyServices)
 }

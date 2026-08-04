@@ -15,10 +15,15 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	workflowgraph "github.com/kubepilot-aiops/kubepilot/graph"
+	"github.com/kubepilot-aiops/kubepilot/internal/causal"
+	causaldiscovery "github.com/kubepilot-aiops/kubepilot/internal/causal/discovery"
+	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	actionexecution "github.com/kubepilot-aiops/kubepilot/internal/execution"
 	rankpolicy "github.com/kubepilot-aiops/kubepilot/internal/reasoning/evidence"
 	"github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
+	"github.com/kubepilot-aiops/kubepilot/internal/topology"
+	topologyknowledge "github.com/kubepilot-aiops/kubepilot/internal/topology/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
 	"github.com/oklog/ulid/v2"
 )
@@ -61,6 +66,11 @@ type SupervisorDeps struct {
 	Checkpoints          compose.CheckPointStore
 	Reranker             reranker.Service
 	RankingPolicy        *rankpolicy.Policy
+	Causal               *causal.Matcher
+	GraphStore           topology.GraphStore
+	TopologyPatterns     topologyknowledge.Reader
+	CausalPatterns       causalknowledge.Reader
+	DiscoveredPatterns   causaldiscovery.Reader
 	VerificationInterval time.Duration
 	VerificationTimeout  time.Duration
 }
@@ -89,6 +99,12 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	}
 	if deps.Reasoning == nil {
 		deps.Reasoning = reasoning.New(reasoning.DefaultConfig())
+	}
+	if deps.Causal == nil {
+		deps.Causal = causal.DefaultMatcher()
+	}
+	if deps.GraphStore == nil {
+		deps.GraphStore = topology.NewMemoryStore()
 	}
 	if deps.VerificationInterval <= 0 {
 		deps.VerificationInterval = 10 * time.Second
@@ -137,7 +153,7 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 		return nil, err
 	}
 	if err := add("constrained_react_agents", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.RunConstrained(ctx, s, constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Transition: transition}); err != nil {
+		if err := deps.Agents.RunConstrained(ctx, s, constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Transition: transition, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns}); err != nil {
 			return s, err
 		}
 		s.Incident.DiagnosisLedger = &s.DiagnosisLedger

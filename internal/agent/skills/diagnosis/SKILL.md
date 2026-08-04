@@ -22,6 +22,7 @@ Determine the most defensible root cause by forming falsifiable hypotheses, gath
 - Maintain no more than three hypotheses. Each hypothesis needs supporting evidence, possible contradiction, a falsification condition, and an expected causal path.
 - Revise or replace a hypothesis when new evidence contradicts it. A refuted hypothesis is not silently revived; create a new version if reconsideration is justified.
 - Historical similarity is supporting context, not proof. Topology and causal matches must be checked against current evidence.
+- Accepted causal patterns discovered from independent resolved incidents are read-only historical context. Use the discovered-pattern capability when it can help compare a causal path, and treat it as a hypothesis aid rather than proof.
 - Use reranking only when semantic discrimination can materially change which evidence or historical candidates deserve attention.
 - If safety feedback identifies missing capability, choose how to satisfy the capability; do not assume a particular tool is required.
 

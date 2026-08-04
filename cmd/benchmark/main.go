@@ -22,15 +22,22 @@ import (
 	"syscall"
 	"time"
 
+	causalbenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/causal"
+	causaldiscoverybenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/causaldiscovery"
+	causalevolution "github.com/kubepilot-aiops/kubepilot/benchmark/causalevolution"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/correlation"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/datasets"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/history"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/injector"
+	benchmarkmanifests "github.com/kubepilot-aiops/kubepilot/benchmark/manifests"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/reporter"
+	benchmarkreports "github.com/kubepilot-aiops/kubepilot/benchmark/reports"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/retrievalbench"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/runner"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scorer"
+	topologybenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/topology"
+	topologyevolution "github.com/kubepilot-aiops/kubepilot/benchmark/topologyevolution"
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	llm "github.com/kubepilot-aiops/kubepilot/internal/model"
@@ -48,6 +55,12 @@ func main() {
 	switch os.Args[1] {
 	case "validate":
 		validate(os.Args[2:])
+	case "validate-v2":
+		validateV2(os.Args[2:])
+	case "environment":
+		environment(os.Args[2:])
+	case "failure-report":
+		failureReport(os.Args[2:])
 	case "run":
 		run(os.Args[2:])
 	case "generate-logs":
@@ -56,6 +69,8 @@ func main() {
 		runCorrelation(os.Args[2:])
 	case "retrieval":
 		runRetrieval(os.Args[2:])
+	case "intelligence":
+		runIntelligence(os.Args[2:])
 	case "seed-history":
 		seedHistory(os.Args[2:])
 	case "resume":
@@ -68,7 +83,24 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "kubepilot-benchmark <validate|run|resume|report|correlation|retrieval|seed-history|generate-logs>")
+	fmt.Fprintln(os.Stderr, "kubepilot-benchmark <validate|validate-v2|environment|failure-report|run|resume|report|correlation|retrieval|intelligence|seed-history|generate-logs>")
+}
+
+func runIntelligence(args []string) {
+	fs := flag.NewFlagSet("intelligence", flag.ExitOnError)
+	output := fs.String("output", "artifacts/benchmark/intelligence/summary.json", "summary path")
+	_ = fs.Parse(args)
+	topologyScore := topologybenchmark.Evaluate(topologybenchmark.DefaultCases())
+	causalScore := causalbenchmark.Evaluate(nil, causalbenchmark.DefaultCases())
+	topologyEvolutionScore := topologyevolution.Evaluate(topologyevolution.DefaultCases())
+	causalEvolutionScore := causalevolution.Evaluate(causalevolution.DefaultCases())
+	causalDiscoveryScore := causaldiscoverybenchmark.Evaluate(causaldiscoverybenchmark.DefaultCases())
+	payload := map[string]any{"topology": topologyScore, "causal": causalScore, "topology_evolution": topologyEvolutionScore, "causal_evolution": causalEvolutionScore, "causal_discovery": causalDiscoveryScore, "mode": "offline-evaluator"}
+	raw, err := json.MarshalIndent(payload, "", "  ")
+	fatal(err)
+	fatal(os.MkdirAll(filepath.Dir(*output), 0o750))
+	fatal(os.WriteFile(*output, raw, 0o640))
+	fmt.Printf("topology_recall_at_1=%.2f%% causal_root_cause_accuracy=%.2f%% topology_pattern_recall=%.2f%% causal_evolution_accuracy=%.2f%% causal_discovery_recall=%.2f%% output=%s\n", topologyScore.RecallAt1*100, causalScore.RootCauseAccuracy*100, topologyEvolutionScore.PatternRecall*100, causalEvolutionScore.CausalAccuracy*100, causalDiscoveryScore.PatternRecall*100, *output)
 }
 func validate(args []string) {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
@@ -77,6 +109,39 @@ func validate(args []string) {
 	_, items, hash, err := scenarios.Load(*catalog)
 	fatal(err)
 	fmt.Printf("valid: %d scenarios, catalog_sha256=%s\n", len(items), hash)
+}
+
+func validateV2(args []string) {
+	fs := flag.NewFlagSet("validate-v2", flag.ExitOnError)
+	path := fs.String("manifest", "benchmark/manifests/v2.yaml", "benchmark reproducibility manifest")
+	_ = fs.Parse(args)
+	manifest, hash, err := benchmarkmanifests.Load(*path)
+	fatal(err)
+	fmt.Printf("valid: autonomous incident manifest=%s dataset=%s sha256=%s\n", manifest.Version, manifest.DatasetVersion, hash)
+}
+
+func environment(args []string) {
+	fs := flag.NewFlagSet("environment", flag.ExitOnError)
+	manifestPath := fs.String("manifest", "benchmark/manifests/v2.yaml", "benchmark manifest")
+	output := fs.String("output", "benchmark/reports/runtime_manifest.json", "redacted runtime manifest")
+	_ = fs.Parse(args)
+	base, _, err := benchmarkmanifests.Load(*manifestPath)
+	fatal(err)
+	commit := gitCommit()
+	fatal(benchmarkmanifests.WriteRuntime(*output, benchmarkmanifests.RuntimeFromEnv(base, commit, time.Now().UTC())))
+	fmt.Printf("runtime manifest written: %s\n", *output)
+}
+
+func failureReport(args []string) {
+	fs := flag.NewFlagSet("failure-report", flag.ExitOnError)
+	output := fs.String("output", "benchmark/reports/failure.json", "failure report path")
+	phase := fs.String("phase", "", "benchmark phase")
+	category := fs.String("category", "", "failure category")
+	reason := fs.String("reason", "", "redacted reason")
+	impact := fs.String("impact", "", "impact")
+	_ = fs.Parse(args)
+	fatal(benchmarkreports.WriteFailure(*output, *phase, *category, *reason, *impact, time.Now().UTC()))
+	fmt.Printf("failure report written: %s\n", *output)
 }
 func run(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
@@ -495,9 +560,10 @@ func runRetrieval(args []string) {
 	milvusURL := fs.String("milvus-url", env("MILVUS_ADDRESS", "localhost:19530"), "Milvus address")
 	dimensions := fs.Int("dimensions", envInt("EMBEDDING_DIMENSIONS", 1024), "embedding dimensions")
 	embeddingBatchSize := fs.Int("embedding-batch-size", envInt("EMBEDDING_BATCH_SIZE", 10), "maximum texts per embedding request")
+	embeddingConcurrency := fs.Int("embedding-concurrency", envInt("EMBEDDING_CONCURRENCY", 1), "maximum concurrent embedding requests")
 	embeddingRequestInterval := fs.Duration("embedding-request-interval", envDuration("EMBEDDING_REQUEST_INTERVAL", time.Second), "minimum interval between embedding requests")
 	_ = fs.Parse(args)
-	embedCfg := config.EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: env("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: *dimensions, Timeout: 30 * time.Second, RequestInterval: *embeddingRequestInterval}
+	embedCfg := config.EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: env("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: *dimensions, BatchSize: *embeddingBatchSize, Concurrency: *embeddingConcurrency, Timeout: 30 * time.Second, RequestInterval: *embeddingRequestInterval}
 	if embedCfg.BaseURL == "" || embedCfg.APIKey == "" || embedCfg.Model == "" {
 		fatal(fmt.Errorf("EMBEDDING_BASE_URL, EMBEDDING_API_KEY and EMBEDDING_MODEL are required for retrieval benchmark"))
 	}
@@ -548,6 +614,7 @@ func runRetrieval(args []string) {
 		"ground_truth_templates": summary.GroundTruthTemplates, "drain3_clusters": summary.Drain3Clusters,
 		"embedding_model": embedCfg.Model, "embedding_dimensions": *dimensions,
 		"embedding_batch_size": *embeddingBatchSize, "embedding_request_interval": embeddingRequestInterval.String(),
+		"embedding_concurrency":   *embeddingConcurrency,
 		"embedding_endpoint_hash": hex.EncodeToString(endpointHash[:]), "milvus_collection": collection,
 		"corpus_sha256": corpusHash, "ranking_policy_hash": rankingPolicyHash, "started_at": startedAt, "finished_at": time.Now().UTC(),
 	}
@@ -635,6 +702,7 @@ func seedHistory(args []string) {
 	dimensions := fs.Int("dimensions", envInt("EMBEDDING_DIMENSIONS", 1024), "embedding dimensions")
 	batchSize := fs.Int("embedding-batch-size", envInt("EMBEDDING_BATCH_SIZE", 10), "maximum texts per embedding request")
 	requestInterval := fs.Duration("embedding-request-interval", envDuration("EMBEDDING_REQUEST_INTERVAL", time.Second), "minimum interval between embedding requests")
+	concurrency := fs.Int("embedding-concurrency", envInt("EMBEDDING_CONCURRENCY", 1), "maximum concurrent embedding requests")
 	output := fs.String("output", "artifacts/benchmark/history-seed.json", "seed manifest")
 	_ = fs.Parse(args)
 	_, items, datasetHash, err := history.Load(*dataset)
@@ -642,7 +710,7 @@ func seedHistory(args []string) {
 	embedCfg := config.EmbeddingConfig{
 		BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: env("EMBEDDING_API_PATH", "/embeddings"),
 		APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"),
-		Dimensions: *dimensions, Timeout: 30 * time.Second, RequestInterval: *requestInterval,
+		Dimensions: *dimensions, BatchSize: *batchSize, Concurrency: *concurrency, Timeout: 30 * time.Second, RequestInterval: *requestInterval,
 	}
 	if embedCfg.BaseURL == "" || embedCfg.APIKey == "" || embedCfg.Model == "" {
 		fatal(fmt.Errorf("embedding configuration is required to seed history"))

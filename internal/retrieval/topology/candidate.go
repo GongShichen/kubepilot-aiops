@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	incidenttopology "github.com/kubepilot-aiops/kubepilot/internal/topology"
 )
 
 // GraphCandidate is the topology-first intermediate representation. The
@@ -21,12 +22,7 @@ type GraphCandidate struct {
 // The component scores are intentionally exposed through the intermediate
 // candidate so callers can audit why a cross-service match was retained.
 func GraphCandidateScore(current, historical domain.IncidentDependencyGraph) float64 {
-	neighbor := NeighborOverlap(current, historical)
-	path := DependencyPathSimilarity(current, historical)
-	distance := GraphDistance(current, historical)
-	critical := sharedCriticalDependency(current, historical)
-	role := failingRoleSimilarity(current, historical)
-	return clamp(.35*neighbor + .30*path + .20*distance + .10*critical + .05*role)
+	return incidenttopology.Similarity(incidenttopology.FromDependencyGraph(current.RootService, current), incidenttopology.FromDependencyGraph(historical.RootService, historical)).Score
 }
 
 // NeighborOverlap compares dependency roles and target nodes while treating

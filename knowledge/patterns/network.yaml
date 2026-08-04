@@ -1,0 +1,8 @@
+patterns:
+  - id: network-timeout
+    category: network
+    cause: network_timeout
+    chain: [connection_timeout, downstream_error, request_error]
+    required_evidence: [trace_error, log_error]
+    contradictions: [connection_success]
+    confidence: 0.84

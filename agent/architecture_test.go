@@ -10,6 +10,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	causaldiscovery "github.com/kubepilot-aiops/kubepilot/internal/causal/discovery"
+	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
+	topologyknowledge "github.com/kubepilot-aiops/kubepilot/internal/topology/knowledge"
+	"github.com/kubepilot-aiops/kubepilot/reasoning"
 )
 
 func TestAgentProductionCodeHasNoManualEinoToolCallOrBenchmarkDependency(t *testing.T) {
@@ -91,6 +96,73 @@ func TestRecoveryAgentCannotDiscoverMutationTools(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestDiagnosisRegistryExposesOptionalTopologyAndCausalCapabilities(t *testing.T) {
+	tools, err := buildConstrainedDiagnosisTools(constrainedToolDeps{Reasoning: reasoning.New(reasoning.DefaultConfig())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wanted := map[string]bool{"build_incident_graph": false, "match_causal_patterns": false, "expand_causal_path": false, "score_hypothesis_causality": false}
+	for _, candidate := range tools {
+		info, infoErr := candidate.Info(context.Background())
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if _, ok := wanted[info.Name]; ok {
+			wanted[info.Name] = true
+		}
+	}
+	for name, found := range wanted {
+		if !found {
+			t.Fatalf("Diagnosis tool %q is not registered", name)
+		}
+	}
+}
+
+func TestDiagnosisRegistryExposesKnowledgeEvolutionCapabilities(t *testing.T) {
+	topologyStore := topologyknowledge.NewMemoryStore()
+	causalStore := causalknowledge.NewMemoryStore()
+	tools, err := buildConstrainedDiagnosisTools(constrainedToolDeps{Reasoning: reasoning.New(reasoning.DefaultConfig()), TopologyPatterns: topologyStore, CausalPatterns: causalStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wanted := map[string]bool{"retrieve_topology_patterns": false, "retrieve_causal_patterns": false, "propose_causal_pattern": false, "validate_causal_pattern": false}
+	for _, candidate := range tools {
+		info, infoErr := candidate.Info(context.Background())
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if _, ok := wanted[info.Name]; ok {
+			wanted[info.Name] = true
+		}
+	}
+	for name, found := range wanted {
+		if !found {
+			t.Fatalf("knowledge evolution tool %q is not registered", name)
+		}
+	}
+}
+
+func TestDiagnosisRegistryExposesDiscoveredCausalPatternsReadOnly(t *testing.T) {
+	patterns := causaldiscovery.NewMemoryStore()
+	if err := patterns.Upsert(context.Background(), causaldiscovery.CausalPatternCandidate{CausalPath: []string{"memory_growth", "oom_killed", "pod_restart"}, Status: causaldiscovery.StatusAccepted, Frequency: 3, Coverage: 1, Confidence: .9}); err != nil {
+		t.Fatal(err)
+	}
+	tools, err := buildConstrainedDiagnosisTools(constrainedToolDeps{Reasoning: reasoning.New(reasoning.DefaultConfig()), DiscoveredPatterns: patterns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range tools {
+		info, infoErr := candidate.Info(context.Background())
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "retrieve_discovered_causal_patterns" {
+			return
+		}
+	}
+	t.Fatal("discovered causal pattern tool is not registered")
 }
 
 func TestForbiddenToolIntentProtectsEvaluationAndServerContext(t *testing.T) {

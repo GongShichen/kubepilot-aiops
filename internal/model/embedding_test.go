@@ -120,6 +120,52 @@ func TestEmbedderSplitsConfiguredBatches(t *testing.T) {
 	}
 }
 
+func TestEmbedderRunsBoundedConcurrentBatchesInInputOrder(t *testing.T) {
+	var current atomic.Int32
+	var maximum atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		active := current.Add(1)
+		for {
+			old := maximum.Load()
+			if active <= old || maximum.CompareAndSwap(old, active) {
+				break
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+		current.Add(-1)
+		data := make([]map[string]any, len(request.Input))
+		for index := range request.Input {
+			data[index] = map[string]any{"index": index, "embedding": []float32{float32(len(request.Input[index]))}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer server.Close()
+	embedder := NewEmbedder(config.EmbeddingConfig{
+		BaseURL: server.URL, APIPath: "/embeddings", APIKey: "secret", Model: "test",
+		Dimensions: 1, BatchSize: 1, Concurrency: 4, Timeout: time.Second,
+	})
+	input := []string{"a", "bb", "ccc", "dddd", "eeeee", "ffffff"}
+	vectors, err := embedder.Embed(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maximum.Load() < 2 {
+		t.Fatalf("requests were not concurrent: maximum=%d", maximum.Load())
+	}
+	for index, vector := range vectors {
+		if len(vector) != 1 || vector[0] != float32(len(input[index])) {
+			t.Fatalf("vector[%d]=%v, input order was not preserved", index, vector)
+		}
+	}
+}
+
 func TestEmbedderRedactsProviderEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

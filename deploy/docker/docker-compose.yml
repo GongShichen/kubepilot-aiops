@@ -86,8 +86,12 @@ services:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: [minio, server, /minio_data]
     environment:
-      MINIO_ACCESS_KEY: retrievalminio
-      MINIO_SECRET_KEY: retrievalminio
+      # Keep both names for compatibility with the pinned MinIO/Milvus
+      # images; the ROOT_* names are required by current MinIO releases.
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
     volumes: [retrieval-minio-data:/minio_data]
 
   milvus-benchmark:
@@ -97,6 +101,8 @@ services:
     environment:
       ETCD_ENDPOINTS: etcd-benchmark:2379
       MINIO_ADDRESS: minio-benchmark:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
     depends_on: [etcd-benchmark, minio-benchmark]
     volumes: [retrieval-milvus-data:/var/lib/milvus]
     ports: ["${RETRIEVAL_MILVUS_PORT:-19531}:19530", "${RETRIEVAL_MILVUS_HEALTH_PORT:-9094}:9091"]
@@ -143,6 +149,8 @@ services:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: [minio, server, /minio_data, --console-address, :9001]
     environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
     volumes: [minio-data:/minio_data]
@@ -154,6 +162,8 @@ services:
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
     depends_on: [etcd, minio]
     volumes: [milvus-data:/var/lib/milvus]
     ports: ["19530:19530", "9092:9091"]

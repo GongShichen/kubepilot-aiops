@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	causaldiscovery "github.com/kubepilot-aiops/kubepilot/internal/causal/discovery"
+	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	topologyknowledge "github.com/kubepilot-aiops/kubepilot/internal/topology/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
 )
 
@@ -26,6 +29,12 @@ func (learningEmbedder) Embed(_ context.Context, texts []string) ([][]float32, e
 }
 
 type learningVectors struct{ docs []retrieval.Document }
+
+type discoveryHistory struct{ incidents []*domain.Incident }
+
+func (h discoveryHistory) ListResolvedIncidents(context.Context, []string, int) ([]*domain.Incident, error) {
+	return h.incidents, nil
+}
 
 func (v *learningVectors) Upsert(_ context.Context, docs []retrieval.Document) error {
 	v.docs = append(v.docs, docs...)
@@ -138,5 +147,47 @@ func TestCausalLearningRejectsInfrastructureFailures(t *testing.T) {
 	}
 	if store.knowledge != 0 || len(store.patterns) != 0 {
 		t.Fatal("incident with infrastructure failure entered learning")
+	}
+}
+
+func TestKnowledgeEvolutionRunsOutsideAgentAndMergesResolvedIncident(t *testing.T) {
+	store := newLearningStore()
+	topologyStore := topologyknowledge.NewMemoryStore()
+	causalStore := causalknowledge.NewMemoryStore()
+	incident := eligibleLearnIncident("evolve-1", "kubepilot-demo")
+	incident.Evidence[0].Content = map[string]any{"dependency": "mysql"}
+	learner := CausalLearner{Store: store, Namespaces: []string{"kubepilot-demo"}, TopologyPatterns: topologyStore, CausalPatterns: causalStore}
+	if err := learner.Learn(context.Background(), incident); err != nil {
+		t.Fatal(err)
+	}
+	patterns, err := topologyStore.List(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(patterns) != 1 || patterns[0].Frequency != 1 {
+		t.Fatalf("topology knowledge was not extracted: %+v", patterns)
+	}
+	causalPatterns, err := causalStore.List(context.Background(), "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(causalPatterns) != 1 || causalPatterns[0].Status == "active" {
+		t.Fatalf("causal proposal bypassed repetition gate: %+v", causalPatterns)
+	}
+}
+
+func TestCausalLearningTriggersDiscoveryOutsideAgent(t *testing.T) {
+	store := newLearningStore()
+	incidents := []*domain.Incident{eligibleLearnIncident("discover-1", "kubepilot-demo"), eligibleLearnIncident("discover-2", "kubepilot-demo"), eligibleLearnIncident("discover-3", "kubepilot-demo")}
+	learner := CausalLearner{Store: store, Namespaces: []string{"kubepilot-demo"}, Discovery: causaldiscovery.NewEngine(causaldiscovery.NewMemoryStore(), nil), IncidentHistory: discoveryHistory{incidents: incidents}}
+	if err := learner.Learn(context.Background(), incidents[0]); err != nil {
+		t.Fatal(err)
+	}
+	items, err := learner.Discovery.Candidates.List(context.Background(), causaldiscovery.StatusAccepted, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) == 0 {
+		t.Fatal("resolved incident learning did not trigger discovery")
 	}
 }

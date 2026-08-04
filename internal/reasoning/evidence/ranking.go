@@ -184,6 +184,7 @@ func RankCandidates(policy Policy, items []domain.RetrievalCandidate) []domain.R
 		out[index].Rank.IncidentRank = &domain.IncidentRankBreakdown{
 			IncidentID:          out[index].IncidentID,
 			DeterministicScore:  deterministic,
+			TopologyScore:       out[index].Rank.TopologySimilarity,
 			NeuralScore:         out[index].Rank.NeuralSimilarity,
 			DeterministicWeight: .45,
 			NeuralWeight:        .55,

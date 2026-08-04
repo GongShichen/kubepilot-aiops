@@ -21,6 +21,12 @@ type Embedder struct {
 }
 
 func NewEmbedder(cfg config.EmbeddingConfig) *Embedder {
+	if cfg.Concurrency <= 0 {
+		cfg.Concurrency = 1
+	}
+	if cfg.Concurrency > 64 {
+		cfg.Concurrency = 64
+	}
 	return &Embedder{cfg: cfg, http: &http.Client{Timeout: cfg.Timeout}}
 }
 func (e *Embedder) Embed(ctx context.Context, input []string) ([][]float32, error) {
@@ -31,16 +37,66 @@ func (e *Embedder) Embed(ctx context.Context, input []string) ([][]float32, erro
 	if batchSize <= 0 || batchSize > 256 {
 		batchSize = 10
 	}
-	vectors := make([][]float32, 0, len(input))
+	type batchJob struct{ start, end int }
+	result := make([][]float32, len(input))
+	batchCount := (len(input) + batchSize - 1) / batchSize
+	workerCount := e.cfg.Concurrency
+	if workerCount > batchCount {
+		workerCount = batchCount
+	}
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan batchJob)
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var firstErr error
+	for worker := 0; worker < workerCount; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				if workCtx.Err() != nil {
+					return
+				}
+				batch, err := e.embedBatch(workCtx, input[job.start:job.end])
+				if err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = err
+						cancel()
+					}
+					errMu.Unlock()
+					return
+				}
+				copy(result[job.start:job.end], batch)
+			}
+		}()
+	}
 	for start := 0; start < len(input); start += batchSize {
 		end := min(start+batchSize, len(input))
-		batch, err := e.embedBatch(ctx, input[start:end])
-		if err != nil {
-			return nil, fmt.Errorf("embedding provider: %s", redactProviderError(err.Error(), e.cfg.APIKey))
+		select {
+		case jobs <- batchJob{start: start, end: end}:
+		case <-workCtx.Done():
+			break
 		}
-		vectors = append(vectors, batch...)
+		if workCtx.Err() != nil {
+			break
+		}
 	}
-	return vectors, nil
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		return nil, fmt.Errorf("embedding provider: %s", redactProviderError(firstErr.Error(), e.cfg.APIKey))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for index, vector := range result {
+		if len(vector) == 0 {
+			return nil, fmt.Errorf("embedding provider: missing embedding result at index %d", index)
+		}
+	}
+	return result, nil
 }
 
 func (e *Embedder) embedBatch(ctx context.Context, input []string) ([][]float32, error) {
