@@ -11,19 +11,31 @@ type Collector interface {
 	Collect(context.Context, *domain.Incident) ([]domain.Evidence, error)
 }
 type WorkflowState struct {
-	Version           string                   `json:"version"`
-	Incident          *domain.Incident         `json:"incident"`
-	EvidencePlan      EvidencePlan             `json:"evidence_plan"`
-	DryRun            *domain.DryRunResult     `json:"dry_run,omitempty"`
-	ExecutionContext  *domain.ExecutionContext `json:"execution_context,omitempty"`
-	VerificationState VerificationState        `json:"verification_state"`
-	ModelSnapshotHash string                   `json:"model_snapshot_hash,omitempty"`
-	ToolCalls         int                      `json:"tool_calls"`
-	DiagnosisAttempts int                      `json:"diagnosis_attempts"`
-	Errors            []string                 `json:"errors,omitempty"`
+	Workflow           string                                 `json:"workflow"`
+	Incident           *domain.Incident                       `json:"incident"`
+	EvidencePlan       EvidencePlan                           `json:"evidence_plan"`
+	DryRun             *domain.DryRunResult                   `json:"dry_run,omitempty"`
+	ExecutionContext   *domain.ExecutionContext               `json:"execution_context,omitempty"`
+	VerificationState  VerificationState                      `json:"verification_state"`
+	ModelSnapshotHash  string                                 `json:"model_snapshot_hash,omitempty"`
+	ToolCalls          int                                    `json:"tool_calls"`
+	DiagnosisAttempts  int                                    `json:"diagnosis_attempts"`
+	Errors             []string                               `json:"errors,omitempty"`
+	RankedEvidence     []domain.Evidence                      `json:"ranked_evidence,omitempty"`
+	Features           domain.IncidentFeatures                `json:"incident_features"`
+	CandidateLists     map[string][]domain.RetrievalCandidate `json:"candidate_lists,omitempty"`
+	Candidates         []domain.RetrievalCandidate            `json:"candidates,omitempty"`
+	CausalPatterns     []domain.CausalPattern                 `json:"causal_patterns,omitempty"`
+	HypothesisDrafts   []domain.HypothesisDraft               `json:"hypothesis_drafts,omitempty"`
+	VerifiedHypotheses []domain.VerifiedHypothesis            `json:"verified_hypotheses,omitempty"`
+	DiagnosisLedger    domain.DiagnosisLedger                 `json:"diagnosis_ledger"`
 }
 
-const WorkflowVersion = "eino-incident-v2"
+const WorkflowName = "eino-constrained-react"
+
+// The graph only contains the safety skeleton. Exploration happens inside the
+// bounded ADK ReAct runtime, so graph steps remain small and deterministic.
+const GraphMaxSteps = 12
 
 type EvidencePlan struct {
 	WindowStart time.Time            `json:"window_start" jsonschema:"required"`
@@ -44,17 +56,10 @@ type CorrelationDecision struct {
 	Reason     string  `json:"reason" jsonschema:"required"`
 }
 
-type DiagnosisDecision struct {
-	ReasoningType             string              `json:"reasoning_type" jsonschema:"required,enum=hypothesis_verification"`
-	RootCause                 string              `json:"root_cause" jsonschema:"required"`
-	Category                  string              `json:"category" jsonschema:"required,enum=cpu,enum=memory,enum=database,enum=network,enum=deployment"`
-	Variant                   string              `json:"variant" jsonschema:"required"`
-	Service                   string              `json:"service" jsonschema:"required"`
-	Resource                  string              `json:"resource" jsonschema:"required"`
-	Confidence                float64             `json:"confidence" jsonschema:"required,minimum=0,maximum=1"`
-	EvidenceIDs               []string            `json:"evidence_ids" jsonschema:"required,minItems=1"`
-	Hypotheses                []domain.Hypothesis `json:"hypotheses" jsonschema:"required,minItems=1,maxItems=3"`
-	RequestAdditionalEvidence bool                `json:"request_additional_evidence,omitempty"`
+type HypothesisSubmission struct {
+	ReasoningType             string                   `json:"reasoning_type" jsonschema:"required,enum=hypothesis_verification"`
+	Hypotheses                []domain.HypothesisDraft `json:"hypotheses" jsonschema:"required,minItems=1,maxItems=3"`
+	RequestAdditionalEvidence bool                     `json:"request_additional_evidence,omitempty"`
 }
 
 type RecoveryDecision struct {

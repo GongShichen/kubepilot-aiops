@@ -16,6 +16,7 @@ import (
 )
 
 type Manifest struct {
+	ManifestHash        string    `json:"manifest_hash,omitempty"`
 	RunID               string    `json:"run_id"`
 	Profile             string    `json:"profile"`
 	CatalogHash         string    `json:"catalog_hash"`
@@ -23,6 +24,12 @@ type Manifest struct {
 	Model               string    `json:"chat_model"`
 	EndpointHash        string    `json:"endpoint_hash"`
 	ModelConfigHash     string    `json:"model_config_hash"`
+	SkillSnapshotHash   string    `json:"skill_snapshot_hash,omitempty"`
+	RankingPolicyHash   string    `json:"ranking_policy_hash,omitempty"`
+	ToolCostPolicyHash  string    `json:"tool_cost_policy_hash,omitempty"`
+	BudgetConfigHash    string    `json:"budget_config_hash,omitempty"`
+	RerankerModel       string    `json:"reranker_model,omitempty"`
+	RerankerConfigHash  string    `json:"reranker_config_hash,omitempty"`
 	EmbeddingModel      string    `json:"embedding_model,omitempty"`
 	EmbeddingDimensions string    `json:"embedding_dimensions,omitempty"`
 	DiagnosisMethod     string    `json:"diagnosis_method,omitempty"`
@@ -44,19 +51,33 @@ func WriteManifest(root string, manifest Manifest) error {
 }
 
 type CaseResult struct {
-	CaseID            string        `json:"case_id"`
-	IncidentID        string        `json:"incident_id,omitempty"`
-	Category          string        `json:"category"`
-	Status            string        `json:"status"`
-	Score             scorer.Score  `json:"score"`
-	Duration          time.Duration `json:"duration"`
-	Error             string        `json:"error,omitempty"`
-	RootCauseCategory string        `json:"root_cause_category,omitempty"`
-	RootCauseVariant  string        `json:"root_cause_variant,omitempty"`
-	Service           string        `json:"service,omitempty"`
-	Resource          string        `json:"resource,omitempty"`
-	Confidence        float64       `json:"confidence"`
-	DiagnosisMethod   string        `json:"diagnosis_method,omitempty"`
+	CaseID                  string        `json:"case_id"`
+	IncidentID              string        `json:"incident_id,omitempty"`
+	Category                string        `json:"category"`
+	Status                  string        `json:"status"`
+	Score                   scorer.Score  `json:"score"`
+	Duration                time.Duration `json:"duration"`
+	Error                   string        `json:"error,omitempty"`
+	RootCauseCategory       string        `json:"root_cause_category,omitempty"`
+	RootCauseVariant        string        `json:"root_cause_variant,omitempty"`
+	Service                 string        `json:"service,omitempty"`
+	Resource                string        `json:"resource,omitempty"`
+	Confidence              float64       `json:"confidence"`
+	DiagnosisMethod         string        `json:"diagnosis_method,omitempty"`
+	AgentToolUses           int           `json:"agent_tool_uses"`
+	AgentToolCost           int           `json:"agent_tool_cost"`
+	AgentTokens             int           `json:"agent_tokens"`
+	AgentCorrections        int           `json:"agent_corrections"`
+	SafetyRejections        int           `json:"safety_rejections"`
+	SelfCorrectionAttempts  int           `json:"self_correction_attempts"`
+	SelfCorrectionSucceeded bool          `json:"self_correction_succeeded"`
+	HypothesisCount         int           `json:"hypothesis_count"`
+	HypothesisConverged     bool          `json:"hypothesis_converged"`
+	EvidenceQueries         int           `json:"evidence_queries"`
+	EvidenceEfficiency      float64       `json:"evidence_efficiency"`
+	ConfidenceUpdates       int           `json:"confidence_updates"`
+	AttributedEvidence      int           `json:"attributed_evidence"`
+	TopologyCandidates      int           `json:"topology_candidates"`
 }
 type Summary struct {
 	Total                         int     `json:"total"`
@@ -78,6 +99,20 @@ type Summary struct {
 	HighConfidenceErrorRate       float64 `json:"high_confidence_error_rate"`
 	CategoryMacroF1               float64 `json:"category_macro_f1"`
 	MeanDurationSeconds           float64 `json:"mean_duration_seconds"`
+	MeanAgentToolUses             float64 `json:"mean_agent_tool_uses"`
+	MeanAgentToolCost             float64 `json:"mean_agent_tool_cost"`
+	MeanAgentTokens               float64 `json:"mean_agent_tokens"`
+	MeanAgentCorrections          float64 `json:"mean_agent_corrections"`
+	TotalSafetyRejections         int     `json:"total_safety_rejections"`
+	MeanSafetyRejections          float64 `json:"mean_safety_rejections"`
+	SelfCorrectionCases           int     `json:"self_correction_cases"`
+	SelfCorrectionSuccesses       int     `json:"self_correction_successes"`
+	SelfCorrectionSuccessRate     float64 `json:"self_correction_success_rate"`
+	HypothesisConvergenceRate     float64 `json:"hypothesis_convergence_rate"`
+	MeanHypothesisCount           float64 `json:"mean_hypothesis_count"`
+	MeanEvidenceQueries           float64 `json:"mean_evidence_queries"`
+	MeanEvidenceEfficiency        float64 `json:"mean_evidence_efficiency"`
+	MeanConfidenceUpdates         float64 `json:"mean_confidence_updates"`
 }
 
 func Write(root string, m Manifest, items []CaseResult) (Summary, error) {
@@ -99,6 +134,10 @@ func Write(root string, m Manifest, items []CaseResult) (Summary, error) {
 	var strict, localized, category, variant, service, resource, decision int
 	var evidencePrecision, evidenceRecall, evidenceGroundedness float64
 	var duration time.Duration
+	var toolUses, toolCost, tokens, corrections, confidenceUpdates int
+	var safetyRejections, hypothesisConverged, hypothesisCount, evidenceQueries int
+	var selfCorrectionCases, selfCorrectionSuccesses int
+	var evidenceEfficiency float64
 	for _, item := range items {
 		b, _ := json.Marshal(item)
 		_, _ = w.Write(append(b, '\n'))
@@ -132,6 +171,24 @@ func Write(root string, m Manifest, items []CaseResult) (Summary, error) {
 			decision++
 		}
 		duration += item.Duration
+		toolUses += item.AgentToolUses
+		toolCost += item.AgentToolCost
+		tokens += item.AgentTokens
+		corrections += item.AgentCorrections
+		safetyRejections += item.SafetyRejections
+		if item.SelfCorrectionAttempts > 0 {
+			selfCorrectionCases++
+			if item.SelfCorrectionSucceeded {
+				selfCorrectionSuccesses++
+			}
+		}
+		if item.HypothesisConverged {
+			hypothesisConverged++
+		}
+		hypothesisCount += item.HypothesisCount
+		evidenceQueries += item.EvidenceQueries
+		evidenceEfficiency += item.EvidenceEfficiency
+		confidenceUpdates += item.ConfidenceUpdates
 		evidencePrecision += item.Score.EvidencePrecision
 		evidenceRecall += item.Score.EvidenceRecall
 		evidenceGroundedness += item.Score.EvidenceGroundedness
@@ -150,6 +207,22 @@ func Write(root string, m Manifest, items []CaseResult) (Summary, error) {
 		sum.EvidenceGroundedness = evidenceGroundedness / float64(sum.Total)
 		sum.DecisionAccuracy = float64(decision) / float64(sum.Total)
 		sum.MeanDurationSeconds = duration.Seconds() / float64(sum.Total)
+		sum.MeanAgentToolUses = float64(toolUses) / float64(sum.Total)
+		sum.MeanAgentToolCost = float64(toolCost) / float64(sum.Total)
+		sum.MeanAgentTokens = float64(tokens) / float64(sum.Total)
+		sum.MeanAgentCorrections = float64(corrections) / float64(sum.Total)
+		sum.TotalSafetyRejections = safetyRejections
+		sum.MeanSafetyRejections = float64(safetyRejections) / float64(sum.Total)
+		sum.SelfCorrectionCases = selfCorrectionCases
+		sum.SelfCorrectionSuccesses = selfCorrectionSuccesses
+		if selfCorrectionCases > 0 {
+			sum.SelfCorrectionSuccessRate = float64(selfCorrectionSuccesses) / float64(selfCorrectionCases)
+		}
+		sum.HypothesisConvergenceRate = float64(hypothesisConverged) / float64(sum.Total)
+		sum.MeanHypothesisCount = float64(hypothesisCount) / float64(sum.Total)
+		sum.MeanEvidenceQueries = float64(evidenceQueries) / float64(sum.Total)
+		sum.MeanEvidenceEfficiency = evidenceEfficiency / float64(sum.Total)
+		sum.MeanConfidenceUpdates = float64(confidenceUpdates) / float64(sum.Total)
 		sum.ConfidenceBrierScore, sum.ConfidenceECE, sum.HighConfidenceErrorRate = confidenceCalibration(items)
 		sum.CategoryMacroF1 = categoryMacroF1(items)
 	}
@@ -184,7 +257,7 @@ func Write(root string, m Manifest, items []CaseResult) (Summary, error) {
 	if err = os.MkdirAll(filepath.Join(dir, "traces"), 0o750); err != nil {
 		return sum, err
 	}
-	report := fmt.Sprintf("# KubePilot Diagnosis Benchmark Report\n\n- Run: `%s`\n- Profile: `%s`\n- Diagnosis method: `%s`\n- Cases: %d\n- Passed: %d\n- Failed: %d\n- Diagnosis workflow failures: %d\n- Strict Root Cause Accuracy: %.2f%%\n- Root Cause Localization Accuracy: %.2f%%\n- Fault Category Accuracy: %.2f%%\n- Root Cause Variant Accuracy: %.2f%%\n- Category Macro F1: %.2f%%\n- Evidence Precision: %.2f%%\n- Evidence Recall: %.2f%%\n- Evidence Groundedness: %.2f%%\n- Confidence Brier Score: %.4f\n- Confidence ECE: %.4f\n- High-confidence Error Rate: %.2f%%\n- Recovery Decision Accuracy: %.2f%%\n- Mean Duration: %.3fs\n\nRoot cause localization requires an exact category, variant, service, and resource match. Strict root cause accuracy additionally requires at least 50%% required-evidence recall. Workflow failures remain in the end-to-end denominator and are reported separately. All values in this report are measured from this run.\n", m.RunID, m.Profile, m.DiagnosisMethod, sum.Total, sum.Passed, sum.Failed, sum.DiagnosisFailures, sum.RootCauseAccuracy*100, sum.RootCauseLocalizationAccuracy*100, sum.CategoryAccuracy*100, sum.VariantAccuracy*100, sum.CategoryMacroF1*100, sum.EvidencePrecision*100, sum.EvidenceRecall*100, sum.EvidenceGroundedness*100, sum.ConfidenceBrierScore, sum.ConfidenceECE, sum.HighConfidenceErrorRate*100, sum.DecisionAccuracy*100, sum.MeanDurationSeconds)
+	report := fmt.Sprintf("# KubePilot Diagnosis Benchmark Report\n\n- Run: `%s`\n- Profile: `%s`\n- Diagnosis method: `%s`\n- Cases: %d\n- Passed: %d\n- Failed: %d\n- Diagnosis workflow failures: %d\n- Strict Root Cause Accuracy: %.2f%%\n- Root Cause Localization Accuracy: %.2f%%\n- Fault Category Accuracy: %.2f%%\n- Root Cause Variant Accuracy: %.2f%%\n- Category Macro F1: %.2f%%\n- Evidence Precision: %.2f%%\n- Evidence Recall: %.2f%%\n- Evidence Groundedness: %.2f%%\n- Confidence Brier Score: %.4f\n- Confidence ECE: %.4f\n- High-confidence Error Rate: %.2f%%\n- Recovery Decision Accuracy: %.2f%%\n- Mean Agent Tool Uses: %.2f\n- Mean Agent Tool Cost: %.2f\n- Mean Agent Tokens: %.2f\n- Mean Safety Corrections: %.2f\n- Total Safety Rejections: %d\n- Self-correction Success Rate: %.2f%%\n- Hypothesis Convergence Rate: %.2f%%\n- Mean Hypothesis Count: %.2f\n- Mean Evidence Queries: %.2f\n- Mean Evidence Efficiency: %.4f\n- Mean Confidence Updates: %.2f\n- Mean Duration: %.3fs\n\nRoot cause localization requires an exact category, variant, service, and resource match. Strict root cause accuracy additionally requires at least 50%% required-evidence recall. Workflow failures remain in the end-to-end denominator and are reported separately. All values in this report are measured from this run.\n", m.RunID, m.Profile, m.DiagnosisMethod, sum.Total, sum.Passed, sum.Failed, sum.DiagnosisFailures, sum.RootCauseAccuracy*100, sum.RootCauseLocalizationAccuracy*100, sum.CategoryAccuracy*100, sum.VariantAccuracy*100, sum.CategoryMacroF1*100, sum.EvidencePrecision*100, sum.EvidenceRecall*100, sum.EvidenceGroundedness*100, sum.ConfidenceBrierScore, sum.ConfidenceECE, sum.HighConfidenceErrorRate*100, sum.DecisionAccuracy*100, sum.MeanAgentToolUses, sum.MeanAgentToolCost, sum.MeanAgentTokens, sum.MeanAgentCorrections, sum.TotalSafetyRejections, sum.SelfCorrectionSuccessRate*100, sum.HypothesisConvergenceRate*100, sum.MeanHypothesisCount, sum.MeanEvidenceQueries, sum.MeanEvidenceEfficiency, sum.MeanConfidenceUpdates, sum.MeanDurationSeconds)
 	err = os.WriteFile(filepath.Join(dir, "report.md"), []byte(report), 0o640)
 	return sum, err
 }
@@ -367,9 +440,9 @@ func writeCSV(path string, items []CaseResult) error {
 	defer f.Close()
 	w := csv.NewWriter(f)
 	defer w.Flush()
-	_ = w.Write([]string{"case_id", "incident_id", "diagnosis_method", "category", "predicted_category", "predicted_variant", "status", "root_cause_correct", "strict_root_cause", "category_correct", "variant_correct", "service_correct", "resource_correct", "decision_correct", "evidence_precision", "evidence_recall", "evidence_groundedness", "confidence", "duration_seconds", "error"})
+	_ = w.Write([]string{"case_id", "incident_id", "diagnosis_method", "category", "predicted_category", "predicted_variant", "status", "root_cause_correct", "strict_root_cause", "category_correct", "variant_correct", "service_correct", "resource_correct", "decision_correct", "evidence_precision", "evidence_recall", "evidence_groundedness", "confidence", "agent_tool_uses", "agent_tool_cost", "agent_tokens", "agent_corrections", "safety_rejections", "self_correction_attempts", "self_correction_succeeded", "hypothesis_count", "hypothesis_converged", "evidence_queries", "evidence_efficiency", "confidence_updates", "duration_seconds", "error"})
 	for _, v := range items {
-		_ = w.Write([]string{v.CaseID, v.IncidentID, v.DiagnosisMethod, v.Category, v.RootCauseCategory, v.RootCauseVariant, v.Status, strconv.FormatBool(v.Score.RootCauseCorrect), strconv.FormatBool(v.Score.StrictRootCause), strconv.FormatBool(v.Score.CategoryCorrect), strconv.FormatBool(v.Score.VariantCorrect), strconv.FormatBool(v.Score.ServiceCorrect), strconv.FormatBool(v.Score.ResourceCorrect), strconv.FormatBool(v.Score.DecisionCorrect), strconv.FormatFloat(v.Score.EvidencePrecision, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceRecall, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceGroundedness, 'f', 4, 64), strconv.FormatFloat(v.Confidence, 'f', 4, 64), strconv.FormatFloat(v.Duration.Seconds(), 'f', 3, 64), v.Error})
+		_ = w.Write([]string{v.CaseID, v.IncidentID, v.DiagnosisMethod, v.Category, v.RootCauseCategory, v.RootCauseVariant, v.Status, strconv.FormatBool(v.Score.RootCauseCorrect), strconv.FormatBool(v.Score.StrictRootCause), strconv.FormatBool(v.Score.CategoryCorrect), strconv.FormatBool(v.Score.VariantCorrect), strconv.FormatBool(v.Score.ServiceCorrect), strconv.FormatBool(v.Score.ResourceCorrect), strconv.FormatBool(v.Score.DecisionCorrect), strconv.FormatFloat(v.Score.EvidencePrecision, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceRecall, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceGroundedness, 'f', 4, 64), strconv.FormatFloat(v.Confidence, 'f', 4, 64), strconv.Itoa(v.AgentToolUses), strconv.Itoa(v.AgentToolCost), strconv.Itoa(v.AgentTokens), strconv.Itoa(v.AgentCorrections), strconv.Itoa(v.SafetyRejections), strconv.Itoa(v.SelfCorrectionAttempts), strconv.FormatBool(v.SelfCorrectionSucceeded), strconv.Itoa(v.HypothesisCount), strconv.FormatBool(v.HypothesisConverged), strconv.Itoa(v.EvidenceQueries), strconv.FormatFloat(v.EvidenceEfficiency, 'f', 4, 64), strconv.Itoa(v.ConfidenceUpdates), strconv.FormatFloat(v.Duration.Seconds(), 'f', 3, 64), v.Error})
 	}
 	return w.Error()
 }

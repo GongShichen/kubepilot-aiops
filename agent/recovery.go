@@ -92,6 +92,15 @@ func (e KubernetesExecutor) DryRun(ctx context.Context, p *domain.RecoveryPropos
 		result.Error = err.Error()
 		return result, err
 	}
+	result.MutationSpecHash = proposalMutationHash(p, after)
+	result.Success = true
+	return result, nil
+}
+
+func proposalMutationHash(p *domain.RecoveryProposal, after map[string]any) string {
+	if p == nil {
+		return ""
+	}
 	payload, _ := json.Marshal(struct {
 		Action     domain.RecoveryAction `json:"action"`
 		Namespace  string                `json:"namespace"`
@@ -102,9 +111,24 @@ func (e KubernetesExecutor) DryRun(ctx context.Context, p *domain.RecoveryPropos
 		After      map[string]any        `json:"after"`
 	}{p.Action, p.Namespace, p.Target, p.TargetUID, p.ResourceVersion, p.Parameters, after})
 	hash := sha256.Sum256(payload)
-	result.Success = true
-	result.MutationSpecHash = hex.EncodeToString(hash[:])
-	return result, nil
+	return hex.EncodeToString(hash[:])
+}
+
+func (e KubernetesExecutor) ValidateDryRunFreshness(ctx context.Context, proposal *domain.RecoveryProposal, dryRun *domain.DryRunResult) error {
+	if proposal == nil || dryRun == nil || !dryRun.Success || time.Since(dryRun.ValidatedAt) > 2*time.Minute {
+		return fmt.Errorf("proposal validation snapshot is missing or expired")
+	}
+	if dryRun.Action != proposal.Action || dryRun.Target != proposal.Target || dryRun.MutationSpecHash == "" || dryRun.MutationSpecHash != proposalMutationHash(proposal, dryRun.After) {
+		return fmt.Errorf("proposal validation snapshot does not match the current proposal")
+	}
+	uid, resourceVersion, _, _, err := e.Client.TargetState(ctx, proposal.Namespace, proposal.Target)
+	if err != nil {
+		return fmt.Errorf("current target state is unavailable")
+	}
+	if uid != proposal.TargetUID || resourceVersion != proposal.ResourceVersion {
+		return fmt.Errorf("target state changed after proposal validation")
+	}
+	return nil
 }
 
 func (e KubernetesExecutor) Execute(ctx context.Context, in *domain.Incident, p domain.RecoveryProposal) error {
@@ -161,8 +185,10 @@ func (e KubernetesExecutor) Execute(ctx context.Context, in *domain.Incident, p 
 	}
 	if executeErr == nil {
 		completion = "succeeded"
+		return nil
 	}
-	return executeErr
+	completion = "unknown"
+	return fmt.Errorf("%w: mutation API did not provide a confirmed result", ErrActionResultUnknown)
 }
 
 func proposalReplicas(parameters map[string]any) (int32, error) {
@@ -195,34 +221,13 @@ func proposalReplicas(parameters map[string]any) (int32, error) {
 	return int32(replicas), nil
 }
 func (e KubernetesExecutor) Verify(ctx context.Context, in *domain.Incident) (domain.Verification, error) {
-	deadline := time.NewTimer(2 * time.Minute)
-	defer deadline.Stop()
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	consecutive := 0
-	var previousRestarts int32 = -1
 	target := in.Resource
 	if in.Proposal != nil && in.Proposal.Target != "" {
 		target = in.Proposal.Target
 	}
-	for {
-		_, _, ready, restarts, err := e.Client.TargetState(ctx, in.Namespace, target)
-		stable := err == nil && ready && (previousRestarts < 0 || restarts <= previousRestarts)
-		if stable {
-			consecutive++
-		} else {
-			consecutive = 0
-		}
-		previousRestarts = restarts
-		if consecutive >= 3 {
-			return domain.Verification{Success: true, Checks: map[string]bool{"pod_ready": true, "deployment_available": true, "restarts_stable": true}, Message: "Kubernetes health checks passed three consecutive samples", CompletedAt: time.Now().UTC()}, nil
-		}
-		select {
-		case <-ctx.Done():
-			return domain.Verification{}, ctx.Err()
-		case <-deadline.C:
-			return domain.Verification{Success: false, Checks: map[string]bool{"pod_ready": ready, "restarts_stable": stable}, Message: "verification timed out", CompletedAt: time.Now().UTC()}, nil
-		case <-ticker.C:
-		}
+	_, _, ready, restarts, err := e.Client.TargetState(ctx, in.Namespace, target)
+	if err != nil {
+		return domain.Verification{}, err
 	}
+	return domain.Verification{Success: ready, Checks: map[string]bool{"pod_ready": ready, "deployment_available": ready}, Message: "Kubernetes verification sample collected", RestartCount: &restarts, CompletedAt: time.Now().UTC()}, nil
 }

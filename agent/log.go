@@ -52,9 +52,42 @@ func (a LogCollector) Collect(ctx context.Context, in *domain.Incident) ([]domai
 	}
 	stale := freshness == 0 || freshness > 30*time.Second
 	for _, doc := range docs {
-		out = append(out, domain.Evidence{Source: "loki", Type: "indexed_log_template", Timestamp: end, WindowStart: start, WindowEnd: end, Namespace: in.Namespace, Service: in.Service, Resource: in.Resource, Summary: doc.Template, Confidence: map[bool]float64{true: .5, false: .9}[stale], TemplateID: doc.ID, Content: map[string]any{"index_freshness_ms": freshness.Milliseconds(), "stale": stale, "index_metadata": doc.RootCause}})
+		level := strings.ToLower(firstNonEmptyLog(doc.Level, templateLevel(doc.Template)))
+		if (level == "info" || level == "debug") && !containsLogFailureMarker(doc.Template) {
+			continue
+		}
+		out = append(out, domain.Evidence{Source: "loki", Type: "indexed_log_template", Timestamp: end, WindowStart: start, WindowEnd: end, Namespace: in.Namespace, Service: in.Service, Resource: in.Resource, Summary: doc.Template, Confidence: map[bool]float64{true: .5, false: .9}[stale], TemplateID: doc.ID, Content: map[string]any{"index_freshness_ms": freshness.Milliseconds(), "stale": stale, "index_metadata": doc.RootCause, "level": level, "occurrence_count": doc.OccurrenceCount, "semantic_score": doc.Score}})
 	}
 	return out, nil
+}
+
+func templateLevel(template string) string {
+	lower := strings.ToLower(template)
+	for _, level := range []string{"critical", "fatal", "error", "warn", "warning", "info", "debug"} {
+		if strings.Contains(lower, `"level":"`+level+`"`) || strings.Contains(lower, "level="+level) {
+			return level
+		}
+	}
+	return ""
+}
+
+func containsLogFailureMarker(value string) bool {
+	value = strings.ToLower(value)
+	for _, marker := range []string{"error", "exception", "timeout", "killed", "failed", "failure", "oom", "refused", "unavailable", "throttl", "crashloop", "imagepull", "probe"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmptyLog(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func incidentLogQuery(namespace, service string) string {

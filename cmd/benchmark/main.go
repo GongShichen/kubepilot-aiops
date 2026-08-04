@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,6 +34,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	llm "github.com/kubepilot-aiops/kubepilot/internal/model"
+	rerankerclient "github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
 	"github.com/kubepilot-aiops/kubepilot/tools"
 	"github.com/oklog/ulid/v2"
@@ -181,7 +183,16 @@ func run(args []string) {
 	historyHash, _ := fileSHA256("benchmark/history.yaml")
 	sourceHash, _ := sourceTreeSHA256(".")
 	modelConfigHash := diagnosisModelConfigHash()
-	manifest := reporter.Manifest{RunID: *runID, Profile: *profile, CatalogHash: hash, Protocol: env("CHAT_PROTOCOL", "openai-compatible"), Model: os.Getenv("CHAT_MODEL"), EndpointHash: hex.EncodeToString(endpointHash[:]), ModelConfigHash: modelConfigHash, EmbeddingModel: os.Getenv("EMBEDDING_MODEL"), EmbeddingDimensions: env("EMBEDDING_DIMENSIONS", "1024"), DiagnosisMethod: *diagnosisMethod, GitCommit: gitCommit(), SourceHash: sourceHash, HistoryDatasetHash: historyHash, HistoryCollection: env("HISTORY_COLLECTION", "kubepilot_history_v2"), Seed: 20260803, StartedAt: time.Now().UTC()}
+	skillHash, err := diagnosisSkillSnapshotHash()
+	fatal(err)
+	rankingHash, err := fileSHA256(env("RANKING_POLICY_FILE", "knowledge/ranking_policy.yaml"))
+	fatal(err)
+	toolCostHash, err := fileSHA256(env("TOOL_COST_FILE", "internal/agent/skills/tool_costs.yaml"))
+	fatal(err)
+	rerankerModel, rerankerHash := diagnosisRerankerIdentity()
+	manifestHash, manifestErr := fileSHA256("benchmark/manifests/default.yaml")
+	fatal(manifestErr)
+	manifest := reporter.Manifest{ManifestHash: manifestHash, RunID: *runID, Profile: *profile, CatalogHash: hash, Protocol: env("CHAT_PROTOCOL", "openai-compatible"), Model: os.Getenv("CHAT_MODEL"), EndpointHash: hex.EncodeToString(endpointHash[:]), ModelConfigHash: modelConfigHash, SkillSnapshotHash: skillHash, RankingPolicyHash: rankingHash, ToolCostPolicyHash: toolCostHash, BudgetConfigHash: diagnosisBudgetConfigHash(), RerankerModel: rerankerModel, RerankerConfigHash: rerankerHash, EmbeddingModel: os.Getenv("EMBEDDING_MODEL"), EmbeddingDimensions: env("EMBEDDING_DIMENSIONS", "1024"), DiagnosisMethod: *diagnosisMethod, GitCommit: gitCommit(), SourceHash: sourceHash, HistoryDatasetHash: historyHash, HistoryCollection: env("HISTORY_COLLECTION", "kubepilot_history"), Seed: 20260803, StartedAt: time.Now().UTC()}
 	var previous []reporter.CaseResult
 	if *resumeRun {
 		var existing reporter.Manifest
@@ -246,12 +257,56 @@ func diagnosisModelConfigHash() string {
 	return hex.EncodeToString(hash[:])
 }
 
+func diagnosisSkillSnapshotHash() (string, error) {
+	files := []struct{ agent, path string }{
+		{"diagnosis_agent", "internal/agent/skills/diagnosis/SKILL.md"},
+		{"recovery_agent", "internal/agent/skills/recovery/SKILL.md"},
+		{"supervisor_agent", "internal/agent/skills/supervisor/SKILL.md"},
+	}
+	h := sha256.New()
+	for _, item := range files {
+		fileHash, err := fileSHA256(item.path)
+		if err != nil {
+			return "", err
+		}
+		_, _ = h.Write([]byte(item.agent + ":" + fileHash + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func diagnosisBudgetConfigHash() string {
+	configuration := map[string]string{}
+	for key, fallback := range map[string]string{
+		"SUPERVISOR_MAX_ITERATIONS": "10", "SUPERVISOR_MAX_TOOL_USES": "8", "SUPERVISOR_MAX_TOOL_COST": "24", "SUPERVISOR_MAX_TOKENS": "12000", "SUPERVISOR_MAX_CORRECTIONS": "3",
+		"DIAGNOSIS_MAX_ITERATIONS": "12", "DIAGNOSIS_MAX_TOOL_USES": "15", "DIAGNOSIS_MAX_TOOL_COST": "32", "DIAGNOSIS_MAX_TOKENS": "30000", "DIAGNOSIS_MAX_CORRECTIONS": "3",
+		"RECOVERY_MAX_ITERATIONS": "10", "RECOVERY_MAX_TOOL_USES": "10", "RECOVERY_MAX_TOOL_COST": "16", "RECOVERY_MAX_TOKENS": "16000", "RECOVERY_MAX_CORRECTIONS": "2",
+		"INCIDENT_MAX_AGENT_TOOL_USES": "30", "INCIDENT_MAX_AGENT_TOOL_COST": "72", "INCIDENT_MAX_TOKENS": "58000",
+	} {
+		configuration[key] = env(key, fallback)
+	}
+	encoded, _ := json.Marshal(configuration)
+	hash := sha256.Sum256(encoded)
+	return hex.EncodeToString(hash[:])
+}
+
+func diagnosisRerankerIdentity() (string, string) {
+	if !strings.EqualFold(env("RERANKER_ENABLED", "false"), "true") {
+		return "", ""
+	}
+	cfg := config.RerankerConfig{Enabled: true, Protocol: env("RERANKER_PROTOCOL", "openai-compatible"), BaseURL: os.Getenv("RERANKER_BASE_URL"), APIPath: env("RERANKER_API_PATH", "/reranks"), Model: os.Getenv("RERANKER_MODEL")}
+	return cfg.Model, rerankerclient.New(cfg).ConfigHash()
+}
+
 func validateResumeManifest(existing, current reporter.Manifest) error {
 	type field struct{ name, old, new string }
 	fields := []field{
 		{"profile", existing.Profile, current.Profile}, {"catalog_hash", existing.CatalogHash, current.CatalogHash},
+		{"manifest_hash", existing.ManifestHash, current.ManifestHash},
 		{"chat_protocol", existing.Protocol, current.Protocol}, {"chat_model", existing.Model, current.Model},
 		{"endpoint_hash", existing.EndpointHash, current.EndpointHash}, {"model_config_hash", existing.ModelConfigHash, current.ModelConfigHash},
+		{"skill_snapshot_hash", existing.SkillSnapshotHash, current.SkillSnapshotHash}, {"ranking_policy_hash", existing.RankingPolicyHash, current.RankingPolicyHash},
+		{"tool_cost_policy_hash", existing.ToolCostPolicyHash, current.ToolCostPolicyHash}, {"budget_config_hash", existing.BudgetConfigHash, current.BudgetConfigHash},
+		{"reranker_model", existing.RerankerModel, current.RerankerModel}, {"reranker_config_hash", existing.RerankerConfigHash, current.RerankerConfigHash},
 		{"embedding_model", existing.EmbeddingModel, current.EmbeddingModel}, {"embedding_dimensions", existing.EmbeddingDimensions, current.EmbeddingDimensions},
 		{"diagnosis_method", existing.DiagnosisMethod, current.DiagnosisMethod}, {"git_commit", existing.GitCommit, current.GitCommit},
 		{"source_hash", existing.SourceHash, current.SourceHash}, {"history_dataset_hash", existing.HistoryDatasetHash, current.HistoryDatasetHash},
@@ -450,17 +505,41 @@ func runRetrieval(args []string) {
 	collection := retrievalCollectionName(embedCfg.Model, *dimensions, *datasetRun)
 	parser := retrieval.NewWSParser(*drainURL, os.Getenv("DRAIN3_TOKEN"))
 	defer parser.Close()
+	rerankerCfg := config.RerankerConfig{
+		Enabled:          strings.EqualFold(env("RERANKER_ENABLED", "false"), "true"),
+		Protocol:         env("RERANKER_PROTOCOL", "openai-compatible"),
+		BaseURL:          os.Getenv("RERANKER_BASE_URL"),
+		APIPath:          env("RERANKER_API_PATH", "/reranks"),
+		APIKey:           os.Getenv("RERANKER_API_KEY"),
+		Model:            os.Getenv("RERANKER_MODEL"),
+		Timeout:          envDuration("RERANKER_TIMEOUT", 30*time.Second),
+		MaxRetries:       envInt("RERANKER_MAX_RETRIES", 1),
+		MaxDocumentBytes: envInt("RERANKER_MAX_DOCUMENT_BYTES", 8192),
+		MaxPayloadBytes:  envInt("RERANKER_MAX_PAYLOAD_BYTES", 1048576),
+	}
+	if err := config.ValidateReranker(rerankerCfg); err != nil {
+		fatal(err)
+	}
+	var neuralReranker rerankerclient.Service
+	if rerankerCfg.Enabled {
+		neuralReranker = rerankerclient.New(rerankerCfg)
+	}
 	summary, err := retrievalbench.Run(context.Background(), retrievalbench.Config{
 		Corpus: *corpus, OutputDir: *output, DatasetRun: *datasetRun, Count: *count,
 		Seed: *seed, EmbeddingBatchSize: *embeddingBatchSize,
 		Loki: tools.NewLoki(*lokiURL), Parser: parser, Embedder: llm.NewEmbedder(embedCfg),
-		Milvus: retrieval.NewMilvusStore(*milvusURL, collection, *dimensions),
+		Milvus:            retrieval.NewMilvusStore(*milvusURL, collection, *dimensions),
+		CausalPatternFile: env("CAUSAL_PATTERN_FILE", "knowledge/causal_patterns.yaml"),
+		RankingPolicyFile: env("RANKING_POLICY_FILE", "knowledge/ranking_policy.yaml"),
+		Reranker:          neuralReranker,
 		Progress: func(stage string, current, total int) {
 			fmt.Printf("stage=%s progress=%d/%d\n", stage, current, total)
 		},
 	})
 	fatal(err)
 	corpusHash, err := fileSHA256(*corpus)
+	fatal(err)
+	rankingPolicyHash, err := fileSHA256(env("RANKING_POLICY_FILE", "knowledge/ranking_policy.yaml"))
 	fatal(err)
 	endpointHash := sha256.Sum256([]byte(embedCfg.BaseURL))
 	manifest := map[string]any{
@@ -470,7 +549,11 @@ func runRetrieval(args []string) {
 		"embedding_model": embedCfg.Model, "embedding_dimensions": *dimensions,
 		"embedding_batch_size": *embeddingBatchSize, "embedding_request_interval": embeddingRequestInterval.String(),
 		"embedding_endpoint_hash": hex.EncodeToString(endpointHash[:]), "milvus_collection": collection,
-		"corpus_sha256": corpusHash, "started_at": startedAt, "finished_at": time.Now().UTC(),
+		"corpus_sha256": corpusHash, "ranking_policy_hash": rankingPolicyHash, "started_at": startedAt, "finished_at": time.Now().UTC(),
+	}
+	if neuralReranker != nil {
+		manifest["reranker_model"] = rerankerCfg.Model
+		manifest["reranker_config_hash"] = neuralReranker.ConfigHash()
 	}
 	b, err := json.MarshalIndent(manifest, "", "  ")
 	fatal(err)
@@ -492,6 +575,19 @@ func writeRetrievalReport(output, runID string, summary retrievalbench.Summary) 
 			fmt.Sprintf("%.3f", metric.BackendP50MS), fmt.Sprintf("%.3f", metric.BackendP95MS), fmt.Sprintf("%.3f", metric.BackendP99MS),
 			fmt.Sprintf("%.3f", metric.AverageCandidates), fmt.Sprintf("%.6f", metric.CandidateReduction),
 		})
+		stages := make([]string, 0, len(metric.StageLatency))
+		for stage := range metric.StageLatency {
+			stages = append(stages, stage)
+		}
+		sort.Strings(stages)
+		for _, stage := range stages {
+			values := metric.StageLatency[stage]
+			_ = w.Write([]string{
+				metric.Strategy + ":" + stage,
+				fmt.Sprintf("%.3f", values.P50MS), fmt.Sprintf("%.3f", values.P95MS), fmt.Sprintf("%.3f", values.P99MS),
+				"", "", "", "", "",
+			})
+		}
 	}
 	w.Flush()
 	closeErr := latency.Close()
@@ -503,9 +599,24 @@ func writeRetrievalReport(output, runID string, summary retrievalbench.Summary) 
 	}
 	var report strings.Builder
 	fmt.Fprintf(&report, "# KubePilot Retrieval Benchmark\n\n- Run: `%s`\n- Records: %d\n- Ground-truth templates: %d\n- Drain3 clusters: %d\n- Drain3 compression: %.2f%%\n- Drain3 cluster purity: %.2f%%\n- Queries: %d\n- Embedding calls: %d\n\n", runID, summary.Records, summary.GroundTruthTemplates, summary.Drain3Clusters, summary.Drain3CompressionRate*100, summary.Drain3ClusterPurity*100, summary.Queries, summary.EmbeddingCalls)
-	report.WriteString("| Strategy | Recall@1 | Recall@5 | Recall@10 | MRR | P50 ms | P95 ms | P99 ms | Candidate reduction |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+	report.WriteString("| Strategy | Recall@1 | Recall@5 | Recall@10 | MRR | NDCG | P50 ms | P95 ms | P99 ms | Candidate reduction |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 	for _, metric := range summary.Metrics {
-		fmt.Fprintf(&report, "| %s | %.2f%% | %.2f%% | %.2f%% | %.4f | %.3f | %.3f | %.3f | %.2f%% |\n", metric.Strategy, metric.Recall1*100, metric.Recall5*100, metric.Recall10*100, metric.MRR, metric.P50MS, metric.P95MS, metric.P99MS, metric.CandidateReduction*100)
+		fmt.Fprintf(&report, "| %s | %.2f%% | %.2f%% | %.2f%% | %.4f | %.4f | %.3f | %.3f | %.3f | %.2f%% |\n", metric.Strategy, metric.Recall1*100, metric.Recall5*100, metric.Recall10*100, metric.MRR, metric.NDCG, metric.P50MS, metric.P95MS, metric.P99MS, metric.CandidateReduction*100)
+	}
+	for _, metric := range summary.Metrics {
+		if len(metric.StageLatency) == 0 {
+			continue
+		}
+		report.WriteString("\n### " + metric.Strategy + " stage latency\n\n| Stage | P50 ms | P95 ms | P99 ms |\n|---|---:|---:|---:|\n")
+		stages := make([]string, 0, len(metric.StageLatency))
+		for stage := range metric.StageLatency {
+			stages = append(stages, stage)
+		}
+		sort.Strings(stages)
+		for _, stage := range stages {
+			values := metric.StageLatency[stage]
+			fmt.Fprintf(&report, "| %s | %.3f | %.3f | %.3f |\n", stage, values.P50MS, values.P95MS, values.P99MS)
+		}
 	}
 	report.WriteString("\nAll values are measured from this run. API keys and complete endpoint URLs are not recorded.\n")
 	return os.WriteFile(filepath.Join(output, "report.md"), []byte(report.String()), 0o640)
@@ -520,7 +631,7 @@ func seedHistory(args []string) {
 	fs := flag.NewFlagSet("seed-history", flag.ExitOnError)
 	dataset := fs.String("dataset", "benchmark/history.yaml", "held-out historical incident dataset")
 	milvusURL := fs.String("milvus-url", env("MILVUS_ADDRESS", "localhost:19530"), "Milvus address")
-	collection := fs.String("collection", env("HISTORY_COLLECTION", "kubepilot_history_v2"), "isolated history collection")
+	collection := fs.String("collection", env("HISTORY_COLLECTION", "kubepilot_history"), "isolated history collection")
 	dimensions := fs.Int("dimensions", envInt("EMBEDDING_DIMENSIONS", 1024), "embedding dimensions")
 	batchSize := fs.Int("embedding-batch-size", envInt("EMBEDDING_BATCH_SIZE", 10), "maximum texts per embedding request")
 	requestInterval := fs.Duration("embedding-request-interval", envDuration("EMBEDDING_REQUEST_INTERVAL", time.Second), "minimum interval between embedding requests")

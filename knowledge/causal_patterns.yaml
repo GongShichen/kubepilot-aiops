@@ -1,0 +1,66 @@
+version: 1
+patterns:
+  - id: cpu-saturation
+    category: cpu
+    cause: workload CPU demand exceeds available CPU
+    source: builtin
+    confidence: 0.85
+    status: active
+    version: 1
+    nodes:
+      - {id: cpu_demand, type: cause, match: [cpu, busy, concurrency, overload]}
+      - {id: cpu_saturation, type: runtime, match: [throttl, saturation, limit]}
+      - {id: latency_error, type: business, match: [latency, timeout, 5xx]}
+    edges: [{from: cpu_demand, to: cpu_saturation}, {from: cpu_saturation, to: latency_error}]
+  - id: memory-oom
+    category: memory
+    cause: memory growth or an insufficient limit causes OOM termination
+    source: builtin
+    confidence: 0.9
+    status: active
+    version: 1
+    nodes:
+      - {id: memory_growth, type: cause, match: [memory, leak, cache, allocation]}
+      - {id: oom_kill, type: runtime, match: [oomkilled, oom, memory limit]}
+      - {id: restart_unavailable, type: kubernetes, match: [restart, crashloop, unavailable]}
+      - {id: request_failure, type: business, match: [5xx, error, timeout]}
+    edges: [{from: memory_growth, to: oom_kill}, {from: oom_kill, to: restart_unavailable}, {from: restart_unavailable, to: request_failure}]
+  - id: database-dependency
+    category: database
+    cause: database connectivity or contention disrupts dependent services
+    source: builtin
+    confidence: 0.9
+    status: active
+    version: 1
+    nodes:
+      - {id: database_fault, type: cause, match: [mysql, database, credential, connection, lock, slow query]}
+      - {id: db_span_error, type: runtime, match: [db span, sql, connection pool]}
+      - {id: dependency_propagation, type: topology, match: [payment, order, downstream]}
+      - {id: request_failure, type: business, match: [5xx, timeout, latency]}
+    edges: [{from: database_fault, to: db_span_error}, {from: db_span_error, to: dependency_propagation}, {from: dependency_propagation, to: request_failure}]
+  - id: network-routing
+    category: network
+    cause: service discovery or network policy interrupts a dependency path
+    source: builtin
+    confidence: 0.9
+    status: active
+    version: 1
+    nodes:
+      - {id: network_config, type: cause, match: [networkpolicy, selector, service port, endpoint]}
+      - {id: connection_failure, type: runtime, match: [connection refused, timeout, no route]}
+      - {id: trace_gap, type: topology, match: [missing span, downstream timeout]}
+      - {id: upstream_error, type: business, match: [5xx, gateway, error propagation]}
+    edges: [{from: network_config, to: connection_failure}, {from: connection_failure, to: trace_gap}, {from: trace_gap, to: upstream_error}]
+  - id: deployment-regression
+    category: deployment
+    cause: a deployment revision or configuration prevents healthy rollout
+    source: builtin
+    confidence: 0.9
+    status: active
+    version: 1
+    nodes:
+      - {id: rollout_change, type: cause, match: [revision, image, configmap, environment, probe]}
+      - {id: pod_failure, type: kubernetes, match: [imagepullbackoff, crashloopbackoff, probe failed]}
+      - {id: unavailable, type: runtime, match: [unavailable replicas, not ready]}
+      - {id: request_failure, type: business, match: [5xx, timeout, unavailable]}
+    edges: [{from: rollout_change, to: pod_failure}, {from: pod_failure, to: unavailable}, {from: unavailable, to: request_failure}]

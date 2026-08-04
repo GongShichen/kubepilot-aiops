@@ -9,15 +9,17 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/cloudwego/eino/components/tool"
-	toolutils "github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	workflowgraph "github.com/kubepilot-aiops/kubepilot/graph"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
-	captools "github.com/kubepilot-aiops/kubepilot/tools"
+	actionexecution "github.com/kubepilot-aiops/kubepilot/internal/execution"
+	rankpolicy "github.com/kubepilot-aiops/kubepilot/internal/reasoning/evidence"
+	"github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
+	"github.com/kubepilot-aiops/kubepilot/reasoning"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -26,8 +28,11 @@ type Supervisor struct {
 	checkpoints interface {
 		Delete(context.Context, string) error
 	}
-	eventSink workflowgraph.EventSink
-	hooks     *supervisorHooks
+	eventSink         workflowgraph.EventSink
+	hooks             *supervisorHooks
+	skillSnapshotHash string
+	rankingPolicyHash string
+	rerankerService   reranker.Service
 }
 
 type supervisorHooks struct{ eventSink workflowgraph.EventSink }
@@ -38,43 +43,26 @@ func (s *Supervisor) SetEventSink(sink workflowgraph.EventSink) {
 		s.hooks.eventSink = sink
 	}
 }
+func (s *Supervisor) RuntimeHashes() (string, string, string) {
+	rerankerHash := ""
+	if s.rerankerService != nil {
+		rerankerHash = s.rerankerService.ConfigHash()
+	}
+	return s.skillSnapshotHash, s.rankingPolicyHash, rerankerHash
+}
 
 type SupervisorDeps struct {
-	Collectors  map[string]Collector
-	Historical  Collector
-	Agents      *AgentRegistry
-	Executor    Executor
-	Checkpoints compose.CheckPointStore
-}
-
-type evidenceToolInput struct {
-	Incident domain.Incident `json:"incident"`
-}
-type evidenceToolResult struct {
-	Source   string            `json:"source"`
-	Evidence []domain.Evidence `json:"evidence,omitempty"`
-	Error    string            `json:"error,omitempty"`
-}
-type recoveryToolInput struct {
-	Incident         domain.Incident          `json:"incident"`
-	ExecutionContext *domain.ExecutionContext `json:"execution_context,omitempty"`
-}
-type recoveryToolResult struct {
-	DryRun       *domain.DryRunResult     `json:"dry_run,omitempty"`
-	Proposal     *domain.RecoveryProposal `json:"proposal,omitempty"`
-	Verification *domain.Verification     `json:"verification,omitempty"`
-	Probe        *verificationProbeResult `json:"probe,omitempty"`
-	Executed     bool                     `json:"executed,omitempty"`
-	Unknown      bool                     `json:"unknown,omitempty"`
-	Error        string                   `json:"error,omitempty"`
-}
-
-type verificationProbeResult struct {
-	Name       string          `json:"name"`
-	Applicable bool            `json:"applicable"`
-	Success    bool            `json:"success"`
-	Checks     map[string]bool `json:"checks,omitempty"`
-	Message    string          `json:"message,omitempty"`
+	Collectors           map[string]Collector
+	HistoricalCandidates HistoricalCandidateRetriever
+	Knowledge            CausalPatternReader
+	Reasoning            *reasoning.Engine
+	Agents               *AgentRegistry
+	Executor             Executor
+	Checkpoints          compose.CheckPointStore
+	Reranker             reranker.Service
+	RankingPolicy        *rankpolicy.Policy
+	VerificationInterval time.Duration
+	VerificationTimeout  time.Duration
 }
 
 type approvalInterruptState struct{ State *WorkflowState }
@@ -84,12 +72,36 @@ type ApprovalResumeData struct {
 }
 
 func init() {
-	schema.RegisterName[*WorkflowState]("kubepilot_incident_state_v2")
-	schema.RegisterName[*approvalInterruptState]("kubepilot_approval_interrupt_v2")
-	schema.RegisterName[*ApprovalResumeData]("kubepilot_approval_resume_v2")
+	schema.RegisterName[*WorkflowState]("kubepilot_incident_state")
+	schema.RegisterName[*approvalInterruptState]("kubepilot_approval_interrupt")
+	schema.RegisterName[*ApprovalResumeData]("kubepilot_approval_resume")
+	schema.RegisterName[*domain.AgentBudgetState]("kubepilot_agent_budget")
+	schema.RegisterName[*domain.SafetyFeedback]("kubepilot_safety_feedback")
+	schema.RegisterName[*domain.HypothesisConfidenceRecord]("kubepilot_hypothesis_confidence")
 }
 
 func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error) {
+	if deps.Agents == nil {
+		return nil, fmt.Errorf("Eino ADK agent registry is required")
+	}
+	if deps.Executor == nil {
+		return nil, fmt.Errorf("recovery executor is required")
+	}
+	if deps.Reasoning == nil {
+		deps.Reasoning = reasoning.New(reasoning.DefaultConfig())
+	}
+	if deps.VerificationInterval <= 0 {
+		deps.VerificationInterval = 10 * time.Second
+	}
+	if deps.VerificationTimeout <= 0 {
+		deps.VerificationTimeout = 2 * time.Minute
+	}
+	actionExecutor, err := actionexecution.NewActionExecutor(ctx, deps.Executor, func(incident *domain.Incident, proposal domain.RecoveryProposal) error {
+		return validateExecutionContext(&WorkflowState{Incident: incident, DryRun: incident.DryRun, ExecutionContext: incident.ExecutionContext})
+	})
+	if err != nil {
+		return nil, err
+	}
 	hooks := &supervisorHooks{}
 	transition := func(ctx context.Context, incident *domain.Incident, to domain.IncidentStatus) error {
 		from := incident.Status
@@ -97,441 +109,102 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 			return err
 		}
 		if hooks.eventSink != nil && from != to {
-			hooks.eventSink(ctx, workflowgraph.WorkflowEvent{IncidentID: incident.ID, RunID: ulid.Make().String(), Type: "status_transition", Name: string(to), Component: "EinoGraph", OccurredAt: time.Now().UTC()})
+			hooks.eventSink(ctx, workflowgraph.WorkflowEvent{IncidentID: incident.ID, RunID: ulid.Make().String(), Type: "status_transition", Name: string(to), Component: "EinoConstrainedReAct", OccurredAt: time.Now().UTC()})
 		}
 		return nil
 	}
-	if deps.Agents == nil {
-		return nil, fmt.Errorf("Eino ADK agent registry is required")
+	g := compose.NewGraph[*WorkflowState, *WorkflowState](compose.WithGenLocalState(func(context.Context) *WorkflowState { return &WorkflowState{Workflow: WorkflowName} }))
+	add := func(name string, fn func(context.Context, *WorkflowState) (*WorkflowState, error)) error {
+		return g.AddLambdaNode(name, compose.InvokableLambda(fn), compose.WithNodeName(name))
 	}
-	evidenceTools, err := buildEvidenceTools(deps.Collectors)
-	if err != nil {
-		return nil, err
-	}
-	historyTools, err := buildHistoricalTools(deps.Historical)
-	if err != nil {
-		return nil, err
-	}
-	dryRunTools, actionTools, verificationTools, err := buildRecoveryTools(deps.Executor, deps.Collectors)
-	if err != nil {
-		return nil, err
-	}
-	capabilityRegistry := captools.NewRegistry()
-	register := func(items []tool.BaseTool, meta captools.Registration) error {
-		for _, item := range items {
-			if registerErr := capabilityRegistry.Register(ctx, item, meta); registerErr != nil {
-				return registerErr
-			}
+	if err := add("incident_intake", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		s.Workflow = WorkflowName
+		s.Incident.SkillSnapshotHash = deps.Agents.SkillSnapshotHash()
+		if deps.RankingPolicy != nil {
+			s.Incident.RankingPolicyHash = deps.RankingPolicy.Hash
 		}
-		return nil
-	}
-	if err = register(evidenceTools, captools.Registration{Category: captools.CategoryObservability, AllowedNodes: []string{"evidence_tools_node"}, Timeout: 30 * time.Second, MaxArgumentBytes: 256 << 10, MaxOutputBytes: 2 << 20}); err != nil {
-		return nil, err
-	}
-	if err = register(historyTools, captools.Registration{Category: captools.CategoryIncident, AllowedNodes: []string{"historical_retrieval_tool"}, Timeout: 30 * time.Second, MaxArgumentBytes: 256 << 10, MaxOutputBytes: 2 << 20}); err != nil {
-		return nil, err
-	}
-	if err = register(dryRunTools, captools.Registration{Category: captools.CategoryDryRun, AllowedNodes: []string{"recovery_dry_run"}, Timeout: 30 * time.Second, MaxArgumentBytes: 256 << 10, MaxOutputBytes: 2 << 20}); err != nil {
-		return nil, err
-	}
-	if err = register(actionTools, captools.Registration{Category: captools.CategoryAction, AllowedNodes: []string{"action_tools_node"}, Timeout: 30 * time.Second, MaxArgumentBytes: 256 << 10, MaxOutputBytes: 2 << 20, ApprovalMiddleware: true}); err != nil {
-		return nil, err
-	}
-	if err = register(verificationTools, captools.Registration{Category: captools.CategoryVerification, AllowedNodes: []string{"verification_tools_node"}, Timeout: 125 * time.Second, MaxArgumentBytes: 256 << 10, MaxOutputBytes: 2 << 20}); err != nil {
-		return nil, err
-	}
-	evidenceTools, _ = capabilityRegistry.ToolsForNode("evidence_tools_node")
-	historyTools, _ = capabilityRegistry.ToolsForNode("historical_retrieval_tool")
-	dryRunTools, _ = capabilityRegistry.ToolsForNode("recovery_dry_run")
-	actionTools, _ = capabilityRegistry.ToolsForNode("action_tools_node")
-	verificationTools, _ = capabilityRegistry.ToolsForNode("verification_tools_node")
-	evidenceNode, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{Tools: evidenceTools, ExecuteSequentially: false})
-	if err != nil {
-		return nil, err
-	}
-	historyNode, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{Tools: historyTools, ExecuteSequentially: true})
-	if err != nil {
-		return nil, err
-	}
-	dryRunNode, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{Tools: dryRunTools, ExecuteSequentially: true})
-	if err != nil {
-		return nil, err
-	}
-	actionNode, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{Tools: actionTools, ExecuteSequentially: true})
-	if err != nil {
-		return nil, err
-	}
-	verificationNode, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{Tools: verificationTools, ExecuteSequentially: false})
-	if err != nil {
-		return nil, err
-	}
-
-	g := compose.NewGraph[*WorkflowState, *WorkflowState](compose.WithGenLocalState(func(context.Context) *WorkflowState { return &WorkflowState{Version: WorkflowVersion} }))
-	add := func(name string, fn any) error {
-		switch f := fn.(type) {
-		case func(context.Context, *WorkflowState) (*WorkflowState, error):
-			return g.AddLambdaNode(name, compose.InvokableLambda(f), compose.WithNodeName(name))
-		case func(context.Context, *WorkflowState) (*schema.Message, error):
-			return g.AddLambdaNode(name, compose.InvokableLambda(f), compose.WithNodeName(name))
-		case func(context.Context, []*schema.Message) (*WorkflowState, error):
-			return g.AddLambdaNode(name, compose.InvokableLambda(f), compose.WithNodeName(name))
-		default:
-			return fmt.Errorf("unsupported node %s", name)
+		if deps.Reranker != nil {
+			s.Incident.RerankerConfigHash = deps.Reranker.ConfigHash()
 		}
-	}
-	if err = add("incident_intake", func(ctx context.Context, in *WorkflowState) (*WorkflowState, error) {
-		in.Version = WorkflowVersion
-		if err := transition(ctx, in.Incident, domain.StatusCorrelating); err != nil {
-			return in, err
-		}
-		return in, compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, s *WorkflowState) error { *s = *in; return nil })
-	}); err != nil {
-		return nil, err
-	}
-	if err = add("alert_correlation", statusNode(transition, domain.StatusCollecting)); err != nil {
-		return nil, err
-	}
-	if err = add("supervisor_agent", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		windowEnd := time.Now().UTC()
-		windowStart := s.Incident.EvidenceStartAt
-		if windowStart.IsZero() {
-			windowStart = windowEnd.Add(-5 * time.Minute)
-		}
-		payload, _ := json.Marshal(map[string]any{"task": "evidence_plan", "incident": safeIncident(s.Incident), "required_sources": []string{"metric", "log", "trace", "kubernetes"}, "window_start": windowStart, "window_end": windowEnd})
-		var plan EvidencePlan
-		if err := deps.Agents.Run(ctx, SupervisorAgentName, string(payload), &plan); err != nil {
+		if err := transition(ctx, s.Incident, domain.StatusCorrelating); err != nil {
 			return s, err
 		}
-		// The model may select structured filters, but only the server controls
-		// the authoritative Incident time window.
-		plan.WindowStart = windowStart
-		plan.WindowEnd = windowEnd
-		if err := validateEvidencePlan(plan); err != nil {
+		if err := transition(ctx, s.Incident, domain.StatusCollecting); err != nil {
 			return s, err
 		}
-		s.EvidencePlan = plan
-		return s, compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, local *WorkflowState) error {
-			local.EvidencePlan = plan
-			return nil
-		})
+		return s, compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, local *WorkflowState) error { *local = *s; return nil })
 	}); err != nil {
 		return nil, err
 	}
-	if err = add("evidence_plan_validator", func(_ context.Context, s *WorkflowState) (*schema.Message, error) {
-		calls := make([]schema.ToolCall, 0, 4)
-		for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
-			args, _ := json.Marshal(evidenceToolInput{Incident: *s.Incident})
-			calls = append(calls, schema.ToolCall{ID: "evidence-" + source + "-" + ulid.Make().String(), Type: "function", Function: schema.FunctionCall{Name: evidenceToolName(source), Arguments: string(args)}})
-		}
-		return &schema.Message{Role: schema.Assistant, ToolCalls: calls}, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err = g.AddToolsNode("evidence_tools_node", evidenceNode, compose.WithNodeName("evidence_tools_node")); err != nil {
-		return nil, err
-	}
-	if err = add("evidence_fusion", func(ctx context.Context, messages []*schema.Message) (*WorkflowState, error) {
-		var current *WorkflowState
-		err := compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, s *WorkflowState) error {
-			current = s
-			return mergeEvidenceToolMessages(s, messages)
-		})
-		if err != nil {
-			return nil, err
-		}
-		if err = transition(ctx, current.Incident, domain.StatusDiagnosing); err != nil {
-			return nil, err
-		}
-		return current, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err = add("historical_retrieval_plan", func(_ context.Context, s *WorkflowState) (*schema.Message, error) {
-		args, _ := json.Marshal(evidenceToolInput{Incident: *s.Incident})
-		return &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "history-" + ulid.Make().String(), Type: "function", Function: schema.FunctionCall{Name: "retrieve_historical_incidents", Arguments: string(args)}}}}, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err = g.AddToolsNode("historical_retrieval_tool", historyNode, compose.WithNodeName("historical_retrieval_tool")); err != nil {
-		return nil, err
-	}
-	if err = add("historical_merger", func(ctx context.Context, messages []*schema.Message) (*WorkflowState, error) {
-		var current *WorkflowState
-		err := compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, s *WorkflowState) error {
-			current = s
-			return mergeEvidenceToolMessages(s, messages)
-		})
-		return current, err
-	}); err != nil {
-		return nil, err
-	}
-	if err = add("diagnosis_agent", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		payload, _ := json.Marshal(map[string]any{"incident": safeIncident(s.Incident), "evidence": compactEvidence(s.Incident.Evidence)})
-		var decision DiagnosisDecision
-		if err := deps.Agents.Run(ctx, DiagnosisAgentName, string(payload), &decision); err != nil {
+	if err := add("constrained_react_agents", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if err := deps.Agents.RunConstrained(ctx, s, constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Transition: transition}); err != nil {
 			return s, err
 		}
-		if err := applyDiagnosisDecision(s.Incident, decision); err != nil {
-			return s, err
+		s.Incident.DiagnosisLedger = &s.DiagnosisLedger
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("deterministic_proposal_validator", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if s.Incident.Status == domain.StatusNeedsAttention {
+			return s, nil
 		}
-		s.DiagnosisAttempts++
-		if decision.RequestAdditionalEvidence && s.DiagnosisAttempts == 1 {
-			if err := transition(ctx, s.Incident, domain.StatusCollecting); err != nil {
-				return s, err
-			}
-		} else if decision.Confidence < .8 {
+		if s.Incident.Status != domain.StatusProposing || s.Incident.Proposal == nil || s.DryRun == nil || !s.DryRun.Success || s.Incident.DryRun == nil || s.Incident.DryRun.MutationSpecHash != s.DryRun.MutationSpecHash {
+			s.Errors = append(s.Errors, "constrained Agent handoff did not contain a matching accepted proposal and dry-run")
 			if err := transition(ctx, s.Incident, domain.StatusNeedsAttention); err != nil {
 				return s, err
 			}
-		} else {
-			if err := transition(ctx, s.Incident, domain.StatusProposing); err != nil {
-				return s, err
-			}
-		}
-		return s, compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, local *WorkflowState) error {
-			local.DiagnosisAttempts = s.DiagnosisAttempts
-			local.Incident = s.Incident
-			return nil
-		})
-	}); err != nil {
-		return nil, err
-	}
-	if err = add("recovery_agent", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		payload, _ := json.Marshal(map[string]any{"root_cause": s.Incident.RootCause, "category": s.Incident.RootCauseCategory, "service": s.Incident.RootCauseService, "resource": s.Incident.RootCauseResource, "evidence_ids": s.Incident.RootCauseEvidenceIDs})
-		var decision RecoveryDecision
-		if err := deps.Agents.Run(ctx, RecoveryAgentName, string(payload), &decision); err != nil {
-			return s, err
-		}
-		proposal, err := recoveryProposal(s.Incident, decision)
-		if err != nil {
-			return s, err
-		}
-		s.Incident.Proposal = proposal
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err = add("proposal_validator", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := validateRecoveryProposal(s.Incident); err != nil {
-			_ = transition(ctx, s.Incident, domain.StatusNeedsAttention)
-			s.Errors = append(s.Errors, err.Error())
 		}
 		return s, nil
 	}); err != nil {
 		return nil, err
 	}
-	if err = add("recovery_dry_run_plan", func(_ context.Context, s *WorkflowState) (*schema.Message, error) {
-		args, _ := json.Marshal(recoveryToolInput{Incident: *s.Incident})
-		return &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "dry-run-" + ulid.Make().String(), Type: "function", Function: schema.FunctionCall{Name: "dry_run_" + recoveryToolName(s.Incident.Proposal.Action), Arguments: string(args)}}}}, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err = g.AddToolsNode("recovery_dry_run", dryRunNode, compose.WithNodeName("recovery_dry_run")); err != nil {
-		return nil, err
-	}
-	if err = add("recovery_dry_run_merger", func(ctx context.Context, messages []*schema.Message) (*WorkflowState, error) {
-		var s *WorkflowState
-		err := compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, state *WorkflowState) error {
-			s = state
-			var result recoveryToolResult
-			if len(messages) != 1 {
-				return fmt.Errorf("dry-run returned %d results", len(messages))
-			}
-			if e := json.Unmarshal([]byte(messages[0].Content), &result); e != nil {
-				return e
-			}
-			state.ToolCalls++
-			state.DryRun = result.DryRun
-			state.Incident.DryRun = result.DryRun
-			if result.Proposal != nil {
-				state.Incident.Proposal = result.Proposal
-			}
-			if result.Error != "" || result.DryRun == nil || !result.DryRun.Success {
-				if e := transition(ctx, state.Incident, domain.StatusNeedsAttention); e != nil {
-					return e
-				}
-				state.Errors = append(state.Errors, result.Error)
-			}
-			return nil
-		})
-		return s, err
-	}); err != nil {
-		return nil, err
-	}
-	if err = add("approval_interrupt", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+	if err := add("approval_interrupt", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
 		return approvalNode(ctx, s, transition)
 	}); err != nil {
 		return nil, err
 	}
-	if err = add("action_plan", func(_ context.Context, s *WorkflowState) (*schema.Message, error) {
+	if err := add("deterministic_action_executor", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
 		if err := validateExecutionContext(s); err != nil {
-			return nil, err
+			s.Errors = append(s.Errors, err.Error())
+			_ = transition(ctx, s.Incident, domain.StatusNeedsAttention)
+			return s, nil
 		}
-		args, _ := json.Marshal(recoveryToolInput{Incident: *s.Incident, ExecutionContext: s.ExecutionContext})
-		return &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "action-" + ulid.Make().String(), Type: "function", Function: schema.FunctionCall{Name: recoveryToolName(s.Incident.Proposal.Action), Arguments: string(args)}}}}, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err = g.AddToolsNode("action_tools_node", actionNode, compose.WithNodeName("action_tools_node")); err != nil {
-		return nil, err
-	}
-	if err = add("action_result", func(ctx context.Context, messages []*schema.Message) (*WorkflowState, error) {
-		var s *WorkflowState
-		err := compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, state *WorkflowState) error {
-			s = state
-			var result recoveryToolResult
-			if len(messages) != 1 {
-				return fmt.Errorf("action returned %d results", len(messages))
+		if err := actionExecutor.Execute(ctx, s.Incident, *s.Incident.Proposal); err != nil {
+			status := domain.StatusRecoveryFailed
+			if errors.Is(err, ErrActionResultUnknown) {
+				status = domain.StatusNeedsAttention
 			}
-			if e := json.Unmarshal([]byte(messages[0].Content), &result); e != nil {
-				return e
-			}
-			state.ToolCalls++
-			if result.Error != "" || !result.Executed {
-				targetStatus := domain.StatusRecoveryFailed
-				if result.Unknown {
-					targetStatus = domain.StatusNeedsAttention
-				}
-				if e := transition(ctx, state.Incident, targetStatus); e != nil {
-					return e
-				}
-				state.Errors = append(state.Errors, result.Error)
-			} else {
-				if e := transition(ctx, state.Incident, domain.StatusVerifying); e != nil {
-					return e
-				}
-				state.VerificationState.StartedAt = time.Now().UTC()
-			}
-			return nil
-		})
-		return s, err
-	}); err != nil {
-		return nil, err
-	}
-	if err = add("verification_plan", func(_ context.Context, s *WorkflowState) (*schema.Message, error) {
-		args, _ := json.Marshal(recoveryToolInput{Incident: *s.Incident, ExecutionContext: s.ExecutionContext})
-		calls := make([]schema.ToolCall, 0, 5)
-		for _, name := range []string{"verify_kubernetes_health", "verify_prometheus_recovery", "verify_loki_recovery", "verify_trace_recovery", "verify_business_probe"} {
-			calls = append(calls, schema.ToolCall{ID: name + "-" + ulid.Make().String(), Type: "function", Function: schema.FunctionCall{Name: name, Arguments: string(args)}})
+			s.Errors = append(s.Errors, err.Error())
+			_ = transition(ctx, s.Incident, status)
+			return s, nil
 		}
-		return &schema.Message{Role: schema.Assistant, ToolCalls: calls}, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err = g.AddToolsNode("verification_tools_node", verificationNode, compose.WithNodeName("verification_tools_node")); err != nil {
-		return nil, err
-	}
-	if err = add("verification_agent", func(ctx context.Context, messages []*schema.Message) (*WorkflowState, error) {
-		var s *WorkflowState
-		err := compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, state *WorkflowState) error {
-			s = state
-			if len(messages) != 5 {
-				return fmt.Errorf("verification returned %d results", len(messages))
-			}
-			state.VerificationState.Attempts++
-			combined := domain.Verification{Success: true, Checks: map[string]bool{}, CompletedAt: time.Now().UTC()}
-			var failures []string
-			for _, message := range messages {
-				var result recoveryToolResult
-				if e := json.Unmarshal([]byte(message.Content), &result); e != nil {
-					return e
-				}
-				state.ToolCalls++
-				if result.Error != "" {
-					combined.Success = false
-					failures = append(failures, result.Error)
-					continue
-				}
-				if result.Verification != nil {
-					combined.Success = combined.Success && result.Verification.Success
-					for name, passed := range result.Verification.Checks {
-						combined.Checks[name] = passed
-					}
-					if !result.Verification.Success {
-						failures = append(failures, result.Verification.Message)
-					}
-				}
-				if result.Probe != nil {
-					combined.Checks[result.Probe.Name+"_applicable"] = result.Probe.Applicable
-					if result.Probe.Applicable {
-						combined.Checks[result.Probe.Name] = result.Probe.Success
-						combined.Success = combined.Success && result.Probe.Success
-						if !result.Probe.Success {
-							failures = append(failures, result.Probe.Message)
-						}
-					}
-				}
-			}
-			combined.Message = "all applicable recovery checks passed"
-			if len(failures) > 0 {
-				combined.Message = strings.Join(failures, "; ")
-			}
-			state.Incident.Verification = &combined
-			if len(failures) > 0 && len(combined.Checks) == 0 {
-				if e := transition(ctx, state.Incident, domain.StatusRecoveryFailed); e != nil {
-					return e
-				}
-				state.Errors = append(state.Errors, failures...)
-				return nil
-			}
-			if combined.Success {
-				state.VerificationState.ConsecutiveSuccess = 3
-				if e := transition(ctx, state.Incident, domain.StatusResolved); e != nil {
-					return e
-				}
-			} else {
-				if e := transition(ctx, state.Incident, domain.StatusRecoveryFailed); e != nil {
-					return e
-				}
-			}
-			return nil
-		})
-		return s, err
-	}); err != nil {
-		return nil, err
-	}
-	if err = add("incident_finalizer", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
-		s.Incident.UpdatedAt = time.Now().UTC()
+		if err := transition(ctx, s.Incident, domain.StatusVerifying); err != nil {
+			return s, err
+		}
+		s.VerificationState.StartedAt = time.Now().UTC()
 		return s, nil
 	}); err != nil {
 		return nil, err
 	}
-
-	edges := [][2]string{{compose.START, "incident_intake"}, {"incident_intake", "alert_correlation"}, {"alert_correlation", "supervisor_agent"}, {"supervisor_agent", "evidence_plan_validator"}, {"evidence_plan_validator", "evidence_tools_node"}, {"evidence_tools_node", "evidence_fusion"}, {"evidence_fusion", "historical_retrieval_plan"}, {"historical_retrieval_plan", "historical_retrieval_tool"}, {"historical_retrieval_tool", "historical_merger"}, {"historical_merger", "diagnosis_agent"}}
-	for _, edge := range edges {
-		if err = g.AddEdge(edge[0], edge[1]); err != nil {
+	if err := add("deterministic_verification_controller", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		return runVerificationController(ctx, s, deps, transition)
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("incident_finalizer", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
+		s.Incident.UpdatedAt = time.Now().UTC()
+		s.Incident.DiagnosisLedger = &s.DiagnosisLedger
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	for _, edge := range [][2]string{{compose.START, "incident_intake"}, {"incident_intake", "constrained_react_agents"}, {"constrained_react_agents", "deterministic_proposal_validator"}} {
+		if err := g.AddEdge(edge[0], edge[1]); err != nil {
 			return nil, err
 		}
 	}
-	if err = g.AddBranch("diagnosis_agent", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
-		if s.Incident.Status == domain.StatusCollecting {
-			return "evidence_plan_validator", nil
-		}
-		if s.Incident.Status == domain.StatusNeedsAttention {
-			return "incident_finalizer", nil
-		}
-		return "recovery_agent", nil
-	}, map[string]bool{"evidence_plan_validator": true, "incident_finalizer": true, "recovery_agent": true})); err != nil {
-		return nil, err
-	}
-	if err = g.AddEdge("recovery_agent", "proposal_validator"); err != nil {
-		return nil, err
-	}
-	if err = g.AddBranch("proposal_validator", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
-		if s.Incident.Status == domain.StatusNeedsAttention {
-			return "incident_finalizer", nil
-		}
-		return "recovery_dry_run_plan", nil
-	}, map[string]bool{"incident_finalizer": true, "recovery_dry_run_plan": true})); err != nil {
-		return nil, err
-	}
-	if err = g.AddEdge("recovery_dry_run_plan", "recovery_dry_run"); err != nil {
-		return nil, err
-	}
-	if err = g.AddEdge("recovery_dry_run", "recovery_dry_run_merger"); err != nil {
-		return nil, err
-	}
-	if err = g.AddBranch("recovery_dry_run_merger", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+	if err := g.AddBranch("deterministic_proposal_validator", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
 		if s.Incident.Status == domain.StatusNeedsAttention {
 			return "incident_finalizer", nil
 		}
@@ -539,34 +212,29 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	}, map[string]bool{"incident_finalizer": true, "approval_interrupt": true})); err != nil {
 		return nil, err
 	}
-	if err = g.AddBranch("approval_interrupt", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+	if err := g.AddBranch("approval_interrupt", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
 		if s.Incident.Status == domain.StatusRejected {
 			return "incident_finalizer", nil
 		}
-		return "action_plan", nil
-	}, map[string]bool{"incident_finalizer": true, "action_plan": true})); err != nil {
+		return "deterministic_action_executor", nil
+	}, map[string]bool{"incident_finalizer": true, "deterministic_action_executor": true})); err != nil {
 		return nil, err
 	}
-	for _, edge := range [][2]string{{"action_plan", "action_tools_node"}, {"action_tools_node", "action_result"}, {"verification_plan", "verification_tools_node"}, {"verification_tools_node", "verification_agent"}} {
-		if err = g.AddEdge(edge[0], edge[1]); err != nil {
-			return nil, err
-		}
-	}
-	if err = g.AddBranch("action_result", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
-		if s.Incident.Status == domain.StatusRecoveryFailed || s.Incident.Status == domain.StatusNeedsAttention {
+	if err := g.AddBranch("deterministic_action_executor", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+		if s.Incident.Status != domain.StatusVerifying {
 			return "incident_finalizer", nil
 		}
-		return "verification_plan", nil
-	}, map[string]bool{"incident_finalizer": true, "verification_plan": true})); err != nil {
+		return "deterministic_verification_controller", nil
+	}, map[string]bool{"incident_finalizer": true, "deterministic_verification_controller": true})); err != nil {
 		return nil, err
 	}
-	if err = g.AddEdge("verification_agent", "incident_finalizer"); err != nil {
+	if err := g.AddEdge("deterministic_verification_controller", "incident_finalizer"); err != nil {
 		return nil, err
 	}
-	if err = g.AddEdge("incident_finalizer", compose.END); err != nil {
+	if err := g.AddEdge("incident_finalizer", compose.END); err != nil {
 		return nil, err
 	}
-	options := []compose.GraphCompileOption{compose.WithGraphName("kubepilot-incident-v2")}
+	options := []compose.GraphCompileOption{compose.WithGraphName(WorkflowName)}
 	if deps.Checkpoints != nil {
 		options = append(options, compose.WithCheckPointStore(deps.Checkpoints))
 	}
@@ -574,131 +242,159 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	if err != nil {
 		return nil, err
 	}
-	var checkpointDeleter interface {
+	var deleter interface {
 		Delete(context.Context, string) error
 	}
 	if candidate, ok := deps.Checkpoints.(interface {
 		Delete(context.Context, string) error
 	}); ok {
-		checkpointDeleter = candidate
+		deleter = candidate
 	}
-	return &Supervisor{runnable: run, checkpoints: checkpointDeleter, hooks: hooks}, nil
+	rankingHash := ""
+	if deps.RankingPolicy != nil {
+		rankingHash = deps.RankingPolicy.Hash
+	}
+	return &Supervisor{runnable: run, checkpoints: deleter, hooks: hooks, skillSnapshotHash: deps.Agents.SkillSnapshotHash(), rankingPolicyHash: rankingHash, rerankerService: deps.Reranker}, nil
 }
 
-func buildEvidenceTools(collectors map[string]Collector) ([]tool.BaseTool, error) {
-	var out []tool.BaseTool
-	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
-		c := collectors[source]
-		name := evidenceToolName(source)
-		t, err := toolutils.InferTool(name, "Collect bounded, structured "+source+" evidence for one Incident.", func(ctx context.Context, in evidenceToolInput) (evidenceToolResult, error) {
-			if c == nil {
-				return evidenceToolResult{Source: source, Error: "collector unavailable"}, nil
-			}
-			ev, e := c.Collect(ctx, &in.Incident)
-			if e != nil {
-				return evidenceToolResult{Source: source, Error: e.Error()}, nil
-			}
-			return evidenceToolResult{Source: source, Evidence: ev}, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, nil
-}
-func buildHistoricalTools(c Collector) ([]tool.BaseTool, error) {
-	t, err := toolutils.InferTool("retrieve_historical_incidents", "Retrieve historical incidents using only fused evidence.", func(ctx context.Context, in evidenceToolInput) (evidenceToolResult, error) {
-		if c == nil {
-			return evidenceToolResult{Source: "historical"}, nil
-		}
-		ev, e := c.Collect(ctx, &in.Incident)
-		if e != nil {
-			return evidenceToolResult{Source: "historical", Error: e.Error()}, nil
-		}
-		return evidenceToolResult{Source: "historical", Evidence: ev}, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return []tool.BaseTool{t}, nil
+type verificationRoundResult struct {
+	source       string
+	verification *domain.Verification
+	probe        verificationProbeResult
+	err          error
 }
 
-func buildRecoveryTools(executor Executor, collectors map[string]Collector) (dryRun, action, verification []tool.BaseTool, err error) {
-	if executor == nil {
-		return nil, nil, nil, fmt.Errorf("recovery executor is required")
+func runVerificationController(ctx context.Context, state *WorkflowState, deps SupervisorDeps, transition func(context.Context, *domain.Incident, domain.IncidentStatus) error) (*WorkflowState, error) {
+	if state.VerificationState.StartedAt.IsZero() {
+		state.VerificationState.StartedAt = time.Now().UTC()
 	}
-	for _, recoveryAction := range []domain.RecoveryAction{domain.ActionRestartPod, domain.ActionScaleDeployment, domain.ActionRollbackDeployment} {
-		actionName := recoveryToolName(recoveryAction)
-		dryTool, toolErr := toolutils.InferTool("dry_run_"+actionName, "Validate and Kubernetes dry-run one constrained recovery mutation.", func(ctx context.Context, in recoveryToolInput) (recoveryToolResult, error) {
-			if in.Incident.Proposal == nil || in.Incident.Proposal.Action != recoveryAction {
-				return recoveryToolResult{Error: "proposal action does not match tool"}, nil
-			}
-			result, dryErr := dryRunProposal(ctx, executor, &in.Incident)
-			if dryErr != nil {
-				return recoveryToolResult{DryRun: result, Proposal: in.Incident.Proposal, Error: dryErr.Error()}, nil
-			}
-			return recoveryToolResult{DryRun: result, Proposal: in.Incident.Proposal}, nil
-		})
-		if toolErr != nil {
-			return nil, nil, nil, toolErr
+	deadline := state.VerificationState.StartedAt.Add(deps.VerificationTimeout)
+	var previousRestarts *int32
+	for {
+		combined, infrastructureErrors := collectVerificationRound(ctx, state.Incident, deps)
+		for _, message := range infrastructureErrors {
+			state.Errors = appendUnique(state.Errors, message)
 		}
-		dryRun = append(dryRun, dryTool)
+		if combined.RestartCount != nil {
+			stable := previousRestarts == nil || *combined.RestartCount <= *previousRestarts
+			combined.Checks["restarts_stable"] = stable
+			combined.Success = combined.Success && stable
+			value := *combined.RestartCount
+			previousRestarts = &value
+		}
+		combined.CompletedAt = time.Now().UTC()
+		state.Incident.Verification = &combined
+		state.VerificationState.Attempts++
+		if combined.Success {
+			state.VerificationState.ConsecutiveSuccess++
+		} else {
+			state.VerificationState.ConsecutiveSuccess = 0
+		}
+		if state.VerificationState.ConsecutiveSuccess >= 3 {
+			combined.Message = "all applicable recovery checks passed three consecutive rounds"
+			state.Incident.Verification = &combined
+			if err := transition(ctx, state.Incident, domain.StatusResolved); err != nil {
+				return state, err
+			}
+			return state, nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			combined.Success = false
+			combined.Message = "verification timed out before three consecutive successful rounds"
+			state.Incident.Verification = &combined
+			if err := transition(ctx, state.Incident, domain.StatusRecoveryFailed); err != nil {
+				return state, err
+			}
+			return state, nil
+		}
+		wait := deps.VerificationInterval
+		if remaining < wait {
+			wait = remaining
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return state, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
 
-		actionTool, toolErr := toolutils.InferTool(actionName, "Execute one approved and dry-run validated Kubernetes recovery mutation.", func(ctx context.Context, in recoveryToolInput) (recoveryToolResult, error) {
-			if in.Incident.Proposal == nil || in.Incident.Proposal.Action != recoveryAction {
-				return recoveryToolResult{Error: "proposal action does not match tool"}, nil
-			}
-			state := &WorkflowState{Incident: &in.Incident, DryRun: in.Incident.DryRun, ExecutionContext: in.ExecutionContext}
-			if validateErr := validateExecutionContext(state); validateErr != nil {
-				return recoveryToolResult{Error: validateErr.Error()}, nil
-			}
-			if executeErr := executor.Execute(ctx, &in.Incident, *in.Incident.Proposal); executeErr != nil {
-				return recoveryToolResult{Error: executeErr.Error(), Unknown: errors.Is(executeErr, ErrActionResultUnknown)}, nil
-			}
-			return recoveryToolResult{Executed: true}, nil
-		})
-		if toolErr != nil {
-			return nil, nil, nil, toolErr
-		}
-		action = append(action, actionTool)
-	}
-	verifyTool, toolErr := toolutils.InferTool("verify_kubernetes_health", "Verify Kubernetes recovery health until three consecutive samples pass or timeout.", func(ctx context.Context, in recoveryToolInput) (recoveryToolResult, error) {
-		result, verifyErr := executor.Verify(ctx, &in.Incident)
-		if verifyErr != nil {
-			return recoveryToolResult{Error: verifyErr.Error()}, nil
-		}
-		return recoveryToolResult{Verification: &result}, nil
-	})
-	if toolErr != nil {
-		return nil, nil, nil, toolErr
-	}
-	verification = append(verification, verifyTool)
+func collectVerificationRound(ctx context.Context, incident *domain.Incident, deps SupervisorDeps) (domain.Verification, []string) {
+	count := 1
 	for _, source := range []string{"metric", "log", "trace", "business"} {
-		source := source
-		name := map[string]string{"metric": "verify_prometheus_recovery", "log": "verify_loki_recovery", "trace": "verify_trace_recovery", "business": "verify_business_probe"}[source]
-		verifySource, sourceErr := toolutils.InferTool(name, "Run one bounded, structured recovery verification probe.", func(ctx context.Context, in recoveryToolInput) (recoveryToolResult, error) {
-			collector := collectors[source]
-			if collector == nil {
-				return recoveryToolResult{Probe: &verificationProbeResult{Name: source, Applicable: false, Message: source + " verification is not configured"}}, nil
-			}
-			incident := in.Incident
-			if in.ExecutionContext != nil && in.ExecutionContext.ApprovedAt.After(incident.EvidenceStartAt) {
-				incident.EvidenceStartAt = in.ExecutionContext.ApprovedAt
-			}
-			evidence, collectErr := collector.Collect(ctx, &incident)
-			if collectErr != nil {
-				return recoveryToolResult{Error: name + ": " + collectErr.Error()}, nil
-			}
-			probe := evaluateVerificationEvidence(source, evidence)
-			return recoveryToolResult{Probe: &probe}, nil
-		})
-		if sourceErr != nil {
-			return nil, nil, nil, sourceErr
+		if deps.Collectors[source] != nil {
+			count++
 		}
-		verification = append(verification, verifySource)
 	}
-	return dryRun, action, verification, nil
+	results := make(chan verificationRoundResult, count)
+	var group sync.WaitGroup
+	group.Add(1)
+	go func() {
+		defer group.Done()
+		verification, err := deps.Executor.Verify(ctx, incident)
+		results <- verificationRoundResult{source: "kubernetes", verification: &verification, err: err}
+	}()
+	for _, source := range []string{"metric", "log", "trace", "business"} {
+		collector := deps.Collectors[source]
+		if collector == nil {
+			continue
+		}
+		source, collector := source, collector
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			evidence, err := collector.Collect(ctx, incident)
+			result := verificationRoundResult{source: source, err: err}
+			if err == nil {
+				result.probe = evaluateVerificationEvidence(source, evidence)
+			}
+			results <- result
+		}()
+	}
+	group.Wait()
+	close(results)
+	combined := domain.Verification{Success: true, Checks: map[string]bool{}}
+	var infrastructureErrors []string
+	for result := range results {
+		if result.err != nil {
+			combined.Success = false
+			combined.Checks[result.source+"_infrastructure_ok"] = false
+			infrastructureErrors = append(infrastructureErrors, result.source+" verification unavailable")
+			continue
+		}
+		combined.Checks[result.source+"_infrastructure_ok"] = true
+		if result.verification != nil {
+			combined.Success = combined.Success && result.verification.Success
+			for name, passed := range result.verification.Checks {
+				combined.Checks[name] = passed
+			}
+			combined.RestartCount = result.verification.RestartCount
+			continue
+		}
+		combined.Checks[result.source+"_applicable"] = result.probe.Applicable
+		for name, passed := range result.probe.Checks {
+			combined.Checks[result.source+"_"+name] = passed
+		}
+		if result.probe.Applicable {
+			combined.Checks[result.source] = result.probe.Success
+			combined.Success = combined.Success && result.probe.Success
+		}
+	}
+	return combined, infrastructureErrors
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, current := range values {
+		if current == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func evaluateVerificationEvidence(source string, evidence []domain.Evidence) verificationProbeResult {
@@ -711,15 +407,15 @@ func evaluateVerificationEvidence(source string, evidence []domain.Evidence) ver
 		result.Message = "Prometheus recovery telemetry is unavailable"
 	case "log":
 		result.Applicable = true
-		recentErrors := 0
+		errorsFound := 0
 		for _, item := range evidence {
 			if item.Type == "log_entry" || item.Kind == "log_entry" {
-				recentErrors++
+				errorsFound++
 			}
 		}
-		result.Success = recentErrors == 0
+		result.Success = errorsFound == 0
 		result.Checks["recent_error_templates_absent"] = result.Success
-		result.Message = fmt.Sprintf("%d recent error log entries remain", recentErrors)
+		result.Message = fmt.Sprintf("%d recent error log entries remain", errorsFound)
 	case "trace":
 		result.Applicable = len(evidence) > 0
 		result.Success = true
@@ -745,19 +441,20 @@ func evaluateVerificationEvidence(source string, evidence []domain.Evidence) ver
 	return result
 }
 
+type verificationProbeResult struct {
+	Name       string          `json:"name"`
+	Applicable bool            `json:"applicable"`
+	Success    bool            `json:"success"`
+	Checks     map[string]bool `json:"checks,omitempty"`
+	Message    string          `json:"message,omitempty"`
+}
+
 func nonEmptyEvidenceValue(values map[string]any, key string) bool {
 	if values == nil {
 		return false
 	}
 	value, exists := values[key]
 	return exists && value != nil && strings.TrimSpace(fmt.Sprint(value)) != ""
-}
-
-func recoveryToolName(action domain.RecoveryAction) string {
-	if action == domain.ActionRestartPod {
-		return "restart_workload"
-	}
-	return string(action)
 }
 func evidenceToolName(source string) string {
 	switch source {
@@ -771,81 +468,6 @@ func evidenceToolName(source string) string {
 		return "query_kubernetes_evidence"
 	}
 }
-func mergeEvidenceToolMessages(s *WorkflowState, messages []*schema.Message) error {
-	// The authoritative window closes only after bounded collection finishes;
-	// model latency must never make freshly collected evidence appear stale.
-	if s.Incident.Status == domain.StatusCollecting {
-		s.EvidencePlan.WindowEnd = time.Now().UTC()
-	}
-	successful := map[string]bool{}
-	seen := map[string]bool{}
-	for _, existing := range s.Incident.Evidence {
-		seen[existing.ID] = true
-	}
-	for _, m := range messages {
-		var r evidenceToolResult
-		if err := json.Unmarshal([]byte(m.Content), &r); err != nil {
-			return err
-		}
-		s.ToolCalls++
-		if r.Error != "" {
-			s.Errors = append(s.Errors, r.Source+": "+r.Error)
-			continue
-		}
-		successful[r.Source] = true
-		for _, e := range r.Evidence {
-			switch r.Source {
-			case "metric":
-				e.Source = "prometheus"
-			case "log":
-				e.Source = "loki"
-			case "trace":
-				e.Source = "jaeger"
-			case "kubernetes":
-				e.Source = "kubernetes"
-			case "historical":
-				e.Source = "historical"
-			}
-			if e.WindowStart.IsZero() {
-				e.WindowStart = s.EvidencePlan.WindowStart
-			}
-			if e.WindowEnd.IsZero() {
-				e.WindowEnd = s.EvidencePlan.WindowEnd
-			}
-			normalizeEvidence(&e, s.Incident)
-			if r.Source != "historical" && !evidenceInWindow(e, s.EvidencePlan.WindowStart, s.EvidencePlan.WindowEnd) {
-				continue
-			}
-			if !seen[e.ID] {
-				seen[e.ID] = true
-				s.Incident.Evidence = append(s.Incident.Evidence, e)
-			}
-		}
-	}
-	if s.Incident.Status == domain.StatusCollecting {
-		if !successful["kubernetes"] {
-			return fmt.Errorf("kubernetes evidence unavailable")
-		}
-		hasKubernetesEvidence, hasTelemetryEvidence := false, false
-		for _, item := range s.Incident.Evidence {
-			switch item.Source {
-			case "kubernetes":
-				hasKubernetesEvidence = true
-			case "prometheus", "loki", "jaeger":
-				hasTelemetryEvidence = true
-			}
-		}
-		if !hasKubernetesEvidence {
-			return fmt.Errorf("kubernetes evidence returned no usable records in window %s..%s (records=%d)", s.EvidencePlan.WindowStart.Format(time.RFC3339Nano), s.EvidencePlan.WindowEnd.Format(time.RFC3339Nano), len(s.Incident.Evidence))
-		}
-		if (!successful["metric"] && !successful["log"] && !successful["trace"]) || !hasTelemetryEvidence {
-			return fmt.Errorf("telemetry evidence unavailable")
-		}
-	}
-	sort.SliceStable(s.Incident.Evidence, func(i, j int) bool { return s.Incident.Evidence[i].Timestamp.Before(s.Incident.Evidence[j].Timestamp) })
-	return nil
-}
-
 func evidenceInWindow(e domain.Evidence, start, end time.Time) bool {
 	if e.Timestamp.IsZero() || start.IsZero() || end.IsZero() {
 		return false
@@ -883,39 +505,124 @@ func normalizeEvidence(e *domain.Evidence, in *domain.Incident) {
 	if e.CollectedAt.IsZero() {
 		e.CollectedAt = time.Now().UTC()
 	}
-	if e.Confidence == 0 {
-		e.Confidence = 1
-	}
-	if e.Confidence < 0 || e.Confidence > 1 {
+	if e.Confidence <= 0 || e.Confidence > 1 {
 		e.Confidence = 1
 	}
 	raw, _ := json.Marshal(e.Content)
 	h := sha256.Sum256(append([]byte(e.Source+e.Type+e.Resource+e.WindowStart.UTC().Format(time.RFC3339Nano)+e.WindowEnd.UTC().Format(time.RFC3339Nano)), raw...))
 	e.ID = hex.EncodeToString(h[:])
 }
-func applyDiagnosisDecision(in *domain.Incident, d DiagnosisDecision) error {
-	valid := map[string]bool{}
-	for _, e := range in.Evidence {
-		valid[e.ID] = true
+
+func mergeEvidenceToolMessages(s *WorkflowState, messages []*schema.Message) error {
+	successful := map[string]bool{}
+	seen := map[string]bool{}
+	for _, item := range s.Incident.Evidence {
+		seen[item.ID] = true
 	}
-	for _, id := range d.EvidenceIDs {
-		if !valid[id] {
-			return fmt.Errorf("diagnosis referenced unknown evidence %q", id)
+	for _, message := range messages {
+		var result evidenceToolResult
+		if err := json.Unmarshal([]byte(message.Content), &result); err != nil {
+			return err
+		}
+		if result.Error != "" {
+			s.Errors = append(s.Errors, result.Source+": "+result.Error)
+			continue
+		}
+		successful[result.Source] = true
+		for _, item := range result.Evidence {
+			item.Source = map[string]string{"metric": "prometheus", "log": "loki", "trace": "jaeger", "kubernetes": "kubernetes", "historical": "historical"}[result.Source]
+			normalizeEvidence(&item, s.Incident)
+			if !seen[item.ID] {
+				seen[item.ID] = true
+				s.Incident.Evidence = append(s.Incident.Evidence, item)
+			}
 		}
 	}
-	if d.ReasoningType != "hypothesis_verification" || len(d.Hypotheses) == 0 || len(d.Hypotheses) > 3 {
-		return fmt.Errorf("invalid hypothesis verification")
+	if !successful["kubernetes"] {
+		return fmt.Errorf("kubernetes evidence unavailable")
 	}
-	in.ReasoningType = d.ReasoningType
-	in.RootCause = d.RootCause
-	in.RootCauseCategory = d.Category
-	in.RootCauseVariant = d.Variant
-	in.RootCauseService = d.Service
-	in.RootCauseResource = d.Resource
-	in.Confidence = d.Confidence
-	in.RootCauseEvidenceIDs = append([]string(nil), d.EvidenceIDs...)
-	in.Hypotheses = d.Hypotheses
+	sort.SliceStable(s.Incident.Evidence, func(i, j int) bool { return s.Incident.Evidence[i].Timestamp.Before(s.Incident.Evidence[j].Timestamp) })
 	return nil
+}
+
+type evidenceToolResult struct {
+	Source   string            `json:"source"`
+	Evidence []domain.Evidence `json:"evidence,omitempty"`
+	Error    string            `json:"error,omitempty"`
+}
+
+func legacyHypotheses(drafts []domain.HypothesisDraft) []domain.Hypothesis {
+	out := make([]domain.Hypothesis, 0, len(drafts))
+	for _, draft := range drafts {
+		out = append(out, domain.Hypothesis{ID: draft.ID, Cause: draft.Cause, Probability: draft.PriorProbability, SupportingEvidence: append([]string(nil), draft.SupportingEvidenceIDs...), ContradictingEvidence: append([]string(nil), draft.ContradictingEvidenceIDs...), FalsificationConditions: append([]string(nil), draft.FalsificationConditions...)})
+	}
+	return out
+}
+
+type diagnosisEvidence struct {
+	ID             string         `json:"id"`
+	Source         string         `json:"source"`
+	Type           string         `json:"type"`
+	Timestamp      time.Time      `json:"timestamp,omitempty"`
+	Namespace      string         `json:"namespace,omitempty"`
+	Service        string         `json:"service,omitempty"`
+	Resource       string         `json:"resource,omitempty"`
+	Summary        string         `json:"summary"`
+	Content        map[string]any `json:"content,omitempty"`
+	RelevanceScore float64        `json:"relevance_score"`
+	RankingReasons []string       `json:"ranking_reasons,omitempty"`
+	CausalNodeIDs  []string       `json:"causal_node_ids,omitempty"`
+}
+
+func diagnosisEvidenceContext(items []domain.Evidence) []diagnosisEvidence {
+	out := make([]diagnosisEvidence, 0, len(items))
+	for _, item := range items {
+		out = append(out, diagnosisEvidence{ID: item.ID, Source: item.Source, Type: item.Type, Timestamp: item.Timestamp, Namespace: item.Namespace, Service: item.Service, Resource: item.Resource, Summary: item.Summary, Content: item.Content, RelevanceScore: item.RelevanceScore, RankingReasons: append([]string(nil), item.RankingReasons...), CausalNodeIDs: append([]string(nil), item.CausalNodeIDs...)})
+	}
+	return out
+}
+
+type diagnosisPattern struct {
+	ID         string              `json:"id"`
+	Category   string              `json:"category"`
+	Cause      string              `json:"cause"`
+	NodeIDs    []string            `json:"node_ids"`
+	Edges      []domain.CausalEdge `json:"edges"`
+	Confidence float64             `json:"confidence"`
+}
+
+func diagnosisPatternContext(items []domain.CausalPattern) []diagnosisPattern {
+	out := make([]diagnosisPattern, 0, len(items))
+	for _, item := range items {
+		nodes := make([]string, 0, len(item.Nodes))
+		for _, node := range item.Nodes {
+			nodes = append(nodes, node.ID)
+		}
+		out = append(out, diagnosisPattern{ID: item.ID, Category: item.Category, Cause: item.Cause, NodeIDs: nodes, Edges: append([]domain.CausalEdge(nil), item.Edges...), Confidence: item.Confidence})
+	}
+	return out
+}
+
+type diagnosisCandidate struct {
+	IncidentID       string               `json:"incident_id"`
+	Namespace        string               `json:"namespace"`
+	Service          string               `json:"service"`
+	Resource         string               `json:"resource"`
+	Category         string               `json:"category"`
+	RootCause        string               `json:"root_cause"`
+	Summary          string               `json:"summary,omitempty"`
+	Rank             domain.RankBreakdown `json:"rank"`
+	RankingReasons   []string             `json:"ranking_reasons,omitempty"`
+	TopologyServices []string             `json:"topology_services,omitempty"`
+	CausalNodeIDs    []string             `json:"causal_node_ids,omitempty"`
+}
+
+func diagnosisCandidateContext(items []domain.RetrievalCandidate) []diagnosisCandidate {
+	out := make([]diagnosisCandidate, 0, len(items))
+	for _, item := range items {
+		out = append(out, diagnosisCandidate{IncidentID: item.IncidentID, Namespace: item.Namespace, Service: item.Service, Resource: item.Resource, Category: item.Category, RootCause: item.RootCause, Summary: item.Summary, Rank: item.Rank, RankingReasons: append([]string(nil), item.RankingReasons...), TopologyServices: append([]string(nil), item.Features.TopologyServices...), CausalNodeIDs: append([]string(nil), item.Features.CausalNodeIDs...)})
+	}
+	return out
 }
 func recoveryProposal(in *domain.Incident, d RecoveryDecision) (*domain.RecoveryProposal, error) {
 	target := in.RootCauseResource
@@ -928,7 +635,6 @@ func recoveryProposal(in *domain.Incident, d RecoveryDecision) (*domain.Recovery
 	}
 	return &domain.RecoveryProposal{ID: ulid.Make().String(), Action: d.Action, Namespace: in.Namespace, Target: canonical, Parameters: d.Parameters, Reason: d.Reason, Risk: d.Risk, Diff: d.Diff, Rollback: d.Rollback, Confidence: d.Confidence, ExpiresAt: time.Now().UTC().Add(15 * time.Minute)}, nil
 }
-
 func validateRecoveryProposal(in *domain.Incident) error {
 	if in == nil || in.Proposal == nil {
 		return fmt.Errorf("recovery proposal is required")
@@ -960,6 +666,7 @@ func dryRunProposal(ctx context.Context, executor Executor, in *domain.Incident)
 	err := fmt.Errorf("Kubernetes DryRunAll capability is required")
 	return &domain.DryRunResult{Action: in.Proposal.Action, Target: in.Proposal.Target, Error: err.Error(), ValidatedAt: time.Now().UTC()}, err
 }
+
 func approvalNode(ctx context.Context, s *WorkflowState, transition func(context.Context, *domain.Incident, domain.IncidentStatus) error) (*WorkflowState, error) {
 	was, has, state := compose.GetInterruptState[*approvalInterruptState](ctx)
 	if !was {
@@ -1011,18 +718,14 @@ func validateExecutionContext(s *WorkflowState) error {
 	}
 	return nil
 }
-func statusNode(transition func(context.Context, *domain.Incident, domain.IncidentStatus) error, status domain.IncidentStatus) func(context.Context, *WorkflowState) (*WorkflowState, error) {
-	return func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		return s, transition(ctx, s.Incident, status)
-	}
-}
 func safeIncident(in *domain.Incident) map[string]any {
 	return map[string]any{"id": in.ID, "severity": in.Severity, "service": in.Service, "namespace": in.Namespace, "resource": in.Resource, "summary": in.Summary, "evidence_start_at": in.EvidenceStartAt}
 }
+
 func (s *Supervisor) Run(ctx context.Context, in *domain.Incident) (*WorkflowState, error) {
 	handler := workflowgraph.NewEinoCallback(in.ID, s.eventSink)
 	ctx = withAgentCallbacks(ctx, handler)
-	state, err := s.runnable.Invoke(ctx, &WorkflowState{Version: WorkflowVersion, Incident: in, ModelSnapshotHash: in.ModelConfigHash}, compose.WithCheckPointID("incident:"+in.ID), compose.WithRuntimeMaxSteps(40), compose.WithCallbacks(handler))
+	state, err := s.runnable.Invoke(ctx, &WorkflowState{Workflow: WorkflowName, Incident: in, ModelSnapshotHash: in.ModelConfigHash}, compose.WithCheckPointID("incident:"+in.ID), compose.WithRuntimeMaxSteps(GraphMaxSteps), compose.WithCallbacks(handler))
 	if err == nil && s.checkpoints != nil {
 		_ = s.checkpoints.Delete(ctx, "incident:"+in.ID)
 	}
@@ -1032,7 +735,10 @@ func (s *Supervisor) Resume(ctx context.Context, id, interruptID string, data *A
 	ctx = compose.ResumeWithData(ctx, interruptID, data)
 	handler := workflowgraph.NewEinoCallback(id, s.eventSink)
 	ctx = withAgentCallbacks(ctx, handler)
-	state, err := s.runnable.Invoke(ctx, &WorkflowState{}, compose.WithCheckPointID("incident:"+id), compose.WithRuntimeMaxSteps(40), compose.WithCallbacks(handler))
+	// A checkpoint resume must use a nil input. Supplying a fresh empty state
+	// would replace the state restored by Eino before the interrupt boundary and
+	// can cause upstream collection nodes to run again.
+	state, err := s.runnable.Invoke(ctx, nil, compose.WithCheckPointID("incident:"+id), compose.WithRuntimeMaxSteps(GraphMaxSteps), compose.WithCallbacks(handler))
 	if err == nil && s.checkpoints != nil {
 		_ = s.checkpoints.Delete(ctx, "incident:"+id)
 	}

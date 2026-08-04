@@ -13,7 +13,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/tools"
 )
 
-const LogIndexerCursorKey = "log-indexer:v1"
+const LogIndexerCursorKey = "log-indexer"
 
 type CursorStore interface {
 	LoadCursor(context.Context, string) (time.Time, error)
@@ -175,7 +175,7 @@ func (i *LogIndexer) indexBatch(ctx context.Context, entries []tools.LokiEntry) 
 	for n, item := range parsed {
 		record := byID[item.RecordID]
 		id := stableTemplateID(record.Namespace, record.Service, item.Template)
-		docs = append(docs, Document{ID: id, Namespace: record.Namespace, Service: record.Service, Category: "log_template", Template: item.Template, RootCause: fmt.Sprintf("template_id=%d occurrence_count=%d indexed_at=%s", item.ClusterID, item.OccurrenceCount, record.Timestamp.UTC().Format(time.RFC3339Nano)), Vector: vectors[n]})
+		docs = append(docs, Document{ID: id, Namespace: record.Namespace, Service: record.Service, Category: "log_template", Template: item.Template, RootCause: fmt.Sprintf("template_id=%d occurrence_count=%d indexed_at=%s", item.ClusterID, item.OccurrenceCount, record.Timestamp.UTC().Format(time.RFC3339Nano)), Level: record.Level, OccurrenceCount: item.OccurrenceCount, Vector: vectors[n]})
 		metadata = append(metadata, LogTemplateRecord{ID: id, Namespace: record.Namespace, Service: record.Service, Template: item.Template, ClusterID: item.ClusterID, OccurrenceCount: item.OccurrenceCount, IndexedAt: record.Timestamp})
 	}
 	if err = i.Store.Upsert(ctx, docs); err != nil {

@@ -27,6 +27,9 @@ type Server struct {
 	APIToken, WebhookToken string
 	ModelHealth            func() map[string]any
 	ModelProbe             func(*gin.Context) error
+	RerankerHealth         func() map[string]any
+	RerankerProbe          func(*gin.Context) error
+	Knowledge              store.KnowledgeStore
 }
 
 func (s *Server) Router() *gin.Engine {
@@ -42,6 +45,8 @@ func (s *Server) Router() *gin.Engine {
 	api.GET("/incidents/:id", s.get)
 	api.GET("/incidents/:id/alerts", s.alerts)
 	api.GET("/incidents/:id/evidence", s.evidence)
+	api.GET("/incidents/:id/hypotheses", s.hypotheses)
+	api.GET("/incidents/:id/agent-runs", s.agentRuns)
 	api.GET("/incidents/:id/events", s.events)
 	api.GET("/incidents/:id/stream", s.stream)
 	api.POST("/incidents/:id/approval", s.approval)
@@ -54,6 +59,33 @@ func (s *Server) Router() *gin.Engine {
 		}
 		c.JSON(200, gin.H{"status": "ok"})
 	})
+	api.GET("/reranker/health", func(c *gin.Context) {
+		if s.RerankerHealth == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "disabled"})
+			return
+		}
+		c.JSON(http.StatusOK, s.RerankerHealth())
+	})
+	api.POST("/reranker/probe", func(c *gin.Context) {
+		if s.RerankerProbe == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "reranker is disabled"})
+			return
+		}
+		if s.RerankerHealth != nil {
+			if configured, ok := s.RerankerHealth()["configured"].(bool); ok && !configured {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "reranker is disabled"})
+				return
+			}
+		}
+		if err := s.RerankerProbe(c); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+	api.GET("/knowledge/causal-patterns", s.causalPatterns)
+	api.GET("/knowledge/causal-patterns/:id", s.causalPattern)
+	api.POST("/knowledge/causal-patterns/:id/status", s.causalPatternStatus)
 	api.POST("/benchmarks/runs", s.benchmarkStart)
 	api.GET("/benchmarks/runs", s.benchmarkList)
 	api.GET("/benchmarks/runs/:id", s.benchmarkGet)
@@ -71,9 +103,87 @@ func (s *Server) Router() *gin.Engine {
 	})
 	return r
 }
+
+func (s *Server) causalPatterns(c *gin.Context) {
+	if s.Knowledge == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge store unavailable"})
+		return
+	}
+	status := c.Query("status")
+	if status != "" && status != "active" && status != "disabled" && status != "candidate" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status filter"})
+		return
+	}
+	items, err := s.Knowledge.ListCausalPatterns(c, status)
+	respond(c, items, err)
+}
+func (s *Server) causalPattern(c *gin.Context) {
+	if s.Knowledge == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge store unavailable"})
+		return
+	}
+	item, err := s.Knowledge.GetCausalPattern(c, c.Param("id"))
+	respond(c, item, err)
+}
+func (s *Server) causalPatternStatus(c *gin.Context) {
+	if s.Knowledge == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge store unavailable"})
+		return
+	}
+	var in struct {
+		Status string `json:"status"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if in.Status != "active" && in.Status != "disabled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be active or disabled"})
+		return
+	}
+	operator := strings.TrimSpace(c.GetHeader("X-Operator"))
+	if operator == "" {
+		operator = "api-user"
+	}
+	item, err := s.Knowledge.SetCausalPatternStatus(c, c.Param("id"), in.Status, operator)
+	respond(c, item, err)
+}
 func (s *Server) retry(c *gin.Context) {
 	v, err := s.Manager.Retry(c, c.Param("id"))
 	respond(c, v, err)
+}
+func (s *Server) hypotheses(c *gin.Context) {
+	incident, err := s.Manager.Get(c, c.Param("id"))
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	if incident.DiagnosisLedger == nil {
+		c.JSON(http.StatusOK, []domain.VerifiedHypothesis{})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"drafts": incident.DiagnosisLedger.Drafts, "verified": incident.DiagnosisLedger.Verified, "transitions": incident.DiagnosisLedger.HypothesisTransitions, "confidence_history": confidenceHistory(incident.DiagnosisLedger.Verified)})
+}
+func (s *Server) agentRuns(c *gin.Context) {
+	incident, err := s.Manager.Get(c, c.Param("id"))
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	var decisions []domain.AgentDecisionEvent
+	var feedback []domain.SafetyFeedback
+	if incident.DiagnosisLedger != nil {
+		decisions = incident.DiagnosisLedger.AgentDecisions
+		feedback = incident.DiagnosisLedger.SafetyFeedback
+	}
+	c.JSON(http.StatusOK, gin.H{"workflow": "eino-constrained-react", "skill_snapshot_hash": incident.SkillSnapshotHash, "ranking_policy_hash": incident.RankingPolicyHash, "reranker_config_hash": incident.RerankerConfigHash, "budget": incident.AgentBudget, "decisions": decisions, "safety_feedback": feedback})
+}
+func confidenceHistory(items []domain.VerifiedHypothesis) []domain.HypothesisConfidenceRecord {
+	var out []domain.HypothesisConfidenceRecord
+	for _, item := range items {
+		out = append(out, item.ConfidenceHistory...)
+	}
+	return out
 }
 func (s *Server) auth() gin.HandlerFunc {
 	return func(c *gin.Context) {

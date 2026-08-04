@@ -1,0 +1,50 @@
+# KubePilot reproducibility manifest.
+# Runtime values such as code_commit, model names and hashes are resolved into
+# artifacts/<run-id>/manifest.json at benchmark start. This file is hashed and
+# recorded so a run cannot be resumed after the benchmark contract changes.
+code_commit: "${GIT_COMMIT}"
+model:
+  protocol: "${CHAT_PROTOCOL}"
+  name: "${CHAT_MODEL}"
+  config_hash: "${MODEL_CONFIG_HASH}"
+embedding_model: "${EMBEDDING_MODEL}"
+reranker:
+  protocol: "${RERANKER_PROTOCOL}"
+  model: "${RERANKER_MODEL}"
+  config_hash: "${RERANKER_CONFIG_HASH}"
+skill_hash: "${SKILL_SNAPSHOT_HASH}"
+budget_config:
+  supervisor:
+    max_iterations: 10
+    max_tool_uses: 8
+    max_tool_cost: 24
+    max_tokens: 12000
+    max_corrections: 3
+  diagnosis:
+    max_iterations: 12
+    max_tool_uses: 15
+    max_tool_cost: 32
+    max_tokens: 30000
+    max_corrections: 3
+  recovery:
+    max_iterations: 10
+    max_tool_uses: 10
+    max_tool_cost: 16
+    max_tokens: 16000
+    max_corrections: 2
+  incident:
+    max_tool_uses: 30
+    max_tool_cost: 72
+    max_tokens: 58000
+retrieval_weights:
+  semantic: 1.0
+  lexical: 1.0
+  topology: 0.8
+  rrf_k: 60
+ranking_weights:
+  evidence:
+    deterministic: 0.70
+    neural: 0.30
+  incident:
+    deterministic: 0.45
+    neural: 0.55

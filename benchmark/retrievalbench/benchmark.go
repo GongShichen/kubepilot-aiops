@@ -15,6 +15,10 @@ import (
 	"unicode"
 
 	"github.com/kubepilot-aiops/kubepilot/benchmark/datasets"
+	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	rankpolicy "github.com/kubepilot-aiops/kubepilot/internal/reasoning/evidence"
+	rerankerclient "github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
+	"github.com/kubepilot-aiops/kubepilot/reasoning"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
 	"github.com/kubepilot-aiops/kubepilot/tools"
 )
@@ -24,29 +28,43 @@ type Query struct {
 }
 
 type Result struct {
-	QueryID        string
-	Strategy       string
-	Rank           int
-	Latency        time.Duration
-	BackendLatency time.Duration
-	CandidateCount int
-	CorpusCount    int
+	QueryID         string
+	Strategy        string
+	Rank            int
+	Latency         time.Duration
+	BackendLatency  time.Duration
+	CandidateCount  int
+	CorpusCount     int
+	SemanticLatency time.Duration
+	LexicalLatency  time.Duration
+	TopologyLatency time.Duration
+	FusionLatency   time.Duration
+	RerankLatency   time.Duration
+	CausalLatency   time.Duration
+}
+
+type LatencyPercentiles struct {
+	P50MS float64 `json:"p50_ms"`
+	P95MS float64 `json:"p95_ms"`
+	P99MS float64 `json:"p99_ms"`
 }
 
 type Metrics struct {
-	Strategy           string  `json:"strategy"`
-	Recall1            float64 `json:"recall_at_1"`
-	Recall5            float64 `json:"recall_at_5"`
-	Recall10           float64 `json:"recall_at_10"`
-	MRR                float64 `json:"mrr"`
-	P50MS              float64 `json:"p50_ms"`
-	P95MS              float64 `json:"p95_ms"`
-	P99MS              float64 `json:"p99_ms"`
-	BackendP50MS       float64 `json:"backend_p50_ms"`
-	BackendP95MS       float64 `json:"backend_p95_ms"`
-	BackendP99MS       float64 `json:"backend_p99_ms"`
-	AverageCandidates  float64 `json:"average_candidates"`
-	CandidateReduction float64 `json:"candidate_reduction"`
+	Strategy           string                        `json:"strategy"`
+	Recall1            float64                       `json:"recall_at_1"`
+	Recall5            float64                       `json:"recall_at_5"`
+	Recall10           float64                       `json:"recall_at_10"`
+	MRR                float64                       `json:"mrr"`
+	NDCG               float64                       `json:"ndcg"`
+	P50MS              float64                       `json:"p50_ms"`
+	P95MS              float64                       `json:"p95_ms"`
+	P99MS              float64                       `json:"p99_ms"`
+	BackendP50MS       float64                       `json:"backend_p50_ms"`
+	BackendP95MS       float64                       `json:"backend_p95_ms"`
+	BackendP99MS       float64                       `json:"backend_p99_ms"`
+	AverageCandidates  float64                       `json:"average_candidates"`
+	CandidateReduction float64                       `json:"candidate_reduction"`
+	StageLatency       map[string]LatencyPercentiles `json:"stage_latency_ms,omitempty"`
 }
 
 type Summary struct {
@@ -89,6 +107,9 @@ type Config struct {
 	Embedder           retrieval.EmbeddingClient
 	Milvus             *retrieval.MilvusStore
 	Progress           func(stage string, current, total int)
+	CausalPatternFile  string
+	RankingPolicyFile  string
+	Reranker           rerankerclient.Service
 }
 
 type loadResult struct {
@@ -179,7 +200,24 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 	progress(cfg, "query_embeddings", len(queries), len(queries))
 	queryEmbeddingShare := queryEmbeddingDuration / time.Duration(len(queries))
 
-	results := make([]Result, 0, len(queries)*3)
+	results := make([]Result, 0, len(queries)*5)
+	reasoningEngine := reasoning.New(reasoning.DefaultConfig())
+	rankingFile := cfg.RankingPolicyFile
+	if rankingFile == "" {
+		rankingFile = "knowledge/ranking_policy.yaml"
+	}
+	rankingPolicy, err := rankpolicy.LoadPolicy(rankingFile)
+	if err != nil {
+		return Summary{}, err
+	}
+	patternFile := cfg.CausalPatternFile
+	if patternFile == "" {
+		patternFile = "knowledge/causal_patterns.yaml"
+	}
+	seed, err := reasoning.LoadPatternSeed(patternFile)
+	if err != nil {
+		return Summary{}, err
+	}
 	for i, query := range queries {
 		queryStart, queryEnd := lokiQueryWindow(loaded.LokiStart, loaded.LokiEnd)
 		lokiStarted := time.Now()
@@ -197,6 +235,65 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 			Latency: lokiDuration, BackendLatency: lokiDuration,
 			CandidateCount: candidateCount, CorpusCount: len(docs),
 		})
+
+		pipelineStarted := time.Now()
+		semanticPipelineStarted := time.Now()
+		semanticDocs, searchErr := cfg.Milvus.Search(ctx, queryVectors[i], map[string]string{"namespace": query.Namespace}, 50)
+		if searchErr != nil {
+			return Summary{}, searchErr
+		}
+		semanticDuration := time.Since(semanticPipelineStarted)
+		queryIncident := &domain.Incident{ID: query.ID, Namespace: query.Namespace, Service: query.Service}
+		queryEvidence := []domain.Evidence{{ID: "query", Source: "loki", Summary: query.Text, Namespace: query.Namespace, Service: query.Service}}
+		causalStarted := time.Now()
+		queryEvidence = reasoningEngine.AnnotateCausalNodes(queryEvidence, seed.Patterns)
+		queryFeatures := reasoningEngine.BuildFeatures(queryIncident, queryEvidence)
+		_ = reasoningEngine.MatchCausalPatterns(queryFeatures, queryEvidence, seed.Patterns)
+		causalDuration := time.Since(causalStarted)
+		semanticCandidates := documentsToCandidates(semanticDocs, loaded.Documents, "semantic", seed.Patterns, reasoningEngine)
+		lexicalStarted := time.Now()
+		lexicalCandidates := lexicalCandidates(query, docs, loaded.Documents, 50, seed.Patterns, reasoningEngine)
+		lexicalDuration := time.Since(lexicalStarted)
+		topologyStarted := time.Now()
+		topologyCandidates := topologyCandidates(query, docs, loaded.Documents, 50, seed.Patterns, reasoningEngine)
+		topologyDuration := time.Since(topologyStarted)
+		results = append(results, Result{
+			QueryID: query.ID, Strategy: "topology", Rank: rankCandidates(query, topologyCandidates),
+			Latency: topologyDuration + queryEmbeddingShare, BackendLatency: topologyDuration,
+			CandidateCount: len(topologyCandidates), CorpusCount: len(docs), TopologyLatency: topologyDuration,
+		})
+		fusionStarted := time.Now()
+		fused := reasoningEngine.Fuse(reasoning.CandidateLists{Semantic: semanticCandidates, Lexical: lexicalCandidates, Topology: topologyCandidates})
+		fusionDuration := time.Since(fusionStarted)
+		rerankStarted := time.Now()
+		reranked := reasoningEngine.Rerank(queryFeatures, fused)
+		rerankDuration := time.Since(rerankStarted)
+		pipelineDuration := time.Since(pipelineStarted)
+		results = append(results, Result{QueryID: query.ID, Strategy: "causal_hybrid", Rank: rankCandidates(query, reranked), Latency: pipelineDuration + queryEmbeddingShare, BackendLatency: pipelineDuration, CandidateCount: len(fused), CorpusCount: len(docs), SemanticLatency: semanticDuration, LexicalLatency: lexicalDuration, TopologyLatency: topologyDuration, FusionLatency: fusionDuration, RerankLatency: rerankDuration, CausalLatency: causalDuration})
+		if cfg.Reranker != nil && cfg.Reranker.Enabled() {
+			documents := make([]string, len(reranked))
+			for index, item := range reranked {
+				documents[index] = item.Summary + " " + item.RootCause
+			}
+			neuralStarted := time.Now()
+			scores, rerankErr := cfg.Reranker.Rerank(ctx, query.Text, documents, len(documents))
+			if rerankErr != nil {
+				return Summary{}, rerankErr
+			}
+			neuralDuration := time.Since(neuralStarted)
+			neuralCandidates := append([]domain.RetrievalCandidate(nil), reranked...)
+			for _, score := range scores {
+				if score.Index >= 0 && score.Index < len(neuralCandidates) {
+					neuralCandidates[score.Index].Rank.NeuralSimilarity = score.Score
+					neuralCandidates[score.Index].Rank.NeuralRanked = true
+				}
+			}
+			policyStarted := time.Now()
+			neuralCandidates = rankpolicy.RankCandidates(rankingPolicy, neuralCandidates)
+			policyDuration := time.Since(policyStarted)
+			neuralPipelineDuration := pipelineDuration + neuralDuration + policyDuration
+			results = append(results, Result{QueryID: query.ID, Strategy: "neural_causal_hybrid", Rank: rankCandidates(query, neuralCandidates), Latency: neuralPipelineDuration + queryEmbeddingShare, BackendLatency: neuralPipelineDuration, CandidateCount: len(fused), CorpusCount: len(docs), SemanticLatency: semanticDuration, LexicalLatency: lexicalDuration, TopologyLatency: topologyDuration, FusionLatency: fusionDuration, RerankLatency: rerankDuration + neuralDuration + policyDuration, CausalLatency: causalDuration})
+		}
 
 		semanticStarted := time.Now()
 		found, searchErr := cfg.Milvus.Search(ctx, queryVectors[i], nil, 10)
@@ -517,6 +614,132 @@ func documentCount(docs []retrieval.Document, namespace, service string) int {
 	return count
 }
 
+func documentsToCandidates(docs []retrieval.Document, records map[string]datasets.LogRecord, source string, patterns []domain.CausalPattern, engine *reasoning.Engine) []domain.RetrievalCandidate {
+	out := make([]domain.RetrievalCandidate, 0, len(docs))
+	for _, doc := range docs {
+		record := records[doc.ID]
+		evidence := engine.AnnotateCausalNodes([]domain.Evidence{{ID: doc.ID, Source: "historical", Summary: record.Message, Namespace: doc.Namespace, Service: doc.Service}}, patterns)
+		features := engine.BuildFeatures(&domain.Incident{ID: doc.ID, Namespace: doc.Namespace, Service: doc.Service}, evidence)
+		out = append(out, domain.RetrievalCandidate{IncidentID: doc.ID, Namespace: doc.Namespace, Service: doc.Service, Category: doc.Category, RootCause: doc.RootCause, Summary: doc.Template, Features: features, SourceScores: map[string]float64{source: doc.Score}})
+	}
+	return out
+}
+func lexicalCandidates(query Query, docs []retrieval.Document, records map[string]datasets.LogRecord, limit int, patterns []domain.CausalPattern, engine *reasoning.Engine) []domain.RetrievalCandidate {
+	queryTokens := tokens(query.Text)
+	type scored struct {
+		doc   retrieval.Document
+		score float64
+	}
+	items := []scored{}
+	for _, doc := range docs {
+		if doc.Namespace != query.Namespace {
+			continue
+		}
+		line := tokens(records[doc.ID].Message)
+		overlap := 0.0
+		for token := range queryTokens {
+			if line[token] {
+				overlap++
+			}
+		}
+		score := overlap / math.Sqrt(float64(max(1, len(queryTokens))*max(1, len(line))))
+		if doc.Service == query.Service {
+			score += .1
+		}
+		items = append(items, scored{doc, score})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].score == items[j].score {
+			return items[i].doc.ID < items[j].doc.ID
+		}
+		return items[i].score > items[j].score
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	selected := make([]retrieval.Document, 0, len(items))
+	for _, item := range items {
+		item.doc.Score = item.score
+		selected = append(selected, item.doc)
+	}
+	return documentsToCandidates(selected, records, "lexical", patterns, engine)
+}
+func topologyCandidates(query Query, docs []retrieval.Document, records map[string]datasets.LogRecord, limit int, patterns []domain.CausalPattern, engine *reasoning.Engine) []domain.RetrievalCandidate {
+	queryTopology := append([]string{query.Service}, reasoning.InferTopologyServices(query.Text)...)
+	type scored struct {
+		doc   retrieval.Document
+		score float64
+	}
+	items := make([]scored, 0, len(docs))
+	for _, doc := range docs {
+		if doc.Namespace != query.Namespace {
+			continue
+		}
+		candidateTopology := append([]string{doc.Service}, reasoning.InferTopologyServices(records[doc.ID].Message)...)
+		score := stringJaccard(queryTopology, candidateTopology)
+		if doc.Service == query.Service {
+			score += .15
+		}
+		if score > 0 {
+			items = append(items, scored{doc: doc, score: score})
+		}
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].score == items[j].score {
+			return items[i].doc.ID < items[j].doc.ID
+		}
+		return items[i].score > items[j].score
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	selected := make([]retrieval.Document, 0, len(items))
+	for _, item := range items {
+		item.doc.Score = item.score
+		selected = append(selected, item.doc)
+	}
+	return documentsToCandidates(selected, records, "topology", patterns, engine)
+}
+
+func stringJaccard(left, right []string) float64 {
+	a, b := map[string]bool{}, map[string]bool{}
+	for _, value := range left {
+		a[value] = true
+	}
+	for _, value := range right {
+		b[value] = true
+	}
+	intersection, union := 0, len(a)
+	for value := range b {
+		if a[value] {
+			intersection++
+		} else {
+			union++
+		}
+	}
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
+}
+func rankCandidates(query Query, candidates []domain.RetrievalCandidate) int {
+	for i, item := range candidates {
+		if item.Summary == query.ExpectedTemplate && item.Service == query.Service && item.Namespace == query.Namespace {
+			return i + 1
+		}
+	}
+	return 0
+}
+func tokenList(value string) []string {
+	set := tokens(value)
+	out := make([]string, 0, len(set))
+	for token := range set {
+		out = append(out, token)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func clusterQuality(clusters map[int]map[string]int) (int, float64) {
 	total, dominant := 0, 0
 	for _, truthCounts := range clusters {
@@ -542,8 +765,9 @@ func summarize(results []Result) []Metrics {
 	}
 	var out []Metrics
 	for name, items := range byStrategy {
-		metric := Metrics{Strategy: name}
+		metric := Metrics{Strategy: name, StageLatency: map[string]LatencyPercentiles{}}
 		var latencies, backendLatencies []float64
+		stageValues := map[string][]float64{"semantic": {}, "lexical": {}, "topology": {}, "fusion": {}, "rerank": {}, "causal": {}}
 		var candidates, corpora float64
 		for _, result := range items {
 			if result.Rank == 1 {
@@ -556,8 +780,16 @@ func summarize(results []Result) []Metrics {
 				metric.Recall10++
 				metric.MRR += 1 / float64(result.Rank)
 			}
+			if result.Rank > 0 {
+				metric.NDCG += 1 / math.Log2(float64(result.Rank+1))
+			}
 			latencies = append(latencies, durationMS(result.Latency))
 			backendLatencies = append(backendLatencies, durationMS(result.BackendLatency))
+			for stage, duration := range map[string]time.Duration{"semantic": result.SemanticLatency, "lexical": result.LexicalLatency, "topology": result.TopologyLatency, "fusion": result.FusionLatency, "rerank": result.RerankLatency, "causal": result.CausalLatency} {
+				if duration > 0 {
+					stageValues[stage] = append(stageValues[stage], durationMS(duration))
+				}
+			}
 			candidates += float64(result.CandidateCount)
 			corpora += float64(result.CorpusCount)
 		}
@@ -566,6 +798,7 @@ func summarize(results []Result) []Metrics {
 		metric.Recall5 /= n
 		metric.Recall10 /= n
 		metric.MRR /= n
+		metric.NDCG /= n
 		metric.AverageCandidates = candidates / n
 		if corpora > 0 {
 			metric.CandidateReduction = 1 - candidates/corpora
@@ -574,6 +807,16 @@ func summarize(results []Result) []Metrics {
 		sort.Float64s(backendLatencies)
 		metric.P50MS, metric.P95MS, metric.P99MS = pct(latencies, .5), pct(latencies, .95), pct(latencies, .99)
 		metric.BackendP50MS, metric.BackendP95MS, metric.BackendP99MS = pct(backendLatencies, .5), pct(backendLatencies, .95), pct(backendLatencies, .99)
+		for stage, values := range stageValues {
+			if len(values) == 0 {
+				continue
+			}
+			sort.Float64s(values)
+			metric.StageLatency[stage] = LatencyPercentiles{P50MS: pct(values, .5), P95MS: pct(values, .95), P99MS: pct(values, .99)}
+		}
+		if len(metric.StageLatency) == 0 {
+			metric.StageLatency = nil
+		}
 		out = append(out, metric)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Strategy < out[j].Strategy })
@@ -597,7 +840,7 @@ func writeResults(dir string, results []Result) error {
 	defer f.Close()
 	w := csv.NewWriter(f)
 	defer w.Flush()
-	_ = w.Write([]string{"query_id", "strategy", "rank", "relevant", "latency_ms", "backend_latency_ms", "candidate_count", "corpus_count", "candidate_reduction"})
+	_ = w.Write([]string{"query_id", "strategy", "rank", "relevant", "latency_ms", "backend_latency_ms", "candidate_count", "corpus_count", "candidate_reduction", "semantic_ms", "lexical_ms", "topology_ms", "fusion_ms", "rerank_ms", "causal_ms"})
 	for _, result := range results {
 		reduction := 0.0
 		if result.CorpusCount > 0 {
@@ -607,6 +850,8 @@ func writeResults(dir string, results []Result) error {
 			result.QueryID, result.Strategy, strconv.Itoa(result.Rank), strconv.FormatBool(result.Rank > 0),
 			fmt.Sprintf("%.3f", durationMS(result.Latency)), fmt.Sprintf("%.3f", durationMS(result.BackendLatency)),
 			strconv.Itoa(result.CandidateCount), strconv.Itoa(result.CorpusCount), fmt.Sprintf("%.6f", reduction),
+			fmt.Sprintf("%.3f", durationMS(result.SemanticLatency)),
+			fmt.Sprintf("%.3f", durationMS(result.LexicalLatency)), fmt.Sprintf("%.3f", durationMS(result.TopologyLatency)), fmt.Sprintf("%.3f", durationMS(result.FusionLatency)), fmt.Sprintf("%.3f", durationMS(result.RerankLatency)), fmt.Sprintf("%.3f", durationMS(result.CausalLatency)),
 		})
 	}
 	return w.Error()

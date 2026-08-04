@@ -33,6 +33,54 @@ type Config struct {
 	ConfigEnvFile      string
 	ConfigReloadEvery  time.Duration
 	ConfigRetryEvery   time.Duration
+	Reasoning          ReasoningConfig
+	Reranker           RerankerConfig
+	AgentBudgets       AgentBudgetsConfig
+}
+
+type ReasoningConfig struct {
+	SemanticTopK                 int
+	LexicalTopK                  int
+	TopologyTopK                 int
+	RRFK                         int
+	RerankTopK                   int
+	ModelEvidenceMaxItems        int
+	ModelContextMaxBytes         int
+	CausalAutoActivateConfidence float64
+	CausalLearningNamespaces     []string
+	CausalPatternFile            string
+	RankingPolicyFile            string
+	ToolCostFile                 string
+}
+
+type RerankerConfig struct {
+	Enabled          bool
+	Protocol         string
+	BaseURL          string
+	APIPath          string
+	APIKey           string
+	Model            string
+	Timeout          time.Duration
+	MaxRetries       int
+	MaxDocumentBytes int
+	MaxPayloadBytes  int
+}
+
+type AgentBudgetConfig struct {
+	MaxIterations  int
+	MaxToolUses    int
+	MaxToolCost    int
+	MaxTokens      int
+	MaxCorrections int
+}
+
+type AgentBudgetsConfig struct {
+	Supervisor     AgentBudgetConfig
+	Diagnosis      AgentBudgetConfig
+	Recovery       AgentBudgetConfig
+	IncidentUses   int
+	IncidentCost   int
+	IncidentTokens int
 }
 
 type ChatConfig struct {
@@ -104,6 +152,58 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	semanticTopK, err := integer("RETRIEVAL_SEMANTIC_TOP_K", 50)
+	if err != nil {
+		return Config{}, err
+	}
+	lexicalTopK, err := integer("RETRIEVAL_LEXICAL_TOP_K", 50)
+	if err != nil {
+		return Config{}, err
+	}
+	topologyTopK, err := integer("RETRIEVAL_TOPOLOGY_TOP_K", 50)
+	if err != nil {
+		return Config{}, err
+	}
+	rrfK, err := integer("RETRIEVAL_RRF_K", 60)
+	if err != nil {
+		return Config{}, err
+	}
+	rerankTopK, err := integer("RETRIEVAL_RERANK_TOP_K", 5)
+	if err != nil {
+		return Config{}, err
+	}
+	maxEvidence, err := integer("MODEL_EVIDENCE_MAX_ITEMS", 12)
+	if err != nil {
+		return Config{}, err
+	}
+	maxContextBytes, err := integer("MODEL_CONTEXT_MAX_BYTES", 32768)
+	if err != nil {
+		return Config{}, err
+	}
+	activateConfidence, err := decimal("CAUSAL_AUTO_ACTIVATE_CONFIDENCE", .90)
+	if err != nil {
+		return Config{}, err
+	}
+	rerankerTimeout, err := duration("RERANKER_TIMEOUT", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	rerankerRetries, err := integer("RERANKER_MAX_RETRIES", 1)
+	if err != nil {
+		return Config{}, err
+	}
+	rerankerDocumentBytes, err := integer("RERANKER_MAX_DOCUMENT_BYTES", 4096)
+	if err != nil {
+		return Config{}, err
+	}
+	rerankerPayloadBytes, err := integer("RERANKER_MAX_PAYLOAD_BYTES", 131072)
+	if err != nil {
+		return Config{}, err
+	}
+	budgets, err := loadAgentBudgets()
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPAddr:      get("HTTP_ADDR", ":8080"),
@@ -113,9 +213,12 @@ func Load() (Config, error) {
 		RedisURL:      os.Getenv("REDIS_URL"),
 		Chat:          ChatConfig{Protocol: get("CHAT_PROTOCOL", "openai-compatible"), BaseURL: os.Getenv("CHAT_BASE_URL"), APIPath: get("CHAT_API_PATH", "/chat/completions"), APIKey: os.Getenv("CHAT_API_KEY"), Model: os.Getenv("CHAT_MODEL"), Timeout: chatTimeout, MaxTokens: maxTokens, Temperature: temperature, ReasoningEffort: os.Getenv("CHAT_REASONING_EFFORT"), MaxRetries: maxRetries},
 		Embedding:     EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: get("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: dimensions, BatchSize: embeddingBatchSize, Timeout: embedTimeout, RequestInterval: embedRequestInterval},
-		PrometheusURL: get("PROMETHEUS_URL", "http://localhost:9090"), LokiURL: get("LOKI_URL", "http://localhost:3100"), JaegerURL: get("JAEGER_URL", "http://localhost:16686"), MilvusAddress: get("MILVUS_ADDRESS", "localhost:19530"), HistoryCollection: get("HISTORY_COLLECTION", "kubepilot_history_v2"), LogIndexCollection: get("LOG_INDEX_COLLECTION", "kubepilot_log_templates_v1"), LogIndexerInterval: logIndexerInterval, BusinessProbeURL: os.Getenv("BUSINESS_PROBE_URL"),
+		PrometheusURL: get("PROMETHEUS_URL", "http://localhost:9090"), LokiURL: get("LOKI_URL", "http://localhost:3100"), JaegerURL: get("JAEGER_URL", "http://localhost:16686"), MilvusAddress: get("MILVUS_ADDRESS", "localhost:19530"), HistoryCollection: get("HISTORY_COLLECTION", "kubepilot_history"), LogIndexCollection: get("LOG_INDEX_COLLECTION", "kubepilot_log_templates"), LogIndexerInterval: logIndexerInterval, BusinessProbeURL: os.Getenv("BUSINESS_PROBE_URL"),
 		Drain3URL: get("DRAIN3_WS_URL", "ws://localhost:8081/ws/v1/parse"), Drain3Token: os.Getenv("DRAIN3_TOKEN"), Kubeconfig: os.Getenv("KUBECONFIG"), AllowedNamespaces: split(get("ALLOWED_NAMESPACES", "kubepilot-demo,kubepilot-benchmark")),
 		ConfigEnvFile: os.Getenv("CONFIG_ENV_FILE"), ConfigReloadEvery: configReloadEvery, ConfigRetryEvery: configRetryEvery,
+		Reasoning:    ReasoningConfig{SemanticTopK: semanticTopK, LexicalTopK: lexicalTopK, TopologyTopK: topologyTopK, RRFK: rrfK, RerankTopK: rerankTopK, ModelEvidenceMaxItems: maxEvidence, ModelContextMaxBytes: maxContextBytes, CausalAutoActivateConfidence: activateConfidence, CausalLearningNamespaces: split(get("CAUSAL_LEARNING_NAMESPACES", "kubepilot-demo")), CausalPatternFile: get("CAUSAL_PATTERN_FILE", "knowledge/causal_patterns.yaml"), RankingPolicyFile: get("RANKING_POLICY_FILE", "knowledge/ranking_policy.yaml"), ToolCostFile: get("TOOL_COST_FILE", "internal/agent/skills/tool_costs.yaml")},
+		Reranker:     RerankerConfig{Enabled: boolean("RERANKER_ENABLED", false), Protocol: get("RERANKER_PROTOCOL", "openai-compatible"), BaseURL: os.Getenv("RERANKER_BASE_URL"), APIPath: get("RERANKER_API_PATH", "/reranks"), APIKey: os.Getenv("RERANKER_API_KEY"), Model: os.Getenv("RERANKER_MODEL"), Timeout: rerankerTimeout, MaxRetries: rerankerRetries, MaxDocumentBytes: rerankerDocumentBytes, MaxPayloadBytes: rerankerPayloadBytes},
+		AgentBudgets: budgets,
 	}
 	if err := cfg.ValidateBase(); err != nil {
 		return Config{}, err
@@ -139,7 +242,93 @@ func (c Config) ValidateBase() error {
 	if c.Chat.Protocol != "openai-compatible" && c.Chat.Protocol != "anthropic-compatible" {
 		return fmt.Errorf("unsupported CHAT_PROTOCOL %q", c.Chat.Protocol)
 	}
+	if c.Reasoning.SemanticTopK <= 0 || c.Reasoning.LexicalTopK <= 0 || c.Reasoning.TopologyTopK <= 0 || c.Reasoning.RRFK <= 0 || c.Reasoning.RerankTopK <= 0 {
+		return errors.New("retrieval top-k and RRF settings must be positive")
+	}
+	if c.Reasoning.ModelEvidenceMaxItems < 2 || c.Reasoning.ModelContextMaxBytes < 4096 {
+		return errors.New("model evidence limits are too small")
+	}
+	if c.Reasoning.CausalAutoActivateConfidence < 0 || c.Reasoning.CausalAutoActivateConfidence > 1 {
+		return errors.New("CAUSAL_AUTO_ACTIVATE_CONFIDENCE must be between 0 and 1")
+	}
+	if c.Reranker.Enabled {
+		if err := ValidateReranker(c.Reranker); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func ValidateReranker(cfg RerankerConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if cfg.Protocol != "openai-compatible" {
+		return fmt.Errorf("unsupported RERANKER_PROTOCOL %q", cfg.Protocol)
+	}
+	if cfg.BaseURL == "" || cfg.APIKey == "" || cfg.Model == "" {
+		return errors.New("RERANKER_BASE_URL, RERANKER_API_KEY and RERANKER_MODEL are required when reranker is enabled")
+	}
+	if _, err := url.ParseRequestURI(cfg.BaseURL); err != nil {
+		return fmt.Errorf("invalid RERANKER_BASE_URL: %w", err)
+	}
+	if cfg.MaxRetries < 0 || cfg.MaxRetries > 3 || cfg.MaxDocumentBytes < 256 || cfg.MaxPayloadBytes < 4096 {
+		return errors.New("invalid reranker retry or payload limits")
+	}
+	return nil
+}
+
+func loadAgentBudgets() (AgentBudgetsConfig, error) {
+	load := func(prefix string, defaults AgentBudgetConfig) (AgentBudgetConfig, error) {
+		var err error
+		if defaults.MaxIterations, err = integer(prefix+"_MAX_ITERATIONS", defaults.MaxIterations); err != nil {
+			return AgentBudgetConfig{}, err
+		}
+		if defaults.MaxToolUses, err = integer(prefix+"_MAX_TOOL_USES", defaults.MaxToolUses); err != nil {
+			return AgentBudgetConfig{}, err
+		}
+		if defaults.MaxToolCost, err = integer(prefix+"_MAX_TOOL_COST", defaults.MaxToolCost); err != nil {
+			return AgentBudgetConfig{}, err
+		}
+		if defaults.MaxTokens, err = integer(prefix+"_MAX_TOKENS", defaults.MaxTokens); err != nil {
+			return AgentBudgetConfig{}, err
+		}
+		if defaults.MaxCorrections, err = integer(prefix+"_MAX_CORRECTIONS", defaults.MaxCorrections); err != nil {
+			return AgentBudgetConfig{}, err
+		}
+		if defaults.MaxIterations <= 0 || defaults.MaxToolUses <= 0 || defaults.MaxToolCost <= 0 || defaults.MaxTokens <= 0 || defaults.MaxCorrections < 0 {
+			return AgentBudgetConfig{}, fmt.Errorf("%s budget values are invalid", prefix)
+		}
+		return defaults, nil
+	}
+	supervisor, err := load("SUPERVISOR", AgentBudgetConfig{10, 8, 24, 12000, 3})
+	if err != nil {
+		return AgentBudgetsConfig{}, err
+	}
+	diagnosis, err := load("DIAGNOSIS", AgentBudgetConfig{12, 15, 32, 30000, 3})
+	if err != nil {
+		return AgentBudgetsConfig{}, err
+	}
+	recovery, err := load("RECOVERY", AgentBudgetConfig{10, 10, 16, 16000, 2})
+	if err != nil {
+		return AgentBudgetsConfig{}, err
+	}
+	uses, err := integer("INCIDENT_MAX_AGENT_TOOL_USES", 30)
+	if err != nil {
+		return AgentBudgetsConfig{}, err
+	}
+	cost, err := integer("INCIDENT_MAX_AGENT_TOOL_COST", 72)
+	if err != nil {
+		return AgentBudgetsConfig{}, err
+	}
+	tokens, err := integer("INCIDENT_MAX_TOKENS", 58000)
+	if err != nil {
+		return AgentBudgetsConfig{}, err
+	}
+	if uses <= 0 || cost <= 0 || tokens <= 0 {
+		return AgentBudgetsConfig{}, errors.New("incident agent budgets must be positive")
+	}
+	return AgentBudgetsConfig{Supervisor: supervisor, Diagnosis: diagnosis, Recovery: recovery, IncidentUses: uses, IncidentCost: cost, IncidentTokens: tokens}, nil
 }
 
 func (c Config) ValidateModel() error {
@@ -225,4 +414,12 @@ func decimal(key string, fallback float64) (float64, error) {
 		return 0, fmt.Errorf("%s: %w", key, err)
 	}
 	return n, nil
+}
+
+func boolean(key string, fallback bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if v == "" {
+		return fallback
+	}
+	return v == "1" || v == "true" || v == "yes" || v == "on"
 }

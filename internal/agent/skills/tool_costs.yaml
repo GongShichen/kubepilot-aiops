@@ -1,0 +1,30 @@
+version: 1
+default_cost: 1
+tools:
+  find_incident_candidates: 1
+  submit_correlation_decision: 1
+  query_prometheus_evidence: 1
+  query_kubernetes_evidence: 1
+  query_loki_evidence: 2
+  query_trace_evidence: 2
+  rank_incident_evidence: 1
+  build_incident_features: 1
+  retrieve_lexical_incidents: 1
+  retrieve_topology_incidents: 2
+  retrieve_semantic_incidents: 3
+  fuse_incident_candidates: 1
+  match_causal_patterns: 1
+  rerank_incident_evidence: 5
+  rerank_incident_candidates: 5
+  submit_hypotheses: 1
+  verify_incident_hypotheses: 1
+  diagnosis_agent: 8
+  recovery_agent: 8
+  dry_run_recovery_proposal: 3
+  submit_supervisor_outcome: 1
+  submit_diagnosis: 1
+  submit_recovery_proposal: 1
+  accept_recovery_proposal: 1
+  escalate_diagnosis: 1
+  escalate_recovery: 1
+  escalate_incident: 1

@@ -103,6 +103,15 @@ func (s *PostgresStore) UpdateWorkflowStatus(ctx context.Context, id string, sta
 	return tx.Commit(ctx)
 }
 
+func (s *PostgresStore) WorkflowIdentity(ctx context.Context, incidentID string) (string, error) {
+	var version string
+	err := s.pool.QueryRow(ctx, `SELECT graph_version FROM agent_workflows WHERE incident_id=$1`, incidentID).Scan(&version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return version, err
+}
+
 func syncIncidentRecords(ctx context.Context, tx pgx.Tx, in *domain.Incident) error {
 	for _, alert := range in.Alerts {
 		raw, err := json.Marshal(alert)
@@ -163,6 +172,52 @@ func syncIncidentRecords(ctx context.Context, tx pgx.Tx, in *domain.Incident) er
 			return err
 		}
 	}
+	if in.DiagnosisLedger != nil {
+		for index, decision := range in.DiagnosisLedger.AgentDecisions {
+			raw, marshalErr := json.Marshal(decision)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			id := fmt.Sprintf("%s-agent-decision-%06d", in.ID, index)
+			if _, insertErr := tx.Exec(ctx, `INSERT INTO audit_events(id,incident_id,type,message,data,created_at) VALUES($1,$2,'agent_decision',$3,$4,$5) ON CONFLICT(id) DO UPDATE SET message=EXCLUDED.message,data=EXCLUDED.data,created_at=EXCLUDED.created_at`, id, in.ID, decision.ReasonCategory, raw, decision.OccurredAt); insertErr != nil {
+				return insertErr
+			}
+		}
+		for index, feedback := range in.DiagnosisLedger.SafetyFeedback {
+			raw, marshalErr := json.Marshal(feedback)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			id := fmt.Sprintf("%s-safety-feedback-%06d", in.ID, index)
+			if _, insertErr := tx.Exec(ctx, `INSERT INTO audit_events(id,incident_id,type,message,data,created_at) VALUES($1,$2,'safety_feedback',$3,$4,$5) ON CONFLICT(id) DO UPDATE SET message=EXCLUDED.message,data=EXCLUDED.data`, id, in.ID, feedback.Code, raw, in.UpdatedAt); insertErr != nil {
+				return insertErr
+			}
+		}
+		for index, transition := range in.DiagnosisLedger.HypothesisTransitions {
+			raw, marshalErr := json.Marshal(transition)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			id := fmt.Sprintf("%s-hypothesis-transition-%06d", in.ID, index)
+			if _, insertErr := tx.Exec(ctx, `INSERT INTO audit_events(id,incident_id,type,message,data,created_at) VALUES($1,$2,'hypothesis_transition',$3,$4,$5) ON CONFLICT(id) DO UPDATE SET message=EXCLUDED.message,data=EXCLUDED.data,created_at=EXCLUDED.created_at`, id, in.ID, string(transition.To), raw, transition.OccurredAt); insertErr != nil {
+				return insertErr
+			}
+		}
+		confidenceIndex := 0
+		for _, verified := range in.DiagnosisLedger.Verified {
+			for _, record := range verified.ConfidenceHistory {
+				raw, marshalErr := json.Marshal(record)
+				if marshalErr != nil {
+					return marshalErr
+				}
+				id := fmt.Sprintf("%s-hypothesis-confidence-%06d", in.ID, confidenceIndex)
+				confidenceIndex++
+				if _, insertErr := tx.Exec(ctx, `INSERT INTO audit_events(id,incident_id,type,message,data,created_at) VALUES($1,$2,'hypothesis_confidence',$3,$4,$5) ON CONFLICT(id) DO UPDATE SET message=EXCLUDED.message,data=EXCLUDED.data,created_at=EXCLUDED.created_at`, id, in.ID, record.HypothesisID, raw, record.ComputedAt); insertErr != nil {
+					return insertErr
+				}
+			}
+		}
+	}
 	if in.Proposal != nil {
 		raw, err := json.Marshal(in.Proposal)
 		if err != nil {
@@ -181,10 +236,11 @@ func syncIncidentRecords(ctx context.Context, tx pgx.Tx, in *domain.Incident) er
 			return err
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO agent_workflows(incident_id,graph_version,checkpoint_id,interrupt_id,model_protocol,model_name,model_config_hash,status,started_at,interrupted_at,resumed_at,completed_at,last_error)
-		VALUES($1,'eino-incident-v2',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-		ON CONFLICT(incident_id) DO UPDATE SET graph_version=EXCLUDED.graph_version,checkpoint_id=EXCLUDED.checkpoint_id,interrupt_id=EXCLUDED.interrupt_id,model_protocol=EXCLUDED.model_protocol,model_name=EXCLUDED.model_name,model_config_hash=EXCLUDED.model_config_hash,status=EXCLUDED.status,interrupted_at=COALESCE(agent_workflows.interrupted_at,EXCLUDED.interrupted_at),resumed_at=COALESCE(agent_workflows.resumed_at,EXCLUDED.resumed_at),completed_at=EXCLUDED.completed_at,last_error=EXCLUDED.last_error`,
-		in.ID, "incident:"+in.ID, nullString(in.WorkflowInterruptID), nullString(in.ModelProtocol), nullString(in.ModelName), nullString(in.ModelConfigHash), in.Status, in.CreatedAt, statusTime(in.Status == domain.StatusAwaitingApproval, in.UpdatedAt), statusTime(in.Status == domain.StatusRecovering || in.Status == domain.StatusVerifying || in.Status == domain.StatusResolved || in.Status == domain.StatusRecoveryFailed, in.UpdatedAt), statusTime(terminalWorkflow(in.Status), in.UpdatedAt), nullString(in.DiagnosisError)); err != nil {
+	budget, _ := json.Marshal(in.AgentBudget)
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_workflows(incident_id,graph_version,checkpoint_id,interrupt_id,model_protocol,model_name,model_config_hash,skill_snapshot_hash,ranking_policy_hash,reranker_config_hash,budget_state,status,started_at,interrupted_at,resumed_at,completed_at,last_error)
+		VALUES($1,'eino-constrained-react',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+		ON CONFLICT(incident_id) DO UPDATE SET graph_version=EXCLUDED.graph_version,checkpoint_id=EXCLUDED.checkpoint_id,interrupt_id=EXCLUDED.interrupt_id,model_protocol=EXCLUDED.model_protocol,model_name=EXCLUDED.model_name,model_config_hash=EXCLUDED.model_config_hash,skill_snapshot_hash=EXCLUDED.skill_snapshot_hash,ranking_policy_hash=EXCLUDED.ranking_policy_hash,reranker_config_hash=EXCLUDED.reranker_config_hash,budget_state=EXCLUDED.budget_state,status=EXCLUDED.status,interrupted_at=COALESCE(agent_workflows.interrupted_at,EXCLUDED.interrupted_at),resumed_at=COALESCE(agent_workflows.resumed_at,EXCLUDED.resumed_at),completed_at=EXCLUDED.completed_at,last_error=EXCLUDED.last_error`,
+		in.ID, "incident:"+in.ID, nullString(in.WorkflowInterruptID), nullString(in.ModelProtocol), nullString(in.ModelName), nullString(in.ModelConfigHash), nullString(in.SkillSnapshotHash), nullString(in.RankingPolicyHash), nullString(in.RerankerConfigHash), budget, in.Status, in.CreatedAt, statusTime(in.Status == domain.StatusAwaitingApproval, in.UpdatedAt), statusTime(in.Status == domain.StatusRecovering || in.Status == domain.StatusVerifying || in.Status == domain.StatusResolved || in.Status == domain.StatusRecoveryFailed, in.UpdatedAt), statusTime(terminalWorkflow(in.Status), in.UpdatedAt), nullString(in.DiagnosisError)); err != nil {
 		return err
 	}
 	return nil
@@ -334,4 +390,5 @@ func (s *PostgresStore) UpsertLogTemplates(ctx context.Context, records []retrie
 
 var _ IncidentStore = (*PostgresStore)(nil)
 var _ WorkflowStatusStore = (*PostgresStore)(nil)
+var _ WorkflowIdentityStore = (*PostgresStore)(nil)
 var _ = errors.Is

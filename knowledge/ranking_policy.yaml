@@ -1,0 +1,21 @@
+version: 1
+evidence:
+  neural_similarity: 0.30
+  temporal_alignment: 0.20
+  service_resource_attribution: 0.20
+  trace_request_pod_attribution: 0.15
+  causal_contribution: 0.10
+  source_quality_and_rarity: 0.05
+incident:
+  neural_similarity: 0.40
+  topology_similarity: 0.20
+  normalized_rrf: 0.15
+  evidence_feature_overlap: 0.10
+  causal_path_coverage: 0.05
+  service_resource_proximity: 0.05
+  revision_temporal_context: 0.05
+topology:
+  directed_edge_jaccard: 0.40
+  shared_critical_dependency: 0.30
+  root_to_symptom_path_similarity: 0.20
+  failing_node_role_similarity: 0.10

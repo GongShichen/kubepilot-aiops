@@ -54,6 +54,40 @@ func LoadChatFile(path string, fallback ChatConfig) (ChatConfig, error) {
 	return chat, nil
 }
 
+func LoadRerankerFile(path string, fallback RerankerConfig) (RerankerConfig, error) {
+	values, err := readEnvFile(path)
+	if err != nil {
+		return RerankerConfig{}, err
+	}
+	cfg := fallback
+	assignString(values, "RERANKER_PROTOCOL", &cfg.Protocol)
+	assignString(values, "RERANKER_BASE_URL", &cfg.BaseURL)
+	assignString(values, "RERANKER_API_PATH", &cfg.APIPath)
+	assignString(values, "RERANKER_API_KEY", &cfg.APIKey)
+	assignString(values, "RERANKER_MODEL", &cfg.Model)
+	if raw, ok := values["RERANKER_ENABLED"]; ok {
+		cfg.Enabled = raw == "1" || strings.EqualFold(raw, "true") || strings.EqualFold(raw, "yes") || strings.EqualFold(raw, "on")
+	}
+	if raw, ok := values["RERANKER_TIMEOUT"]; ok {
+		cfg.Timeout, err = time.ParseDuration(raw)
+		if err != nil {
+			return RerankerConfig{}, fmt.Errorf("RERANKER_TIMEOUT: %w", err)
+		}
+	}
+	for key, target := range map[string]*int{"RERANKER_MAX_RETRIES": &cfg.MaxRetries, "RERANKER_MAX_DOCUMENT_BYTES": &cfg.MaxDocumentBytes, "RERANKER_MAX_PAYLOAD_BYTES": &cfg.MaxPayloadBytes} {
+		if raw, ok := values[key]; ok {
+			*target, err = strconv.Atoi(raw)
+			if err != nil {
+				return RerankerConfig{}, fmt.Errorf("%s: %w", key, err)
+			}
+		}
+	}
+	if err = ValidateReranker(cfg); err != nil {
+		return RerankerConfig{}, err
+	}
+	return cfg, nil
+}
+
 func assignString(values map[string]string, key string, target *string) {
 	if value, ok := values[key]; ok {
 		*target = value

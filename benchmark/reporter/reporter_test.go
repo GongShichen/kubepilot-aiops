@@ -63,3 +63,17 @@ func TestCalibrationBins(t *testing.T) {
 		t.Fatalf("confidence=1 should be in final bin: %+v", bins[9])
 	}
 }
+
+func TestAgentMetricsAreAggregated(t *testing.T) {
+	items := []CaseResult{
+		{CaseID: "a", Status: "passed", AgentToolUses: 4, AgentCorrections: 1, SafetyRejections: 2, SelfCorrectionAttempts: 1, SelfCorrectionSucceeded: true, HypothesisCount: 2, HypothesisConverged: true, EvidenceQueries: 2, EvidenceEfficiency: .5},
+		{CaseID: "b", Status: "failed", AgentToolUses: 2, HypothesisCount: 1, EvidenceQueries: 1},
+	}
+	summary, err := Write(t.TempDir(), Manifest{RunID: "metrics"}, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalSafetyRejections != 2 || summary.SelfCorrectionSuccessRate != 1 || summary.HypothesisConvergenceRate != .5 || summary.MeanHypothesisCount != 1.5 || summary.MeanEvidenceEfficiency != .25 {
+		t.Fatalf("unexpected metrics: %+v", summary)
+	}
+}

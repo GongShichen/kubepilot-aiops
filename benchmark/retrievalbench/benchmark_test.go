@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubepilot-aiops/kubepilot/benchmark/datasets"
+	"github.com/kubepilot-aiops/kubepilot/reasoning"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
 	"github.com/kubepilot-aiops/kubepilot/tools"
 )
@@ -77,9 +79,12 @@ func TestClusterQualityUsesActualMappings(t *testing.T) {
 }
 
 func TestSummarizeCandidateReductionAndLatency(t *testing.T) {
-	metrics := summarize([]Result{{Strategy: "hybrid", Rank: 1, Latency: 2 * time.Millisecond, BackendLatency: time.Millisecond, CandidateCount: 10, CorpusCount: 100}})
-	if len(metrics) != 1 || metrics[0].CandidateReduction != .9 || metrics[0].Recall1 != 1 || metrics[0].BackendP50MS != 1 {
+	metrics := summarize([]Result{{Strategy: "hybrid", Rank: 1, Latency: 2 * time.Millisecond, BackendLatency: time.Millisecond, CandidateCount: 10, CorpusCount: 100, FusionLatency: 500 * time.Microsecond}, {Strategy: "hybrid", Rank: 20, Latency: 3 * time.Millisecond, BackendLatency: 2 * time.Millisecond, CandidateCount: 10, CorpusCount: 100}})
+	if len(metrics) != 1 || metrics[0].CandidateReduction != .9 || metrics[0].Recall1 != .5 || metrics[0].BackendP50MS != 2 || metrics[0].MRR != .5 || metrics[0].NDCG <= .5 {
 		t.Fatalf("metrics=%#v", metrics)
+	}
+	if metrics[0].StageLatency["fusion"].P50MS != .5 {
+		t.Fatalf("stage metrics=%#v", metrics[0].StageLatency)
 	}
 }
 
@@ -92,5 +97,21 @@ func TestLokiQueryWindowUsesIngestionTimeNotCurrentWallClock(t *testing.T) {
 	}
 	if end.Sub(start) != 2*time.Minute+10*time.Second {
 		t.Fatalf("window duration=%s", end.Sub(start))
+	}
+}
+
+func TestTopologyCandidatesAllowSharedDependencyAcrossServices(t *testing.T) {
+	docs := []retrieval.Document{{ID: "payment", Namespace: "n", Service: "payment-service"}, {ID: "gateway", Namespace: "n", Service: "gateway-service"}}
+	records := map[string]datasets.LogRecord{
+		"payment": {Namespace: "n", Service: "payment-service", Message: "mysql connection refused"},
+		"gateway": {Namespace: "n", Service: "gateway-service", Message: "request completed"},
+	}
+	items := topologyCandidates(Query{Namespace: "n", Service: "order-service", Text: "downstream mysql timeout"}, docs, records, 50, nil, reasoning.New(reasoning.DefaultConfig()))
+	found := false
+	for _, item := range items {
+		found = found || item.Service == "payment-service"
+	}
+	if !found {
+		t.Fatalf("shared MySQL dependency did not recall cross-service history: %#v", items)
 	}
 }

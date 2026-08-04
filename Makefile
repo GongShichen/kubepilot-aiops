@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 
-.PHONY: doctor bootstrap cluster-up infra-up demo-up runtime up down destroy test lint migrate benchmark-validate benchmark-history-seed benchmark-smoke benchmark-standard benchmark-diagnosis-compare benchmark-correlation benchmark-retrieval benchmark-full
+.PHONY: doctor bootstrap cluster-up infra-up demo-up runtime up down destroy test lint migrate benchmark-validate benchmark-history-seed benchmark-smoke benchmark-reset-diagnosis benchmark-standard benchmark-diagnosis-compare benchmark-correlation benchmark-retrieval benchmark-full
 
 doctor:
 	sh scripts/doctor.sh
@@ -65,19 +65,22 @@ benchmark-validate:
 benchmark-history-seed:
 	set -a; [ ! -f .env ] || . ./.env; set +a; go run ./cmd/benchmark seed-history --milvus-url localhost:19530
 
-benchmark-smoke:
+benchmark-smoke: benchmark-reset-diagnosis
 	set -a; [ ! -f .env ] || . ./.env; set +a; go run ./cmd/benchmark run --profile smoke --kubeconfig "$${KUBECONFIG:-$$HOME/.kube/config}" --token "$${API_TOKEN}"
 
-benchmark-standard:
+benchmark-reset-diagnosis:
+	bash scripts/reset-diagnosis-benchmark.sh
+
+benchmark-standard: benchmark-reset-diagnosis
 	set -a; [ ! -f .env ] || . ./.env; set +a; go run ./cmd/benchmark run --profile standard --kubeconfig "$${KUBECONFIG:-$$HOME/.kube/config}" --token "$${API_TOKEN}" --auto-approve
 
-benchmark-diagnosis-compare: benchmark-history-seed
+benchmark-diagnosis-compare: benchmark-history-seed benchmark-reset-diagnosis
 	set -a; [ ! -f .env ] || . ./.env; set +a; go run ./cmd/benchmark run --profile standard --compare-methods --kubeconfig "$${KUBECONFIG:-$$HOME/.kube/config}" --token "$${API_TOKEN}"
 
-benchmark-correlation:
+benchmark-correlation: benchmark-reset-diagnosis
 	set -a; [ ! -f .env ] || . ./.env; set +a; go run ./cmd/benchmark correlation --agent-url http://localhost:8080 --webhook-token "$${ALERTMANAGER_WEBHOOK_TOKEN}"
 
 benchmark-retrieval:
-	set -a; [ ! -f .env ] || . ./.env; set +a; docker compose -p kubepilot-retrieval -f deploy/docker/docker-compose.yml --profile benchmark up -d --force-recreate --wait drain3-benchmark loki-benchmark milvus-benchmark; for attempt in $$(seq 1 60); do curl -fsS http://localhost:3200/ready >/dev/null && curl -fsS -X POST http://localhost:19531/v2/vectordb/collections/list -H 'Content-Type: application/json' -d '{}' >/dev/null && break; [ $$attempt -lt 60 ] || exit 1; sleep 2; done; go run ./cmd/benchmark retrieval --count 500000 --loki-url http://localhost:3200 --drain3-url ws://localhost:8181/ws/v1/parse --milvus-url localhost:19531
+	set -a; [ ! -f .env ] || . ./.env; set +a; docker compose -p kubepilot-retrieval -f deploy/docker/docker-compose.yml --profile benchmark down -v --remove-orphans; docker compose -p kubepilot-retrieval -f deploy/docker/docker-compose.yml --profile benchmark up -d --force-recreate --wait drain3-benchmark loki-benchmark milvus-benchmark; for attempt in $$(seq 1 60); do curl -fsS http://localhost:3200/ready >/dev/null && curl -fsS -X POST http://localhost:19531/v2/vectordb/collections/list -H 'Content-Type: application/json' -d '{}' >/dev/null && break; [ $$attempt -lt 60 ] || exit 1; sleep 2; done; go run ./cmd/benchmark retrieval --count 500000 --loki-url http://localhost:3200 --drain3-url ws://localhost:8181/ws/v1/parse --milvus-url localhost:19531
 
 benchmark-full: benchmark-standard benchmark-correlation benchmark-retrieval

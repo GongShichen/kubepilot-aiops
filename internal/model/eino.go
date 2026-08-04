@@ -36,7 +36,7 @@ func NewEinoChatModel(ctx context.Context, cfg config.ChatConfig) (model.BaseCha
 		})
 	case "anthropic-compatible":
 		baseURL := cfg.BaseURL
-		// Claude v0.1.25 starts its decoder goroutine before Stream returns and
+		// Claude's decoder starts its decoder goroutine before Stream returns and
 		// writes a shared named return variable. Gate body reads until the
 		// official Eino Stream method has returned, removing that startup race
 		// without replacing or forking the pinned Eino Claude component.

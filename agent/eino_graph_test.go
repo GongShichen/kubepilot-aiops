@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,40 +15,129 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
 
-type scriptedEinoModel struct{}
+type scriptedEinoModel struct{ reverseEvidence bool }
 
-func (scriptedEinoModel) Generate(_ context.Context, messages []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func (m scriptedEinoModel) Generate(_ context.Context, messages []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 	options := model.GetCommonOptions(nil, opts...)
-	name := ""
+	available := map[string]bool{}
 	for _, candidate := range options.Tools {
-		if candidate.Name == "submit_evidence_plan" {
-			name = candidate.Name
-		}
+		available[candidate.Name] = true
 	}
+	name := ""
 	for _, message := range messages {
 		if message.Role == schema.User && strings.Contains(message.Content, `"task":"correlation"`) {
 			name = "submit_correlation_decision"
 		}
 	}
-	if name == "" && len(options.Tools) == 1 {
-		name = options.Tools[0].Name
+	called := calledTools(messages)
+	if name == "" {
+		switch {
+		case available[DiagnosisAgentName]:
+			name = DiagnosisAgentName
+		case available[RecoveryAgentName]:
+			name = RecoveryAgentName
+		case available["submit_supervisor_outcome"]:
+			name = "submit_supervisor_outcome"
+		case available["query_prometheus_evidence"] && !called["query_prometheus_evidence"]:
+			calls := []string{"query_prometheus_evidence", "query_loki_evidence", "query_trace_evidence", "query_kubernetes_evidence"}
+			if m.reverseEvidence {
+				calls = []string{"query_kubernetes_evidence", "query_trace_evidence", "query_loki_evidence", "query_prometheus_evidence"}
+			}
+			return withMockUsage(toolCalls(calls, func(string) any { return map[string]any{"window_minutes": 5} })), nil
+		case available["rank_incident_evidence"] && !called["rank_incident_evidence"]:
+			name = "rank_incident_evidence"
+		case available["build_incident_features"] && !called["build_incident_features"]:
+			name = "build_incident_features"
+		case available["retrieve_semantic_incidents"] && !called["retrieve_semantic_incidents"]:
+			return withMockUsage(toolCalls([]string{"retrieve_semantic_incidents", "retrieve_lexical_incidents", "retrieve_topology_incidents"}, func(string) any { return map[string]any{"limit": 10} })), nil
+		case available["fuse_incident_candidates"] && !called["fuse_incident_candidates"]:
+			name = "fuse_incident_candidates"
+		case available["rerank_incident_candidates"] && !called["rerank_incident_candidates"]:
+			name = "rerank_incident_candidates"
+		case available["match_causal_patterns"] && !called["match_causal_patterns"]:
+			name = "match_causal_patterns"
+		case available["submit_hypotheses"] && !called["submit_hypotheses"]:
+			name = "submit_hypotheses"
+		case available["verify_incident_hypotheses"] && !called["verify_incident_hypotheses"]:
+			name = "verify_incident_hypotheses"
+		case available["submit_diagnosis"] && !called["submit_diagnosis"]:
+			name = "submit_diagnosis"
+		case available["submit_recovery_proposal"] && !called["submit_recovery_proposal"]:
+			name = "submit_recovery_proposal"
+		case available["dry_run_recovery_proposal"] && !called["dry_run_recovery_proposal"]:
+			name = "dry_run_recovery_proposal"
+		case available["accept_recovery_proposal"] && !called["accept_recovery_proposal"]:
+			name = "accept_recovery_proposal"
+		default:
+			if len(options.Tools) > 0 {
+				name = options.Tools[0].Name
+			} else {
+				return withMockUsage(schema.AssistantMessage("structured terminal outcome completed", nil)), nil
+			}
+		}
 	}
 	arguments := map[string]any{}
 	switch name {
-	case "submit_evidence_plan":
-		arguments = map[string]any{"window_start": time.Now().Add(-time.Minute), "window_end": time.Now(), "sources": []map[string]any{{"source": "metric"}, {"source": "log"}, {"source": "trace"}, {"source": "kubernetes"}}}
 	case "submit_correlation_decision":
 		arguments = map[string]any{"merge": false, "confidence": .4, "reason": "insufficient operational linkage"}
+	case "submit_hypotheses":
+		evidenceIDs := firstEvidenceIDs(messages, 2)
+		arguments = map[string]any{"reasoning_type": "hypothesis_verification", "hypotheses": []map[string]any{{"id": "h1", "category": "cpu", "variant": "busy_loop", "cause": "CPU saturation", "service": "gateway-service", "resource": "gateway-service", "prior_probability": 1.0, "supporting_evidence_ids": evidenceIDs, "expected_causal_path": []string{"cpu"}, "falsification_conditions": []string{"CPU is normal"}}}}
 	case "submit_diagnosis":
-		evidenceID := firstEvidenceID(messages)
-		arguments = map[string]any{"reasoning_type": "hypothesis_verification", "root_cause": "CPU saturation", "category": "cpu", "variant": "busy_loop", "service": "gateway-service", "resource": "gateway-service", "confidence": .91, "evidence_ids": []string{evidenceID}, "hypotheses": []map[string]any{{"id": "h1", "cause": "CPU saturation", "probability": .91, "supporting_evidence": []string{evidenceID}, "falsification_conditions": []string{"CPU is normal"}}}}
+		arguments = map[string]any{"hypothesis_id": "h1"}
 	case "submit_recovery_proposal":
 		arguments = map[string]any{"action": "restart_pod", "target": "gateway-service", "parameters": map[string]any{}, "reason": "restore service", "risk": "brief disruption", "diff": "restart workload", "rollback": "wait for prior replica", "confidence": .9}
+	case DiagnosisAgentName, RecoveryAgentName:
+		arguments = map[string]any{"request": "complete the bounded specialist task for the current Incident"}
+	case "submit_supervisor_outcome":
+		arguments = map[string]any{"status": "AWAITING_APPROVAL", "reason": "specialist outputs satisfy the deterministic handoff"}
 	default:
-		return nil, fmt.Errorf("unexpected tool %s", name)
+		arguments = map[string]any{}
 	}
 	raw, _ := json.Marshal(arguments)
-	return &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call-" + name, Type: "function", Function: schema.FunctionCall{Name: name, Arguments: string(raw)}}}}, nil
+	return withMockUsage(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call-" + name, Type: "function", Function: schema.FunctionCall{Name: name, Arguments: string(raw)}}}}), nil
+}
+
+func withMockUsage(message *schema.Message) *schema.Message {
+	message.ResponseMeta = &schema.ResponseMeta{Usage: &schema.TokenUsage{PromptTokens: 80, CompletionTokens: 20, TotalTokens: 100}}
+	return message
+}
+
+func toolCalls(names []string, arguments func(string) any) *schema.Message {
+	calls := make([]schema.ToolCall, 0, len(names))
+	for _, name := range names {
+		raw, _ := json.Marshal(arguments(name))
+		calls = append(calls, schema.ToolCall{ID: "call-" + name, Type: "function", Function: schema.FunctionCall{Name: name, Arguments: string(raw)}})
+	}
+	return &schema.Message{Role: schema.Assistant, ToolCalls: calls}
+}
+func calledTools(messages []*schema.Message) map[string]bool {
+	out := map[string]bool{}
+	for _, message := range messages {
+		if message == nil {
+			continue
+		}
+		for _, call := range message.ToolCalls {
+			out[call.Function.Name] = true
+		}
+		if message.Role == schema.Tool && message.ToolName != "" {
+			out[message.ToolName] = true
+		}
+	}
+	return out
+}
+
+type supplementalCollector struct {
+	source string
+	calls  *atomic.Int32
+}
+
+func (c supplementalCollector) Collect(_ context.Context, in *domain.Incident) ([]domain.Evidence, error) {
+	summary := c.source + " evidence CPU throttling timeout"
+	if c.calls.Add(1) > 4 {
+		summary += " supplemental_signal"
+	}
+	return []domain.Evidence{{Source: c.source, Kind: c.source + "_evidence", Summary: summary, ObservedAt: time.Now().UTC(), Namespace: in.Namespace, Service: in.Service, Resource: in.Resource}}, nil
 }
 
 func (m scriptedEinoModel) Stream(ctx context.Context, messages []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
@@ -60,27 +148,43 @@ func (m scriptedEinoModel) Stream(ctx context.Context, messages []*schema.Messag
 	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
-func firstEvidenceID(messages []*schema.Message) string {
+func firstEvidenceIDs(messages []*schema.Message, limit int) []string {
 	for index := len(messages) - 1; index >= 0; index-- {
-		if messages[index].Role != schema.User {
-			continue
-		}
 		var payload struct {
 			Evidence []struct {
 				ID string `json:"id"`
 			} `json:"evidence"`
 		}
 		if json.Unmarshal([]byte(messages[index].Content), &payload) == nil && len(payload.Evidence) > 0 {
-			return payload.Evidence[0].ID
+			out := make([]string, 0, limit)
+			for _, item := range payload.Evidence {
+				out = append(out, item.ID)
+				if len(out) == limit {
+					break
+				}
+			}
+			return out
 		}
 	}
-	return "missing"
+	return []string{"missing"}
 }
 
 type fixedCollector struct{ source string }
 
 func (c fixedCollector) Collect(_ context.Context, in *domain.Incident) ([]domain.Evidence, error) {
-	return []domain.Evidence{{Source: c.source, Kind: c.source + "_evidence", Summary: c.source + " evidence", ObservedAt: time.Now().UTC(), Namespace: in.Namespace, Service: in.Service, Resource: in.Resource}}, nil
+	return []domain.Evidence{{Source: c.source, Kind: c.source + "_evidence", Summary: c.source + " evidence CPU throttling timeout", ObservedAt: time.Now().UTC(), Namespace: in.Namespace, Service: in.Service, Resource: in.Resource}}, nil
+}
+
+type fixedHistoricalRetriever struct{}
+
+func (fixedHistoricalRetriever) Semantic(_ context.Context, f domain.IncidentFeatures, _ int) ([]domain.RetrievalCandidate, error) {
+	return []domain.RetrievalCandidate{{IncidentID: "history-1", Namespace: f.Namespace, Service: f.Service, Resource: f.Resource, Category: "cpu", RootCause: "CPU saturation", Features: domain.IncidentFeatures{Namespace: f.Namespace, Service: f.Service, Resource: f.Resource, Terms: f.Terms, TopologyServices: f.TopologyServices}}}, nil
+}
+func (fixedHistoricalRetriever) Lexical(_ context.Context, _ domain.IncidentFeatures, _ int) ([]domain.RetrievalCandidate, error) {
+	return []domain.RetrievalCandidate{}, nil
+}
+func (fixedHistoricalRetriever) Topology(_ context.Context, f domain.IncidentFeatures, _ int) ([]domain.RetrievalCandidate, error) {
+	return []domain.RetrievalCandidate{{IncidentID: "history-1", Namespace: f.Namespace, Service: f.Service, Resource: f.Resource, Category: "cpu", RootCause: "CPU saturation", Features: domain.IncidentFeatures{Namespace: f.Namespace, Service: f.Service, Resource: f.Resource, Terms: f.Terms, TopologyServices: f.TopologyServices}}}, nil
 }
 
 type parallelCollectorGroup struct {
@@ -159,7 +263,7 @@ func TestEinoGraphInterruptAndResume(t *testing.T) {
 	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
 		collectors[source] = fixedCollector{source: source}
 	}
-	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, Historical: fixedCollector{source: "historical"}, Agents: registry, Executor: executor, Checkpoints: checkpoints})
+	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, HistoricalCandidates: fixedHistoricalRetriever{}, Agents: registry, Executor: executor, Checkpoints: checkpoints, VerificationInterval: time.Millisecond, VerificationTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +271,7 @@ func TestEinoGraphInterruptAndResume(t *testing.T) {
 	_, runErr := supervisor.Run(ctx, incident)
 	interrupt, ok := compose.ExtractInterruptInfo(runErr)
 	if !ok || len(interrupt.InterruptContexts) != 1 {
-		t.Fatalf("expected one Eino interrupt, got %v", runErr)
+		t.Fatalf("expected one Eino interrupt, got %v; budget=%+v ledger=%+v", runErr, incident.AgentBudget, incident.DiagnosisLedger)
 	}
 	if incident.Status != domain.StatusAwaitingApproval || incident.DryRun == nil || incident.Proposal == nil {
 		t.Fatalf("incident did not reach approval: %#v", incident)
@@ -197,17 +301,42 @@ func TestEvidenceToolsNodeExecutesAllFourSourcesInParallel(t *testing.T) {
 	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
 		collectors[source] = parallelCollector{source: source, group: group}
 	}
-	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, Historical: fixedCollector{source: "historical"}, Agents: registry, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}})
+	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, HistoricalCandidates: fixedHistoricalRetriever{}, Agents: registry, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}, VerificationInterval: time.Millisecond, VerificationTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	incident := &domain.Incident{ID: "incident-parallel", Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
 	_, runErr := supervisor.Run(ctx, incident)
 	if _, ok := compose.ExtractInterruptInfo(runErr); !ok {
-		t.Fatalf("parallel evidence collection did not reach approval: %v", runErr)
+		t.Fatalf("parallel evidence collection did not reach approval: %v incident=%#v", runErr, incident)
 	}
 	if group.count.Load() != 4 {
 		t.Fatalf("executed collectors=%d", group.count.Load())
+	}
+}
+
+func TestConstrainedAgentCanChooseDifferentEvidenceToolOrder(t *testing.T) {
+	ctx := context.Background()
+	registry, err := NewAgentRegistry(ctx, scriptedEinoModel{reverseEvidence: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := &atomic.Int32{}
+	collectors := map[string]Collector{}
+	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
+		collectors[source] = supplementalCollector{source: source, calls: calls}
+	}
+	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, HistoricalCandidates: fixedHistoricalRetriever{}, Agents: registry, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}, VerificationInterval: time.Millisecond, VerificationTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	incident := &domain.Incident{ID: "incident-supplement", Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
+	state, runErr := supervisor.Run(ctx, incident)
+	if _, ok := compose.ExtractInterruptInfo(runErr); !ok {
+		t.Fatalf("supplemental collection did not reach approval interrupt: err=%v state=%#v incident=%#v", runErr, state, incident)
+	}
+	if calls.Load() != 4 || incident.Status != domain.StatusAwaitingApproval {
+		t.Fatalf("autonomous collection calls=%d status=%s", calls.Load(), incident.Status)
 	}
 }
 

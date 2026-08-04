@@ -6,7 +6,7 @@ stringData:
   mysql-root-password: kubepilot-root
   mysql-user: kubepilot
   mysql-password: kubepilot
-  benchmark-control-token: kubepilot-benchmark-control-v1
+  benchmark-control-token: kubepilot-benchmark-control-token
 ---
 apiVersion: apps/v1
 kind: Deployment

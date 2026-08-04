@@ -11,7 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Catalog is a versioned, held-out corpus of previously resolved incidents.
+// Catalog is a curated, held-out corpus of previously resolved incidents.
 // It is deliberately independent from benchmark/incidents.yaml: benchmark
 // scenarios and their ground truth must never be used to seed Agent memory.
 type Catalog struct {

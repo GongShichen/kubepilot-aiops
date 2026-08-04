@@ -23,12 +23,11 @@ for volume in kubepilot_prometheus-data kubepilot_alertmanager-data kubepilot_lo
 done
 
 # Redis is short-term Agent state by design. PostgreSQL deletion is scoped to
-# benchmark incidents/runs; non-benchmark incidents and the history corpus are
-# intentionally preserved.
+# benchmark incidents; completed benchmark run metadata, reports, non-benchmark
+# incidents, and the history corpus are intentionally preserved.
 "${compose[@]}" exec -T agent-redis redis-cli FLUSHDB >/dev/null
 "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U kubepilot -d kubepilot <<'SQL' >/dev/null
 DELETE FROM incidents WHERE namespace = 'kubepilot-benchmark';
-DELETE FROM benchmark_runs;
 SQL
 
 "${compose[@]}" up -d prometheus alertmanager loki jaeger drain3 kubepilot-agent >/dev/null

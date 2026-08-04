@@ -32,6 +32,9 @@ type IncidentManager struct {
 		Correlate(context.Context, domain.Alert, string, string, string, []domain.Incident) (string, error)
 	}
 	CorrelationFallbackTimeout time.Duration
+	Learner                    interface {
+		Learn(context.Context, *domain.Incident) error
+	}
 }
 
 func (m *IncidentManager) ObserveWorkflowEvent(ctx context.Context, event workflowgraph.WorkflowEvent) {
@@ -50,6 +53,15 @@ func (m *IncidentManager) ObserveWorkflowEvent(ctx context.Context, event workfl
 	data := map[string]any{"run_id": event.RunID, "name": event.Name, "component": event.Component}
 	if event.InputTokens > 0 || event.OutputTokens > 0 {
 		data["input_tokens"], data["output_tokens"] = event.InputTokens, event.OutputTokens
+	}
+	if event.TimeToFirstChunkMS > 0 {
+		data["time_to_first_chunk_ms"] = event.TimeToFirstChunkMS
+	}
+	if event.TimeToToolCallMS > 0 {
+		data["time_to_tool_call_ms"] = event.TimeToToolCallMS
+	}
+	if event.StreamDurationMS > 0 {
+		data["stream_duration_ms"] = event.StreamDurationMS
 	}
 	if event.Error != "" {
 		data["error"] = event.Error
@@ -254,6 +266,8 @@ func (m *IncidentManager) Retry(ctx context.Context, id string) (*domain.Inciden
 	in.Proposal, in.DryRun, in.ExecutionContext, in.Verification = nil, nil, nil, nil
 	in.WorkflowInterruptID = ""
 	in.DiagnosisError = ""
+	in.SkillSnapshotHash, in.RankingPolicyHash, in.RerankerConfigHash = "", "", ""
+	in.AgentBudget, in.DiagnosisLedger = nil, nil
 	in.UpdatedAt = time.Now().UTC()
 	if m.Checkpoints != nil {
 		_ = m.Checkpoints.Delete(ctx, "incident:"+id)
@@ -302,6 +316,11 @@ func (m *IncidentManager) diagnose(id string) {
 	}
 	state.Incident.DiagnosisError = ""
 	_ = m.Store.Update(persistCtx, state.Incident)
+	if state.Incident.Status == domain.StatusResolved && m.Learner != nil {
+		if learnErr := m.Learner.Learn(persistCtx, state.Incident); learnErr != nil {
+			m.audit(persistCtx, id, "causal_learning_failed", "resolved incident was not learned", map[string]any{"error": workflowgraph.RedactError(learnErr.Error())})
+		}
+	}
 	m.publish(state.Incident)
 	m.audit(persistCtx, id, "diagnosis_completed", "diagnosis workflow completed", map[string]any{"status": state.Incident.Status, "errors": state.Errors})
 }
@@ -351,6 +370,16 @@ func (m *IncidentManager) resumeWorkflow(id string, approved bool, idempotencyKe
 	if err != nil {
 		return
 	}
+	currentSkill, currentRanking, currentReranker := m.Supervisor.RuntimeHashes()
+	if in.SkillSnapshotHash != currentSkill || in.RankingPolicyHash != currentRanking || in.RerankerConfigHash != currentReranker {
+		_ = domain.Transition(in, domain.StatusNeedsAttention)
+		in.DiagnosisError = "workflow runtime configuration changed; explicit retry is required"
+		in.UpdatedAt = time.Now().UTC()
+		_ = m.Store.Update(context.Background(), in)
+		m.audit(context.Background(), id, "workflow_resume_refused", in.DiagnosisError, nil)
+		m.publish(in)
+		return
+	}
 	if snapshotter, ok := m.ModelSnapshotter.(interface {
 		WithSnapshotHash(context.Context, string) (context.Context, error)
 	}); ok {
@@ -386,6 +415,11 @@ func (m *IncidentManager) resumeWorkflow(id string, approved bool, idempotencyKe
 	}
 	state.Incident.WorkflowInterruptID = ""
 	_ = m.Store.Update(persistCtx, state.Incident)
+	if state.Incident.Status == domain.StatusResolved && m.Learner != nil {
+		if learnErr := m.Learner.Learn(persistCtx, state.Incident); learnErr != nil {
+			m.audit(persistCtx, id, "causal_learning_failed", "resolved incident was not learned", map[string]any{"error": workflowgraph.RedactError(learnErr.Error())})
+		}
+	}
 	m.audit(persistCtx, id, "workflow_completed", "Eino workflow completed after approval", map[string]any{"status": state.Incident.Status})
 	m.publish(state.Incident)
 }
@@ -403,12 +437,16 @@ func (m *IncidentManager) ReconcileLegacyWorkflows(ctx context.Context) error {
 		keepInterrupted := false
 		if incident.Status == domain.StatusAwaitingApproval && incident.WorkflowInterruptID != "" && m.Checkpoints != nil {
 			_, keepInterrupted, _ = m.Checkpoints.Get(ctx, "incident:"+incident.ID)
+			if identities, ok := m.Store.(store.WorkflowIdentityStore); ok {
+				identity, identityErr := identities.WorkflowIdentity(ctx, incident.ID)
+				keepInterrupted = keepInterrupted && identityErr == nil && identity == agent.WorkflowName
+			}
 		}
 		if keepInterrupted {
 			continue
 		}
 		_ = domain.Transition(incident, domain.StatusNeedsAttention)
-		incident.DiagnosisError = "legacy or incomplete workflow requires explicit retry under Eino Graph v2"
+		incident.DiagnosisError = "legacy or incomplete workflow requires explicit retry under constrained ReAct"
 		incident.UpdatedAt = time.Now().UTC()
 		if err = m.Store.Update(ctx, incident); err != nil {
 			return err

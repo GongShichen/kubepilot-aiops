@@ -27,6 +27,23 @@ type IncidentStore interface {
 type WorkflowStatusStore interface {
 	UpdateWorkflowStatus(context.Context, string, domain.IncidentStatus, time.Time) error
 }
+type WorkflowIdentityStore interface {
+	WorkflowIdentity(context.Context, string) (string, error)
+}
+
+// KnowledgeStore is a structured Agent capability boundary. It deliberately
+// exposes no raw SQL, tsquery, or database expression.
+type KnowledgeStore interface {
+	UpsertIncidentKnowledge(context.Context, *domain.Incident, domain.IncidentFeatures, string) error
+	SearchLexicalIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error)
+	SearchTopologyIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error)
+	SeedCausalPatterns(context.Context, []domain.CausalPattern) error
+	ListCausalPatterns(context.Context, string) ([]domain.CausalPattern, error)
+	GetCausalPattern(context.Context, string) (*domain.CausalPattern, error)
+	SetCausalPatternStatus(context.Context, string, string, string) (*domain.CausalPattern, error)
+	RecordCausalPatternEvent(context.Context, string, string, string, string, map[string]any) error
+	CountCausalPatternSupport(context.Context, string) (int, error)
+}
 
 type MemoryStore struct {
 	mu        sync.RWMutex

@@ -14,6 +14,8 @@ COPY --from=build /out/kubepilot-benchmark /usr/local/bin/kubepilot-benchmark
 COPY --from=build /out/kubepilot-log-indexer /usr/local/bin/kubepilot-log-indexer
 COPY --from=build /out/demo-service /usr/local/bin/demo-service
 COPY benchmark /app/benchmark
+COPY knowledge /app/knowledge
+COPY internal/agent/skills /app/internal/agent/skills
 WORKDIR /app
 USER nonroot:nonroot
 EXPOSE 8080

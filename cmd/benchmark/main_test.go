@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -43,5 +44,18 @@ func TestCleanupFailureStopsFullPipeline(t *testing.T) {
 	})
 	if !failed || caseID != "dirty" {
 		t.Fatalf("cleanupFailure() = %q, %v", caseID, failed)
+	}
+}
+
+func TestManifestContainsReproducibilityDimensions(t *testing.T) {
+	raw, err := os.ReadFile("../../benchmark/manifests/default.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, key := range []string{"code_commit:", "model:", "embedding_model:", "reranker:", "skill_hash:", "budget_config:", "retrieval_weights:", "ranking_weights:"} {
+		if !strings.Contains(text, key) {
+			t.Fatalf("manifest missing %s", key)
+		}
 	}
 }

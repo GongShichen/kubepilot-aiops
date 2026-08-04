@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: KubePilot-AIOps API
-  version: 0.1.0
+  version: 0.4.0
 servers: [{url: "http://localhost:8080"}]
 security: [{bearerAuth: []}]
 paths:
@@ -35,6 +35,16 @@ paths:
     get: {parameters: [{$ref: '#/components/parameters/IncidentID'}], responses: {'200': {description: Alerts}}}
   /api/v1/incidents/{id}/evidence:
     get: {parameters: [{$ref: '#/components/parameters/IncidentID'}], responses: {'200': {description: Evidence, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Evidence'}}}}}}}
+  /api/v1/incidents/{id}/hypotheses:
+    get:
+      summary: Read the auditable hypothesis lifecycle and confidence history
+      parameters: [{$ref: '#/components/parameters/IncidentID'}]
+      responses: {'200': {description: Hypothesis ledger}, '404': {description: Incident not found}}
+  /api/v1/incidents/{id}/agent-runs:
+    get:
+      summary: Read constrained ReAct budgets, decision events, and Safety feedback
+      parameters: [{$ref: '#/components/parameters/IncidentID'}]
+      responses: {'200': {description: Agent run ledger}, '404': {description: Incident not found}}
   /api/v1/incidents/{id}/events:
     get: {parameters: [{$ref: '#/components/parameters/IncidentID'}], responses: {'200': {description: Audit events}}}
   /api/v1/incidents/{id}/stream:
@@ -52,6 +62,24 @@ paths:
     get: {responses: {'200': {description: Redacted model configuration status}}}
   /api/v1/model/probe:
     post: {responses: {'200': {description: Model probe passed}, '502': {description: Probe failed}}}
+  /api/v1/reranker/health:
+    get: {responses: {'200': {description: Redacted reranker configuration status}, '503': {description: Reranker unavailable}}}
+  /api/v1/reranker/probe:
+    post: {responses: {'200': {description: Reranker probe passed}, '502': {description: Probe failed}, '503': {description: Reranker unavailable}}}
+  /api/v1/knowledge/causal-patterns:
+    get:
+      summary: List causal patterns
+      parameters: [{name: status, in: query, schema: {type: string, enum: [active, disabled, candidate]}}]
+      responses: {'200': {description: Causal patterns, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/CausalPattern'}}}}}}
+  /api/v1/knowledge/causal-patterns/{id}:
+    get:
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: Causal pattern, content: {application/json: {schema: {$ref: '#/components/schemas/CausalPattern'}}}}, '404': {description: Not found}}
+  /api/v1/knowledge/causal-patterns/{id}/status:
+    post:
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [status], properties: {status: {type: string, enum: [active, disabled]}}}}}}
+      responses: {'200': {description: Updated causal pattern}, '400': {description: Invalid status}}
   /api/v1/benchmarks/runs:
     get: {responses: {'200': {description: Benchmark runs}}}
     post:
@@ -130,9 +158,64 @@ components:
         resource: {type: string}
         summary: {type: string}
         confidence: {type: number, minimum: 0, maximum: 1}
+        neural_score: {type: number, minimum: 0, maximum: 1}
+        neural_ranked: {type: boolean}
+        attribution: {$ref: '#/components/schemas/EvidenceAttribution'}
         trace_id: {type: string}
         template_id: {type: string}
         content: {type: object, additionalProperties: true, description: Untrusted external evidence payload}
+        relevance_score: {type: number, minimum: 0, maximum: 1}
+        ranking_reasons: {type: array, items: {type: string}}
+        causal_node_ids: {type: array, items: {type: string}}
+    EvidenceAttribution:
+      type: object
+      properties:
+        temporal_alignment: {type: number, minimum: 0, maximum: 1}
+        service_resource_match: {type: number, minimum: 0, maximum: 1}
+        trace_request_pod_match: {type: number, minimum: 0, maximum: 1}
+        causal_contribution: {type: number, minimum: 0, maximum: 1}
+        anomaly_specificity: {type: number, minimum: 0, maximum: 1}
+        attribution_score: {type: number, minimum: 0, maximum: 1}
+        reasons: {type: array, items: {type: string}}
+    SafetyFeedback:
+      type: object
+      required: [allowed, scope, code, reason, retryable, requires_human, remaining_corrections]
+      properties:
+        allowed: {type: boolean}
+        scope: {type: string, enum: [supervisor, diagnosis, recovery_proposal, execution, verification]}
+        category: {type: string, enum: [repairable, fatal, human_required]}
+        code: {type: string}
+        reason: {type: string}
+        failed_checks: {type: array, items: {type: object}}
+        missing_requirements: {type: array, items: {type: string}}
+        required_capabilities: {type: array, items: {type: string}, description: Capability gaps only; never a concrete tool or answer}
+        retryable: {type: boolean}
+        requires_human: {type: boolean}
+        remaining_corrections: {type: integer, minimum: 0}
+    AgentDecisionEvent:
+      type: object
+      required: [agent_id, iteration, observation_summary, selected_action, reason_category, occurred_at]
+      properties:
+        agent_id: {type: string}
+        iteration: {type: integer, minimum: 1}
+        observation_summary: {type: string, description: Structured observation summary; hidden model reasoning is never stored}
+        selected_action: {type: string}
+        reason_category: {type: string}
+        occurred_at: {type: string, format: date-time}
+    CausalPattern:
+      type: object
+      required: [id, category, cause, nodes, edges, source, confidence, status, version]
+      properties:
+        id: {type: string}
+        category: {type: string, enum: [cpu, memory, database, network, deployment]}
+        cause: {type: string}
+        nodes: {type: array, items: {type: object}}
+        edges: {type: array, items: {type: object}}
+        source: {type: string}
+        confidence: {type: number, minimum: 0, maximum: 1}
+        status: {type: string, enum: [active, disabled, candidate]}
+        version: {type: integer}
+        support_count: {type: integer}
     DryRunResult:
       type: object
       required: [success, action, target, mutation_spec_hash, validated_at]

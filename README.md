@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-KubePilot is an Eino-native AIOps Agent system for Kubernetes incident diagnosis and recovery. A typed Eino Graph owns the deterministic Incident lifecycle; three Eino ADK Agents own complex decisions; Eino ToolsNode owns every external capability; Eino Interrupt owns human approval and resumable execution.
+KubePilot is an Eino-native **Constrained ReAct Autonomous SRE Agent** for Kubernetes incident diagnosis and safe recovery. Three nested Eino ADK Agents autonomously choose bounded investigation and proposal capabilities, while a deterministic Safety Controller owns invariants, approval, mutation, and verification.
 
 The control plane is implemented in Go with Gin and Eino. It receives Alertmanager events, correlates alerts, collects metrics/logs/traces/Kubernetes evidence, performs evidence-grounded diagnosis, proposes a constrained recovery action, pauses for approval, executes through `client-go`, and verifies the result. Prometheus, Loki, Jaeger, Milvus, PostgreSQL, Redis, and the official Drain3 parser provide the Agent's evidence and state infrastructure.
 
@@ -16,38 +16,45 @@ Docker Compose: Agent + Log Indexer + PostgreSQL + Redis + Prometheus
                 + Loki + Jaeger + Grafana + Milvus + Drain3 sidecar
 ```
 
-Drain3 is not on the Incident query path. The independent Go Log Indexer continuously consumes Loki, sends versioned and idempotent batches to Drain3 over WebSocket, embeds templates with the configured BGE endpoint, and writes the template index to PostgreSQL and Milvus. Incident queries read Loki plus the prebuilt index and fall back to Loki when index freshness is insufficient.
+Drain3 is not on the Incident query path. The independent Go Log Indexer continuously consumes Loki, sends identified and idempotent batches to Drain3 over WebSocket, embeds templates with the configured BGE endpoint, and writes the template index to PostgreSQL and Milvus. Incident queries read Loki plus the prebuilt index and fall back to Loki when index freshness is insufficient.
 
 ## Agent architecture
 
 ```mermaid
 flowchart TD
-    A["Incident Intake"] --> B["Alert Correlation"]
-    B --> S["Supervisor Agent<br/>Evidence Plan"]
-    S --> T["Parallel Evidence ToolsNode<br/>Prometheus · Loki · Jaeger · Kubernetes"]
-    T --> F["Evidence Fusion"]
-    F --> H["Historical Retrieval Tool"]
-    H --> D["Diagnosis Agent<br/>Hypothesis Verification"]
-    D -->|"one bounded recollection"| T
-    D -->|"confidence < 0.80"| N["NEEDS_ATTENTION"]
-    D --> R["Recovery Agent<br/>Proposal Only"]
-    R --> V["Proposal Validation + Kubernetes DryRunAll"]
-    V --> I["Eino StatefulInterrupt<br/>Human Approval"]
-    I -->|"ResumeWithData"| X["Action ToolsNode"]
-    X --> Q["Verification ToolsNode<br/>three consecutive healthy samples"]
+    A["Incident Intake"] --> S["Supervisor ReAct Agent"]
+    S -->|"Eino AgentTool"| D["Diagnosis ReAct Agent"]
+    D --> T["Model-selected Eino Tools<br/>Evidence · Retrieval · Reranking · Causal · Hypothesis"]
+    T --> G["Safety Controller"]
+    G -->|"Repairable structured feedback"| D
+    G -->|"Accepted diagnosis"| S
+    S -->|"Eino AgentTool"| R["Controlled Recovery ReAct Agent"]
+    R --> P["Proposal + Kubernetes DryRunAll"]
+    P --> G
+    G -->|"Repairable structured feedback"| R
+    G -->|"Accepted proposal"| I["Eino StatefulInterrupt<br/>Human Approval"]
+    I -->|"ResumeWithData"| X["Deterministic Action Executor<br/>exactly one approved mutation"]
+    X --> Q["Deterministic Verification Controller<br/>three consecutive healthy rounds"]
 ```
 
-- **Eino is the runtime, not a wrapper:** `compose.Graph` is the workflow runtime, `adk.NewChatModelAgent` is the Agent runtime, `compose.NewToolNode` is the capability runtime, and `StatefulInterrupt`/`ResumeWithData` is the approval runtime.
-- **Exactly three core Agents:** Supervisor plans bounded evidence, Diagnosis performs evidence-driven hypothesis verification, and Recovery creates a safe proposal. Collection, validation, execution, and verification remain deterministic workflow/tool responsibilities.
-- **Typed, resumable workflow:** the versioned `WorkflowState`, Evidence schema, Dry-run result, and server-owned ExecutionContext are checkpointed in Redis. PostgreSQL remains the auditable long-term business store.
-- **Evidence-grounded reasoning:** the Diagnosis Agent generates at most three hypotheses, attaches supporting Evidence IDs and falsification conditions, and routes confidence below `0.80` to `NEEDS_ATTENTION` instead of forcing an answer.
-- **Central capability registry:** every Agent-visible read and mutation is an Eino Tool with a JSON Schema, node allowlist, timeout, argument/output bounds, and action approval middleware. Tools never accept raw SQL, PromQL, LogQL, kubectl, shell, Milvus filters, or arbitrary Kubernetes manifests.
+- **Constrained ReAct instead of a hard-coded investigation graph:** the model chooses each Agent business ToolCall and may change tool order or parallelize calls. The outer Eino graph is only the deterministic safety skeleton: intake, Agents, proposal validation, approval interrupt, exact execution, verification, and finalization.
+- **Exactly three nested ADK Agents:** Supervisor acts as incident commander and delegates through Eino AgentTools; Diagnosis explores evidence and falsifiable hypotheses; Recovery creates and dry-runs one proposal. Recovery cannot discover mutation, approval-data, or verification tools.
+- **Pinned Agent Skills:** each Agent receives an independent `SKILL.md` through Eino middleware. Skills define role, boundaries, decision criteria, capability semantics, and output schema—not a hidden tool sequence. Skill hashes are pinned to the Incident and checkpoint, so changed instructions cannot silently resume an old workflow.
+- **Safety is a feedback environment:** repairable violations return a scoped `SafetyFeedback` observation to the same ReAct loop. Feedback states missing conditions without prescribing a tool or revealing an answer. Fatal policy violations stop immediately; infrastructure failures and exhausted correction budgets require a human.
+- **Four-dimensional budgets:** every Agent and the whole Incident enforce max iterations, Tool Count, pinned Tool Cost, provider tokens, and a separate correction budget. Parallel calls are charged atomically, AgentTool delegation is charged at both parent and Incident scope, and resume never resets usage.
+- **Typed, resumable workflow:** the named `WorkflowState`, Evidence schema, Dry-run result, and server-owned ExecutionContext are checkpointed in Redis. PostgreSQL remains the auditable long-term business store.
+- **Evidence-grounded hypothesis lifecycle:** Evidence is attributed to the current time, service/resource, Trace/request/Pod, and causal path before ranking. Diagnosis maintains at most three hypotheses through `CREATED → EVIDENCE_SEARCHING → SUPPORTED/REFUTED → ACCEPTED`; confidence can rise or decay as support and contradiction change. The model prior is deliberately the smallest positive term.
+- **True hybrid incident retrieval:** three parallel Eino Tools recall semantic Milvus candidates, PostgreSQL lexical candidates, and cross-service topology candidates. Weighted RRF keeps 30 candidates and an explainable feature reranker sends only the top five into diagnosis; every score component and ranking reason is persisted.
+- **Optional neural reranking API:** evidence and historical incidents have separate ranking policies and fusion formulas: `0.70 deterministic + 0.30 neural` for evidence, and `0.45 deterministic + 0.55 neural` for historical incidents. A user-configured OpenAI-compatible reranking API can add neural relevance; unavailable neural ranking is explicitly marked and deterministic weights are renormalized rather than fabricating a score. Both `EvidenceRankBreakdown` and `IncidentRankBreakdown` are persisted for reproducibility. The endpoint is hot-reloaded and pinned by configuration hash.
+- **Topology-aware reasoning:** Jaeger call relationships, Kubernetes Service/Endpoint and owner links, known data dependencies, and error propagation paths form an Incident Dependency Graph. This supports cross-service retrieval when different workloads fail through the same critical dependency.
+- **Causal knowledge:** built-in and learned cause-to-symptom paths are stored in PostgreSQL with audit history. Only high-confidence, approved, successfully verified incidents from configured non-evaluation namespaces can contribute, and two independent incidents are required before a learned pattern becomes active.
+- **Central capability registry:** every Agent-visible business capability is an Eino Tool with JSON Schema, Agent allowlist, timeout, argument/output bounds, and pinned cost. Tools never accept raw SQL, PromQL, LogQL, kubectl, shell, Milvus filters, or arbitrary Kubernetes manifests. Production Agent code is AST-tested to reject hand-built `schema.ToolCall` values.
 - **Official streaming model components:** OpenAI-compatible and Anthropic-compatible protocols use the pinned Eino extension packages. Eino assembles fragmented streaming Tool Calls; URL, API path, key, and model remain user-configured.
 - **Capability gating:** the Agent performs a side-effect-free Tool Calling probe before enabling recovery. A chat endpoint that cannot produce the required structured tool call remains diagnosis-disabled rather than executing an unsafe fallback.
 - **Pre-indexed hybrid logs:** the query Tool combines Loki metadata/keyword results with the continuously maintained Drain3/BGE/Milvus index; it never waits for synchronous log parsing.
 - **Human-in-the-loop recovery:** Recovery can propose only `restart_pod`, `scale_deployment`, or `rollback_deployment`. Kubernetes `DryRunAll` must succeed before approval. Execution requires an unexpired proposal, server-generated ExecutionContext, idempotency key, namespace allowlist, mutation hash, UID, and resourceVersion.
 - **Closed-loop verification:** after execution, the deterministic Verification ToolsNode samples workload health repeatedly and persists the final Incident, proposal, approval, audit, and verification state in PostgreSQL.
-- **Agent observability:** Eino callbacks emit Graph/Agent/Node/Tool lifecycle events to OpenTelemetry, Prometheus, PostgreSQL audit/tool-call tables, and Incident SSE without recording hidden reasoning, credentials, or unbounded raw logs.
+- **Agent observability without Chain-of-Thought:** Eino callbacks persist tool lifecycle, budget, hypothesis transitions, confidence history, scoped Safety feedback, and `AgentDecisionEvent` action categories to OpenTelemetry, Prometheus, PostgreSQL, and Incident SSE. Hidden reasoning, credentials, endpoints, and unbounded raw logs are never recorded.
 - **Ablation-ready design:** the same runner can evaluate `llm-only`, `vector-rag`, and full `kubepilot` paths, making the contribution of retrieval and multi-source agents measurable.
 
 ## Prerequisites
@@ -87,6 +94,19 @@ EMBEDDING_MODEL=your-embedding-model
 EMBEDDING_DIMENSIONS=1024
 EMBEDDING_BATCH_SIZE=10               # lower this if the provider caps batch input
 EMBEDDING_REQUEST_INTERVAL=1s         # provider rate-limit pacing; 429/5xx are retried
+RERANKER_ENABLED=false                # optional OpenAI-compatible reranking API
+RERANKER_PROTOCOL=openai-compatible
+RERANKER_BASE_URL=https://...
+RERANKER_API_PATH=/reranks
+RERANKER_API_KEY=...
+RERANKER_MODEL=<your-reranker-model>
+MODEL_EVIDENCE_MAX_ITEMS=12
+MODEL_CONTEXT_MAX_BYTES=32768
+SUPERVISOR_MAX_TOOL_USES=8
+DIAGNOSIS_MAX_TOOL_USES=15
+RECOVERY_MAX_TOOL_USES=10
+INCIDENT_MAX_AGENT_TOOL_USES=30
+CAUSAL_LEARNING_NAMESPACES=kubepilot-demo
 DRAIN3_TOKEN=...
 BUSINESS_PROBE_URL=...                # optional end-to-end recovery probe
 ```
@@ -96,7 +116,7 @@ The Docker build context also excludes `.env`, generated runtime credentials, an
 
 All Agent model nodes use Eino streaming. OpenAI-compatible SSE deltas and Anthropic `input_json_delta` fragments are merged by Eino before a Tool executes.
 
-The Agent watches the read-only mounted `.env` for chat configuration changes. A candidate client is validated and probed asynchronously; it replaces the active client atomically only after Tool Calling succeeds. A failed candidate leaves the previous client active, HTTP startup is never blocked by model probing, and each Incident pins one model snapshot for its complete workflow. API keys are never exposed by reload health or logs.
+The Agent watches the read-only mounted `.env` for chat and reranker configuration changes. A candidate client replaces the active client atomically only after validation and probing. A failed candidate leaves the previous client active, and each Incident pins model, Skill, ranking-policy, and reranker hashes for its complete workflow. API keys and full endpoints are never exposed by health responses, logs, or checkpoints.
 
 The checked-in Alertmanager development receiver uses `change-alert-token`; set the same value in `.env` for the first local run or replace it in `deploy/docker/alertmanager/alertmanager.yml`.
 
@@ -158,7 +178,9 @@ Stop while preserving data with `make down`. `make destroy` explicitly confirms 
 
 ## API
 
-The versioned specification is at `api/openapi.yaml`. All `/api/v1` routes require `Authorization: Bearer <API_TOKEN>` except the Alertmanager endpoint, which uses its own webhook token. Recovery approval also requires `Idempotency-Key`.
+The public specification is at `api/openapi.yaml`. All `/api/v1` routes require `Authorization: Bearer <API_TOKEN>` except the Alertmanager endpoint, which uses its own webhook token. Recovery approval also requires `Idempotency-Key`.
+
+Causal patterns can be inspected and enabled/disabled through `/api/v1/knowledge/causal-patterns`; every status change is authenticated and audited. `/api/v1/incidents/{id}/hypotheses` exposes the hypothesis ledger, `/agent-runs` exposes budget and decision events without hidden reasoning, and `/api/v1/reranker/health` and `/probe` expose redacted reranker state.
 
 Example manual incident:
 
@@ -200,7 +222,7 @@ make benchmark-full
 
 `standard`, `correlation`, and `retrieval` source `.env`. Formal runs require a real tool-capable chat model and a real OpenAI-compatible embedding endpoint; local mock responses are contract-test data only and are never reported as formal results. The report records the actual embedding model and dimensions, so results from different models remain distinguishable.
 
-Retrieval runs in the separate `kubepilot-retrieval` Compose project. It owns independent Loki (port 3200), Drain3 (port 8181), Milvus (port 19531), etcd, MinIO, Docker network, and volumes; it never writes to the Diagnosis/Agent observability or history stores. The project is force-recreated for formal runs, and Milvus collections are additionally isolated by run ID.
+Retrieval runs in the separate `kubepilot-retrieval` Compose project. It owns independent Loki (port 3200), Drain3 (port 8181), Milvus (port 19531), etcd, MinIO, Docker network, and volumes; it never writes to the Diagnosis/Agent observability or history stores. Every run removes and recreates this project's volumes before ingestion, and Milvus collections are additionally isolated by run ID. Diagnosis and correlation targets restore the Kubernetes baseline and clear only short-lived Agent/observability caches before starting; completed reports and run metadata are retained.
 
 Interrupted runs can be resumed and reports regenerated with:
 
@@ -211,13 +233,13 @@ go run ./cmd/benchmark report --run-id <run-id>
 
 The Kubernetes injector only executes compiled action types. It refuses namespaces other than `kubepilot-benchmark`, snapshots affected resources, runs one case at a time, and restores the baseline on success, failure, cancellation, or timeout. A cleanup failure stops the run.
 
-Each run produces a manifest, case JSONL, summary JSON, CSV tables, and Markdown report under `artifacts/benchmark/<run-id>/`. Manifests include the catalog hash, model protocol/name, endpoint hash, seed, and versions, but no credentials.
+Each run produces a manifest, case JSONL, summary JSON, CSV tables, and Markdown report under `artifacts/benchmark/<run-id>/`. Manifests include the catalog hash, model protocol/name, endpoint hash, seed, and configuration hashes, but no credentials.
 
-Metrics include strict root-cause accuracy, category/service/resource accuracy, evidence recall, recovery decision accuracy, tool success, diagnostic/recovery latency, alert grouping precision/recall/F1, retrieval Recall@K/MRR, and P50/P95/P99. Formal reports contain measured results only.
+Metrics include strict root-cause accuracy, category/service/resource accuracy, evidence recall, recovery decision accuracy, Tool Count/Cost and correction usage, confidence history, diagnostic/recovery latency, alert grouping precision/recall/F1, retrieval Recall@K/MRR, and P50/P95/P99. Retrieval reports `loki`, `semantic`, `hybrid`, and `causal_hybrid`; when a real reranker is configured it additionally reports `neural_causal_hybrid`, including lexical, topology, fusion, deterministic/neural rerank, and causal-stage latency. Formal reports contain measured results only.
 
 The diagnosis comparison evaluates three methods against the same injected Kubernetes scenarios: `llm-only` receives only incident metadata, `vector-rag` receives incident metadata plus seeded historical incidents, and `kubepilot` collects Metric, Log, Trace, Kubernetes, and historical evidence. Root-cause localization requires exact category, one of the 21 canonical fault variants, service, and resource matching; strict accuracy additionally requires at least 50% required-evidence recall. Reports include per-category precision/recall/F1, a confusion matrix, evidence precision/recall and groundedness, Brier score, ECE, high-confidence error rate, and ten-bin confidence calibration.
 
-Benchmark integrity rule: scenario ground truth is available only to the runner/scorer after diagnosis. Incident requests use an opaque observation window and generic summary; the Agent does not receive scenario IDs, injector names, expected evidence, allowed actions, or expected labels. Production diagnosis code must not contain per-case decision rules added in response to benchmark errors. Injector-specific code is limited to the benchmark environment and exists only to create and clean up faults. Historical retrieval is seeded exclusively from the independently versioned `benchmark/history.yaml` corpus into `kubepilot_history_v2`; `benchmark/incidents.yaml` is never used as Agent memory. The seed manifest records the history dataset hash and collection name.
+Benchmark integrity rule: scenario ground truth is available only to the runner/scorer after diagnosis. Incident requests use an opaque observation window and generic summary; the Agent does not receive scenario IDs, injector names, expected evidence, allowed actions, or expected labels. Production diagnosis code must not contain per-case decision rules added in response to benchmark errors. Injector-specific code is limited to the benchmark environment and exists only to create and clean up faults. Historical retrieval is seeded exclusively from the independent `benchmark/history.yaml` corpus into `kubepilot_history`; `benchmark/incidents.yaml` is never used as Agent memory. The seed manifest records the history dataset hash and collection name.
 
 ## Development and verification
 

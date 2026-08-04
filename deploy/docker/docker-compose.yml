@@ -185,8 +185,9 @@ services:
       LOKI_URL: http://loki:3100
       JAEGER_URL: http://jaeger:16686
       MILVUS_ADDRESS: milvus:19530
-      HISTORY_COLLECTION: ${HISTORY_COLLECTION:-kubepilot_history_v2}
-      LOG_INDEX_COLLECTION: ${LOG_INDEX_COLLECTION:-kubepilot_log_templates_v1}
+      HISTORY_COLLECTION: ${HISTORY_COLLECTION:-kubepilot_history}
+      LOG_INDEX_COLLECTION: ${LOG_INDEX_COLLECTION:-kubepilot_log_templates}
+      CAUSAL_PATTERN_FILE: /app/knowledge/causal_patterns.yaml
       OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
       KUBECONFIG: /runtime/kubeconfig
       CONFIG_ENV_FILE: /run/kubepilot/config/.env
@@ -217,7 +218,7 @@ services:
       REDIS_URL: redis://agent-redis:6379/0
       LOKI_URL: http://loki:3100
       MILVUS_ADDRESS: milvus:19530
-      LOG_INDEX_COLLECTION: ${LOG_INDEX_COLLECTION:-kubepilot_log_templates_v1}
+      LOG_INDEX_COLLECTION: ${LOG_INDEX_COLLECTION:-kubepilot_log_templates}
       DRAIN3_WS_URL: ws://drain3:8081/ws/v1/parse
       LOG_INDEXER_INTERVAL: ${LOG_INDEXER_INTERVAL:-2s}
     depends_on:

@@ -1,0 +1,177 @@
+package service
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strings"
+
+	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	"github.com/kubepilot-aiops/kubepilot/internal/store"
+	"github.com/kubepilot-aiops/kubepilot/retrieval"
+)
+
+type CausalLearner struct {
+	Store               store.KnowledgeStore
+	ConfidenceThreshold float64
+	Namespaces          []string
+	EmbeddingVersion    string
+	Embedder            retrieval.EmbeddingClient
+	Vectors             retrieval.VectorStore
+}
+
+func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
+	if l.Store == nil || in == nil {
+		return nil
+	}
+	if !l.namespaceAllowed(in.Namespace) || in.Namespace == "kubepilot-benchmark" || evaluationIncident(in) {
+		return nil
+	}
+	threshold := l.ConfidenceThreshold
+	if threshold <= 0 {
+		threshold = .90
+	}
+	if in.Status != domain.StatusResolved || in.Confidence < threshold || in.DiagnosisError != "" {
+		return nil
+	}
+	if in.ExecutionContext == nil || in.ExecutionContext.ApprovalID == "" || in.Proposal == nil || in.Verification == nil || !in.Verification.Success {
+		return nil
+	}
+	passed := 0
+	for _, ok := range in.Verification.Checks {
+		if ok {
+			passed++
+		}
+	}
+	if passed < 3 {
+		return nil
+	}
+	sources := map[string]bool{}
+	ids := map[string]bool{}
+	for _, id := range in.RootCauseEvidenceIDs {
+		ids[id] = true
+	}
+	for _, e := range in.Evidence {
+		if ids[e.ID] {
+			sources[e.Source] = true
+		}
+	}
+	if len(sources) < 2 {
+		return nil
+	}
+	ledger := in.DiagnosisLedger
+	if ledger == nil || len(ledger.InfrastructureErrors) > 0 {
+		return nil
+	}
+	var selected *domain.VerifiedHypothesis
+	for i := range ledger.Verified {
+		if ledger.Verified[i].Draft.ID == ledger.SelectedHypothesisID {
+			selected = &ledger.Verified[i]
+			break
+		}
+	}
+	if selected == nil || selected.ContradictionScore > .10 {
+		return nil
+	}
+	features := featuresFromLedger(in)
+	if err := l.Store.UpsertIncidentKnowledge(ctx, in, features, l.EmbeddingVersion); err != nil {
+		return err
+	}
+	if l.Embedder != nil && l.Vectors != nil {
+		text := strings.Join(append([]string{in.Summary, in.RootCause, in.RootCauseCategory, in.RootCauseVariant, in.Service, in.Resource}, features.Terms...), " ")
+		vectors, embedErr := l.Embedder.Embed(ctx, []string{text})
+		if embedErr != nil {
+			return fmt.Errorf("index learned incident embedding: %w", embedErr)
+		}
+		if len(vectors) != 1 {
+			return fmt.Errorf("index learned incident embedding: expected one vector, got %d", len(vectors))
+		}
+		recovery := ""
+		if in.Proposal != nil {
+			recovery = string(in.Proposal.Action)
+		}
+		if vectorErr := l.Vectors.Upsert(ctx, []retrieval.Document{{ID: in.ID, Namespace: in.Namespace, Service: in.Service, Category: in.RootCauseCategory, Template: in.Summary, RootCause: in.RootCause, Recovery: recovery, Vector: vectors[0]}}); vectorErr != nil {
+			return fmt.Errorf("index learned incident vector: %w", vectorErr)
+		}
+	}
+	pattern := selectLearnedPattern(in, ledger, selected)
+	if err := l.Store.SeedCausalPatterns(ctx, []domain.CausalPattern{pattern}); err != nil {
+		return err
+	}
+	if err := l.Store.RecordCausalPatternEvent(ctx, pattern.ID, in.ID, "incident_support", "resolved incident met high-confidence causal learning gates", map[string]any{"confidence": in.Confidence, "evidence_sources": len(sources), "contradiction_score": selected.ContradictionScore}); err != nil {
+		return err
+	}
+	count, err := l.Store.CountCausalPatternSupport(ctx, pattern.ID)
+	if err != nil {
+		return err
+	}
+	if count < 2 {
+		return nil
+	}
+	current, err := l.Store.GetCausalPattern(ctx, pattern.ID)
+	if err != nil {
+		return err
+	}
+	if current.Status != "active" {
+		_, err = l.Store.SetCausalPatternStatus(ctx, pattern.ID, "active", "causal-auto-learner")
+		if err != nil {
+			return err
+		}
+		return l.Store.RecordCausalPatternEvent(ctx, pattern.ID, in.ID, "auto_activated", fmt.Sprintf("%d independent resolved incidents support the normalized pattern", count), map[string]any{"support_count": count})
+	}
+	return nil
+}
+
+func (l CausalLearner) namespaceAllowed(namespace string) bool {
+	for _, allowed := range l.Namespaces {
+		if namespace == allowed {
+			return true
+		}
+	}
+	return false
+}
+func evaluationIncident(in *domain.Incident) bool {
+	for _, alert := range in.Alerts {
+		for _, key := range []string{"evaluation", "benchmark", "kubepilot.io/evaluation"} {
+			if strings.EqualFold(alert.Labels[key], "true") || alert.Labels[key] == "1" {
+				return true
+			}
+		}
+	}
+	return false
+}
+func featuresFromLedger(in *domain.Incident) domain.IncidentFeatures {
+	features := domain.IncidentFeatures{IncidentID: in.ID, Namespace: in.Namespace, Service: in.Service, Resource: in.Resource}
+	if in.DiagnosisLedger != nil && len(in.DiagnosisLedger.Candidates) > 0 {
+		features.TopologyServices = append(features.TopologyServices, in.DiagnosisLedger.Candidates[0].Features.TopologyServices...)
+	}
+	for _, e := range in.Evidence {
+		features.EvidenceTypes = append(features.EvidenceTypes, e.Type)
+		if e.Service != "" {
+			features.TopologyServices = append(features.TopologyServices, e.Service)
+		}
+		features.Terms = append(features.Terms, strings.Fields(strings.ToLower(e.Summary))...)
+		features.CausalNodeIDs = append(features.CausalNodeIDs, e.CausalNodeIDs...)
+	}
+	return features
+}
+func selectLearnedPattern(in *domain.Incident, ledger *domain.DiagnosisLedger, selected *domain.VerifiedHypothesis) domain.CausalPattern {
+	for _, pattern := range ledger.CausalPatterns {
+		if pattern.Category == selected.Draft.Category {
+			return pattern
+		}
+	}
+	normalized := strings.ToLower(selected.Draft.Category + "|" + strings.Join(selected.Draft.ExpectedCausalPath, "->"))
+	sum := sha256.Sum256([]byte(normalized))
+	nodes := make([]domain.CausalNode, 0, len(selected.Draft.ExpectedCausalPath))
+	edges := make([]domain.CausalEdge, 0, len(selected.Draft.ExpectedCausalPath)-1)
+	for i, node := range selected.Draft.ExpectedCausalPath {
+		id := fmt.Sprintf("node_%d", i)
+		nodes = append(nodes, domain.CausalNode{ID: id, Type: "observed", Match: []string{node}})
+		if i > 0 {
+			edges = append(edges, domain.CausalEdge{From: fmt.Sprintf("node_%d", i-1), To: id})
+		}
+	}
+	return domain.CausalPattern{ID: "learned-" + hex.EncodeToString(sum[:6]), Category: selected.Draft.Category, Cause: selected.Draft.Cause, Nodes: nodes, Edges: edges, Source: "learned", Confidence: in.Confidence, Status: "candidate", Version: 1}
+}
