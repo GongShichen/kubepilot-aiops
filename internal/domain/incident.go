@@ -316,7 +316,6 @@ type SafetyFeedback struct {
 type AgentBudget struct {
 	MaxIterations int `json:"max_iterations"`
 	MaxToolUses   int `json:"max_tool_uses"`
-	MaxToolCost   int `json:"max_tool_cost"`
 	// MaxTokens is the cumulative generated-token budget for one agent run.
 	// The per-request output cap is supplied separately by the model runtime.
 	MaxTokens      int `json:"max_tokens"`
@@ -332,11 +331,13 @@ type AgentBudgetUsage struct {
 }
 
 type AgentBudgetState struct {
-	Limits         map[string]AgentBudget      `json:"limits"`
-	Usage          map[string]AgentBudgetUsage `json:"usage"`
-	IncidentUses   int                         `json:"incident_tool_uses"`
-	IncidentCost   int                         `json:"incident_tool_cost"`
-	IncidentTokens int                         `json:"incident_tokens"`
+	Limits map[string]AgentBudget      `json:"limits"`
+	Usage  map[string]AgentBudgetUsage `json:"usage"`
+	// Incident totals are telemetry only. They are never used to accept or
+	// reject an Agent action; every enforceable budget is scoped per Agent.
+	IncidentUses   int `json:"incident_tool_uses"`
+	IncidentCost   int `json:"incident_tool_cost"`
+	IncidentTokens int `json:"incident_tokens"`
 }
 
 type HypothesisStatus string

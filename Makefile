@@ -81,18 +81,20 @@ benchmark-build:
 	go test ./...
 	go vet ./...
 	go build ./cmd/server ./cmd/benchmark
+	$(COMPOSE) up -d --build --force-recreate kubepilot-agent
+	@for attempt in $$(seq 1 60); do curl -fsS http://localhost:8080/readyz >/dev/null && break; [ $$attempt -lt 60 ] || exit 1; sleep 2; done
 
 benchmark-manifest: benchmark-build
 	set -a; [ ! -f .env ] || . ./.env; set +a; go run ./cmd/benchmark environment --manifest benchmark/manifests/autonomous.yaml --output artifacts/benchmark/manifest/runtime.json
 
 benchmark-component: benchmark-manifest
-	go test ./benchmark/component/... ./benchmark/evaluator/...
+	go test ./benchmark/evaluator/... ./benchmark/log_retrieval/... ./benchmark/incident_retrieval/...
 
 benchmark-log-retrieval: benchmark-component
 	set -a; [ ! -f .env ] || . ./.env; set +a; docker compose -p kubepilot-retrieval -f deploy/docker/docker-compose.yml --profile benchmark down -v --remove-orphans; docker compose -p kubepilot-retrieval -f deploy/docker/docker-compose.yml --profile benchmark up -d --force-recreate --wait drain3-benchmark loki-benchmark; for attempt in $$(seq 1 60); do curl -fsS http://localhost:3200/ready >/dev/null && break; [ $$attempt -lt 60 ] || exit 1; sleep 2; done; go run ./cmd/benchmark log-retrieval --count "$${LOG_RETRIEVAL_RECORDS:-500000}" --loki-url http://localhost:3200 --drain3-url ws://localhost:8181/ws/v1/parse
 
 benchmark-incident-retrieval: benchmark-log-retrieval
-	set -a; [ ! -f .env ] || . ./.env; set +a; go run ./cmd/benchmark incident-retrieval --count "$${INCIDENT_RETRIEVAL_QUERIES:-500}"
+	set -a; [ ! -f .env ] || . ./.env; set +a; $(COMPOSE) exec -T kubepilot-agent /usr/local/bin/kubepilot-benchmark incident-retrieval --count "$${INCIDENT_RETRIEVAL_QUERIES:-500}"
 
 benchmark-agent: benchmark-incident-retrieval benchmark-standard
 

@@ -28,7 +28,7 @@ func TestPostgresLexicalAndCrossServiceTopologyRetrieval(t *testing.T) {
 	if err = database.Create(ctx, incident); err != nil {
 		t.Fatal(err)
 	}
-	defer database.pool.Exec(context.Background(), `DELETE FROM incidents WHERE id=$1`, incident.ID) //nolint:errcheck
+	defer database.DeleteIncidents(context.Background(), []string{incident.ID}) //nolint:errcheck
 	historicalFeatures := domain.IncidentFeatures{IncidentID: incident.ID, Namespace: namespace, Service: incident.Service, Resource: incident.Resource, Terms: []string{"mysql", "connection", "refused"}, TopologyServices: []string{"payment-service", "mysql"}, TopologyGraph: domain.IncidentDependencyGraph{RootService: "payment-service", Nodes: []domain.DependencyNode{{ID: "payment-service", Role: "root"}, {ID: "mysql", Role: "critical_dependency"}}, Edges: []domain.DependencyEdge{{From: "payment-service", To: "mysql", Kind: "observed_call"}}, SuspectedFailureNodes: []string{"mysql"}, ErrorPropagationPaths: [][]string{{"payment-service", "mysql"}}}}
 	if err = database.UpsertIncidentKnowledge(ctx, incident, historicalFeatures, "integration-test"); err != nil {
 		t.Fatal(err)
@@ -42,5 +42,11 @@ func TestPostgresLexicalAndCrossServiceTopologyRetrieval(t *testing.T) {
 	topology, err := database.SearchTopologyIncidents(ctx, topologyQuery, 50)
 	if err != nil || len(topology) != 1 || topology[0].IncidentID != incident.ID || topology[0].Service == topologyQuery.Service || topology[0].SourceScores["topology"] <= 0 {
 		t.Fatalf("cross-service topology=%#v err=%v", topology, err)
+	}
+	if err = database.DeleteIncidents(ctx, []string{incident.ID}); err != nil {
+		t.Fatalf("delete isolated incident: %v", err)
+	}
+	if _, err = database.Get(ctx, incident.ID); err != ErrNotFound {
+		t.Fatalf("deleted incident remained visible: %v", err)
 	}
 }

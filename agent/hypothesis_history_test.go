@@ -36,8 +36,8 @@ func TestMergeVerificationHistoryTracksConfidenceDecayAndEvidenceDelta(t *testin
 }
 
 func TestUnknownEvidenceReturnsRepairableToolObservation(t *testing.T) {
-	limits := map[string]domain.AgentBudget{DiagnosisAgentName: {MaxIterations: 4, MaxToolUses: 4, MaxToolCost: 4, MaxTokens: 1000, MaxCorrections: 2}}
-	budget := safety.NewBudgetController(nil, limits, domain.AgentBudget{MaxToolUses: 4, MaxToolCost: 4, MaxTokens: 1000}, map[string]int{"submit_hypotheses": 1})
+	limits := map[string]domain.AgentBudget{DiagnosisAgentName: {MaxIterations: 4, MaxToolUses: 4, MaxTokens: 1000, MaxCorrections: 2}}
+	budget := safety.NewBudgetController(nil, limits, map[string]int{"submit_hypotheses": 1})
 	state := &WorkflowState{Incident: &domain.Incident{Evidence: []domain.Evidence{{ID: "evidence-1", Source: "kubernetes"}}}}
 	runtime := &constrainedRuntime{state: state, budgets: budget, done: map[string]bool{}}
 	ctx := withConstrainedRuntime(context.Background(), runtime)

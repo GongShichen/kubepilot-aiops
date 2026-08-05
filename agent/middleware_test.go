@@ -1,10 +1,15 @@
 package agent
 
 import (
+	"context"
+	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	"github.com/kubepilot-aiops/kubepilot/internal/safety"
 )
 
 func TestModelTokensForBudgetUsesGeneratedTokens(t *testing.T) {
@@ -49,5 +54,42 @@ func TestModelRetryPolicyDefaultsToThreeAttempts(t *testing.T) {
 	registry.ConfigureRuntimePolicy(RuntimePolicy{ModelMaxRetries: 2})
 	if got := registry.modelRetryConfig().MaxRetries; got != 2 {
 		t.Fatalf("configured model retries=%d, want 2", got)
+	}
+}
+
+func TestBudgetMessageTracksCurrentAgentUsage(t *testing.T) {
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "incident"}}}
+	updateAgentBudgetMessage(state, DiagnosisAgentName, 50)
+	updateAgentBudgetMessage(state, DiagnosisAgentName, 37)
+	count := 0
+	for _, message := range state.Messages {
+		if message != nil && strings.HasPrefix(message.Content, budgetMessagePrefix) {
+			count++
+			if !strings.Contains(message.Content, "remaining_tool_uses=37") {
+				t.Fatalf("budget snapshot was not refreshed: %q", message.Content)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("budget snapshots accumulated in model context: %d", count)
+	}
+}
+
+func TestBudgetExhaustionBecomesHumanRequired(t *testing.T) {
+	incident := &domain.Incident{ID: "budget-incident", Status: domain.StatusDiagnosing}
+	runtime := &constrainedRuntime{
+		state:   &WorkflowState{Incident: incident},
+		budgets: safety.NewBudgetController(&domain.AgentBudgetState{}, map[string]domain.AgentBudget{DiagnosisAgentName: {MaxToolUses: 50, MaxTokens: 1000}}, nil),
+		done:    map[string]bool{},
+	}
+	handled, err := handleAgentBudgetExhaustion(context.Background(), runtime, fmt.Errorf("node failed: %w", safety.ErrBudgetExceeded{Agent: DiagnosisAgentName, Tool: "query"}))
+	if err != nil || !handled {
+		t.Fatalf("budget exhaustion was not handled: handled=%v err=%v", handled, err)
+	}
+	if incident.Status != domain.StatusNeedsAttention {
+		t.Fatalf("incident status=%s, want %s", incident.Status, domain.StatusNeedsAttention)
+	}
+	if len(runtime.state.DiagnosisLedger.SafetyFeedback) != 1 || runtime.state.DiagnosisLedger.SafetyFeedback[0].Category != domain.SafetyHumanRequired {
+		t.Fatalf("missing human-required feedback: %+v", runtime.state.DiagnosisLedger.SafetyFeedback)
 	}
 }

@@ -20,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	artifactlayout "github.com/kubepilot-aiops/kubepilot/benchmark/artifactlayout"
 	causalbenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/causal"
 	causaldiscoverybenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/causaldiscovery"
 	causalevolution "github.com/kubepilot-aiops/kubepilot/benchmark/causalevolution"
@@ -36,6 +35,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scorer"
 	topologybenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/topology"
 	topologyevolution "github.com/kubepilot-aiops/kubepilot/benchmark/topologyevolution"
+	artifactlayout "github.com/kubepilot-aiops/kubepilot/internal/artifacts"
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	llm "github.com/kubepilot-aiops/kubepilot/internal/model"
@@ -192,7 +192,7 @@ func run(args []string) {
 	}
 	if *profile == "correlation" {
 		correlationDir := artifactlayout.RunDirectory(*artifactRoot, "correlation", "full", time.Now().UTC())
-		runCorrelation([]string{"--output", filepath.Join(correlationDir, "correlation-summary.json")})
+		runCorrelation([]string{"--output", filepath.Join(correlationDir, "correlation-summary.json"), "--agent-url", *agentURL, "--webhook-token", env("ALERTMANAGER_WEBHOOK_TOKEN", "")})
 		return
 	}
 	if *profile == "full" {
@@ -346,10 +346,9 @@ func diagnosisSkillSnapshotHash() (string, error) {
 func diagnosisBudgetConfigHash() string {
 	configuration := map[string]string{}
 	for key, fallback := range map[string]string{
-		"SUPERVISOR_MAX_ITERATIONS": "10", "SUPERVISOR_MAX_TOOL_USES": "8", "SUPERVISOR_MAX_TOOL_COST": "24", "SUPERVISOR_MAX_TOKENS": "12000", "SUPERVISOR_MAX_CORRECTIONS": "3",
-		"DIAGNOSIS_MAX_ITERATIONS": "12", "DIAGNOSIS_MAX_TOOL_USES": "24", "DIAGNOSIS_MAX_TOOL_COST": "48", "DIAGNOSIS_MAX_TOKENS": "30000", "DIAGNOSIS_MAX_CORRECTIONS": "3",
-		"RECOVERY_MAX_ITERATIONS": "10", "RECOVERY_MAX_TOOL_USES": "10", "RECOVERY_MAX_TOOL_COST": "16", "RECOVERY_MAX_TOKENS": "16000", "RECOVERY_MAX_CORRECTIONS": "2",
-		"INCIDENT_MAX_AGENT_TOOL_USES": "30", "INCIDENT_MAX_AGENT_TOOL_COST": "72", "INCIDENT_MAX_TOKENS": "58000",
+		"SUPERVISOR_MAX_ITERATIONS": "10", "SUPERVISOR_MAX_TOOL_USES": "50", "SUPERVISOR_MAX_TOKENS": "12000", "SUPERVISOR_MAX_CORRECTIONS": "3",
+		"DIAGNOSIS_MAX_ITERATIONS": "12", "DIAGNOSIS_MAX_TOOL_USES": "50", "DIAGNOSIS_MAX_TOKENS": "30000", "DIAGNOSIS_MAX_CORRECTIONS": "3",
+		"RECOVERY_MAX_ITERATIONS": "10", "RECOVERY_MAX_TOOL_USES": "50", "RECOVERY_MAX_TOKENS": "16000", "RECOVERY_MAX_CORRECTIONS": "2",
 	} {
 		configuration[key] = env(key, fallback)
 	}
@@ -507,7 +506,7 @@ func runCorrelation(args []string) {
 	output := fs.String("output", "", "summary path; defaults to a timestamped correlation directory")
 	groups := fs.Int("groups", 100, "ground-truth groups")
 	seed := fs.Uint64("seed", 20260803, "seed")
-	agentURL := fs.String("agent-url", "", "optional live Agent URL")
+	agentURL := fs.String("agent-url", "http://localhost:8080", "live Agent URL")
 	webhookToken := fs.String("webhook-token", os.Getenv("ALERTMANAGER_WEBHOOK_TOKEN"), "Alertmanager webhook token")
 	runSalt := fs.String("run-salt", ulid.Make().String(), "unique live-correlation run identifier")
 	_ = fs.Parse(args)
@@ -515,12 +514,11 @@ func runCorrelation(args []string) {
 		*output = filepath.Join(artifactlayout.RunDirectory("artifacts/benchmark", "correlation", "full", time.Now().UTC()), "correlation-summary.json")
 	}
 	items := correlation.Generate(*groups, 2, 8, *seed)
-	actual := correlation.Correlate(items)
-	if *agentURL != "" {
-		var err error
-		actual, err = liveCorrelation(context.Background(), *agentURL, *webhookToken, *runSalt, items)
-		fatal(err)
+	if strings.TrimSpace(*agentURL) == "" {
+		fatal(fmt.Errorf("--agent-url is required; correlation has no benchmark-only fallback"))
 	}
+	actual, err := liveCorrelation(context.Background(), *agentURL, *webhookToken, *runSalt, items)
+	fatal(err)
 	score := scorer.Correlation(correlation.Expected(items), actual)
 	fatal(os.MkdirAll(filepath.Dir(*output), 0o750))
 	b, _ := json.MarshalIndent(map[string]any{"groups": *groups, "alerts": len(items), "seed": *seed, "run_salt": *runSalt, "score": score}, "", "  ")
@@ -648,7 +646,7 @@ func resume(args []string) {
 	if *artifactDir == "" {
 		*artifactDir = findRunDirectory(*root, *runID)
 		if *artifactDir == "" {
-			*artifactDir = filepath.Join(*root, *runID) // legacy layout
+			fatal(fmt.Errorf("run %q was not found under %s", *runID, *root))
 		}
 	}
 	var manifest reporter.Manifest
@@ -673,7 +671,7 @@ func report(args []string) {
 	if dir == "" {
 		dir = findRunDirectory(*root, *runID)
 		if dir == "" {
-			dir = filepath.Join(*root, *runID) // legacy layout
+			fatal(fmt.Errorf("run %q was not found under %s", *runID, *root))
 		}
 	}
 	var manifest reporter.Manifest

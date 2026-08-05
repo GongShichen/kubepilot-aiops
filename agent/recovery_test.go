@@ -10,6 +10,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/safety"
+	captools "github.com/kubepilot-aiops/kubepilot/tools"
 )
 
 func TestRecoveryRejectsAnotherNamespace(t *testing.T) {
@@ -152,10 +153,11 @@ func TestVerificationControllerRequiresThreeConsecutiveRounds(t *testing.T) {
 }
 
 func TestRecoveryNamespaceOverrideReturnsFatalSafetyFeedback(t *testing.T) {
-	tools, err := buildConstrainedRecoveryTools(constrainedToolDeps{})
+	capabilities, err := buildConstrainedRecoveryCapabilities(constrainedToolDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	tools := registeredCapabilitiesForTest(t, captools.NodeRecoveryReact, capabilities)
 	var submit tool.InvokableTool
 	for _, candidate := range tools {
 		info, infoErr := candidate.Info(context.Background())
@@ -166,8 +168,8 @@ func TestRecoveryNamespaceOverrideReturnsFatalSafetyFeedback(t *testing.T) {
 			submit = candidate.(tool.InvokableTool)
 		}
 	}
-	limits := map[string]domain.AgentBudget{RecoveryAgentName: {MaxIterations: 2, MaxToolUses: 2, MaxToolCost: 2, MaxTokens: 1000, MaxCorrections: 1}}
-	budget := safety.NewBudgetController(nil, limits, domain.AgentBudget{MaxToolUses: 2, MaxToolCost: 2, MaxTokens: 1000}, nil)
+	limits := map[string]domain.AgentBudget{RecoveryAgentName: {MaxIterations: 2, MaxToolUses: 2, MaxTokens: 1000, MaxCorrections: 1}}
+	budget := safety.NewBudgetController(nil, limits, nil)
 	incident := &domain.Incident{ID: "recovery-policy", Status: domain.StatusProposing, Namespace: "kubepilot-demo", Resource: "gateway-service", RootCauseResource: "gateway-service"}
 	runtime := &constrainedRuntime{state: &WorkflowState{Incident: incident}, budgets: budget, done: map[string]bool{}}
 	input := RecoveryDecision{Action: domain.ActionRestartPod, Target: "other/gateway-service", Reason: "restart", Risk: "brief disruption", Diff: "rollout annotation", Rollback: "restore prior annotation", Parameters: map[string]any{}, Confidence: .9}

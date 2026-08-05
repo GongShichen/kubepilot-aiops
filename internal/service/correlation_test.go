@@ -22,7 +22,7 @@ func TestEinoCorrelatorSelectsCandidateCapabilityByName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := correlator.candidateTool.Info(context.Background())
+	info, err := correlator.candidateCapability.EinoTool().Info(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

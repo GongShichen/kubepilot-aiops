@@ -12,11 +12,3 @@ func TestEvaluateRankingIsDeterministicAndComputesAllMetrics(t *testing.T) {
 		t.Fatalf("scoring is not deterministic: %+v != %+v", r, r2)
 	}
 }
-
-func TestEvaluateDiagnosisDoesNotNeedExpectedInputAtRuntime(t *testing.T) {
-	r := IncidentResult{Expected: Expected{RootCause: "memory_leak", EvidenceIDs: []string{"e1"}}, Observed: Observed{RootCause: "memory_leak", EvidenceIDs: []string{"e1"}, Hypotheses: []Hypothesis{{Cause: "memory_leak"}}}}
-	m := EvaluateDiagnosis([]IncidentResult{r})
-	if m.RootCauseAccuracy != 1 || m.EvidenceAttribution != 1 || m.HypothesisRecall != 1 {
-		t.Fatalf("unexpected diagnosis metrics: %+v", m)
-	}
-}

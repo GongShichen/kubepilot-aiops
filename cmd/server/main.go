@@ -132,10 +132,9 @@ func main() {
 		os.Exit(1)
 	}
 	agents.ConfigureRuntimePolicy(agent.RuntimePolicy{
-		Supervisor:       domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Supervisor.MaxIterations, MaxToolUses: cfg.AgentBudgets.Supervisor.MaxToolUses, MaxToolCost: cfg.AgentBudgets.Supervisor.MaxToolCost, MaxTokens: cfg.AgentBudgets.Supervisor.MaxTokens, MaxCorrections: cfg.AgentBudgets.Supervisor.MaxCorrections},
-		Diagnosis:        domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Diagnosis.MaxIterations, MaxToolUses: cfg.AgentBudgets.Diagnosis.MaxToolUses, MaxToolCost: cfg.AgentBudgets.Diagnosis.MaxToolCost, MaxTokens: cfg.AgentBudgets.Diagnosis.MaxTokens, MaxCorrections: cfg.AgentBudgets.Diagnosis.MaxCorrections},
-		Recovery:         domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Recovery.MaxIterations, MaxToolUses: cfg.AgentBudgets.Recovery.MaxToolUses, MaxToolCost: cfg.AgentBudgets.Recovery.MaxToolCost, MaxTokens: cfg.AgentBudgets.Recovery.MaxTokens, MaxCorrections: cfg.AgentBudgets.Recovery.MaxCorrections},
-		Incident:         domain.AgentBudget{MaxToolUses: cfg.AgentBudgets.IncidentUses, MaxToolCost: cfg.AgentBudgets.IncidentCost, MaxTokens: cfg.AgentBudgets.IncidentTokens},
+		Supervisor:       domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Supervisor.MaxIterations, MaxToolUses: cfg.AgentBudgets.Supervisor.MaxToolUses, MaxTokens: cfg.AgentBudgets.Supervisor.MaxTokens, MaxCorrections: cfg.AgentBudgets.Supervisor.MaxCorrections},
+		Diagnosis:        domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Diagnosis.MaxIterations, MaxToolUses: cfg.AgentBudgets.Diagnosis.MaxToolUses, MaxTokens: cfg.AgentBudgets.Diagnosis.MaxTokens, MaxCorrections: cfg.AgentBudgets.Diagnosis.MaxCorrections},
+		Recovery:         domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Recovery.MaxIterations, MaxToolUses: cfg.AgentBudgets.Recovery.MaxToolUses, MaxTokens: cfg.AgentBudgets.Recovery.MaxTokens, MaxCorrections: cfg.AgentBudgets.Recovery.MaxCorrections},
 		RequestMaxTokens: cfg.Chat.MaxTokens,
 		ModelMaxRetries:  cfg.Chat.MaxRetries,
 	})
@@ -155,7 +154,6 @@ func main() {
 		os.Exit(1)
 	}
 	reasoningEngine := reasoning.New(reasoning.Config{SemanticTopK: cfg.Reasoning.SemanticTopK, LexicalTopK: cfg.Reasoning.LexicalTopK, TopologyTopK: cfg.Reasoning.TopologyTopK, RRFK: cfg.Reasoning.RRFK, RerankTopK: cfg.Reasoning.RerankTopK, ModelEvidenceMaxItems: cfg.Reasoning.ModelEvidenceMaxItems, ModelContextMaxBytes: cfg.Reasoning.ModelContextMaxBytes, RankingPolicy: &rankingPolicy})
-	historical.Engine = reasoningEngine
 	hotReranker := rerankerclient.NewHotClient(cfg.Reranker, cfg.ConfigEnvFile, cfg.ConfigReloadEvery, cfg.ConfigRetryEvery)
 	if probeErr := hotReranker.Probe(ctx); probeErr != nil {
 		slog.Warn("reranker configuration probe failed", "error", probeErr)

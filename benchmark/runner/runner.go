@@ -12,6 +12,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scorer"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	"github.com/kubepilot-aiops/kubepilot/internal/telemetry"
 )
 
 type IncidentClient interface {
@@ -226,64 +227,24 @@ func populateAgentMetrics(result *reporter.CaseResult, incident *domain.Incident
 	if result == nil || incident == nil {
 		return
 	}
-	if incident.AgentBudget != nil {
-		result.AgentToolUses = incident.AgentBudget.IncidentUses
-		result.AgentToolCost = incident.AgentBudget.IncidentCost
-		result.AgentTokens = incident.AgentBudget.IncidentTokens
-		for _, usage := range incident.AgentBudget.Usage {
-			result.AgentCorrections += usage.Corrections
-		}
+	observation := telemetry.ObserveAgent(incident)
+	result.AgentIterations = observation.Iterations
+	result.AgentToolUses = observation.ToolUses
+	result.AgentToolCost = observation.ToolCost
+	result.AgentTokens = observation.Tokens
+	result.AgentCorrections = observation.Corrections
+	result.SafetyRejections = observation.SafetyRejections
+	result.SelfCorrectionAttempts = observation.SelfCorrectionAttempts
+	result.SelfCorrectionSucceeded = observation.SelfCorrectionSucceeded
+	result.HypothesisCount = observation.HypothesisCount
+	result.HypothesisConverged = observation.HypothesisConverged
+	result.EvidenceQueries = observation.EvidenceQueries
+	result.ConfidenceUpdates = observation.ConfidenceUpdates
+	result.AttributedEvidence = observation.AttributedEvidence
+	result.TopologyCandidates = observation.TopologyCandidates
+	if result.Score.RootCauseCorrect {
+		result.EvidenceEfficiency = observation.EvidenceEfficiency
 	}
-	if incident.DiagnosisLedger != nil {
-		for _, feedback := range incident.DiagnosisLedger.SafetyFeedback {
-			if !feedback.Allowed {
-				result.SafetyRejections++
-			}
-		}
-		result.HypothesisCount = len(incident.DiagnosisLedger.Drafts)
-		result.HypothesisConverged = hypothesisConverged(incident.DiagnosisLedger)
-		for _, decision := range incident.DiagnosisLedger.AgentDecisions {
-			if isEvidenceQuery(decision.SelectedAction) {
-				result.EvidenceQueries++
-			}
-		}
-	}
-	result.SelfCorrectionAttempts = result.AgentCorrections
-	result.SelfCorrectionSucceeded = result.SelfCorrectionAttempts > 0 && result.HypothesisConverged
-	if result.EvidenceQueries > 0 && result.Score.RootCauseCorrect {
-		result.EvidenceEfficiency = 1 / float64(result.EvidenceQueries)
-	}
-	for _, evidence := range incident.Evidence {
-		if evidence.Attribution != nil {
-			result.AttributedEvidence++
-		}
-	}
-	if incident.DiagnosisLedger != nil {
-		for _, hypothesis := range incident.DiagnosisLedger.Verified {
-			result.ConfidenceUpdates += len(hypothesis.ConfidenceHistory)
-		}
-		for _, candidate := range incident.DiagnosisLedger.Candidates {
-			if candidate.Rank.TopologySimilarity > 0 || candidate.SourceRanks["topology"] > 0 {
-				result.TopologyCandidates++
-			}
-		}
-	}
-}
-
-func hypothesisConverged(ledger *domain.DiagnosisLedger) bool {
-	if ledger == nil || ledger.SelectedHypothesisID == "" {
-		return false
-	}
-	for _, verified := range ledger.Verified {
-		if verified.Draft.ID == ledger.SelectedHypothesisID && verified.Status == domain.HypothesisAccepted && len(verified.ConfidenceHistory) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func isEvidenceQuery(action string) bool {
-	return strings.HasPrefix(action, "query_") || strings.HasPrefix(action, "retrieve_") || strings.HasPrefix(action, "load_") || strings.Contains(action, "evidence")
 }
 
 // restoreAndVerify deliberately uses a fresh lifecycle context. A case context

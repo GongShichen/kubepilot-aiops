@@ -7,12 +7,11 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/components/tool"
-	toolutils "github.com/cloudwego/eino/components/tool/utils"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	captools "github.com/kubepilot-aiops/kubepilot/tools"
 )
 
-const ActionExecutorNode = "deterministic_action_executor"
+const ActionExecutorNode = captools.NodeActionExecutor
 
 type MutationBackend interface {
 	Execute(context.Context, *domain.Incident, domain.RecoveryProposal) error
@@ -49,13 +48,14 @@ func NewActionExecutor(ctx context.Context, backend MutationBackend, validate Ac
 		return nil, fmt.Errorf("mutation backend and action validator are required")
 	}
 	registry := captools.NewRegistry()
-	for action, name := range map[domain.RecoveryAction]string{
+	actionNames := map[domain.RecoveryAction]string{
 		domain.ActionRestartPod:         "restart_workload",
 		domain.ActionScaleDeployment:    "scale_deployment",
 		domain.ActionRollbackDeployment: "rollback_deployment",
-	} {
+	}
+	for action, name := range actionNames {
 		action, name := action, name
-		candidate, err := toolutils.InferTool(name, "Execute exactly one server-approved Kubernetes mutation.", func(callCtx context.Context, in actionInput) (actionOutput, error) {
+		capability, err := captools.NewCapability(name, "Execute exactly one server-approved Kubernetes mutation.", func(callCtx context.Context, in actionInput) (actionOutput, error) {
 			approved, ok := callCtx.Value(approvedActionContextKey{}).(approvedActionContext)
 			if !ok || approved.incident == nil || in.Action != action || approved.proposal.Action != action || in.ProposalID != approved.proposal.ID {
 				return actionOutput{}, fmt.Errorf("approved proposal does not match selected action capability")
@@ -67,36 +67,21 @@ func NewActionExecutor(ctx context.Context, backend MutationBackend, validate Ac
 				return actionOutput{}, err
 			}
 			return actionOutput{Executed: true, Action: string(action), Target: approved.proposal.Target}, nil
-		})
+		}, captools.Registration{Category: captools.CategoryAction, AllowedNodes: []string{ActionExecutorNode}, Timeout: 30 * time.Second, MaxArgumentBytes: 128 << 10, MaxOutputBytes: 8 << 10, ApprovalMiddleware: true})
 		if err != nil {
 			return nil, err
 		}
-		if err = registry.Register(ctx, candidate, captools.Registration{Category: captools.CategoryAction, AllowedNodes: []string{ActionExecutorNode}, Timeout: 30 * time.Second, MaxArgumentBytes: 128 << 10, MaxOutputBytes: 8 << 10, ApprovalMiddleware: true}); err != nil {
+		if err = registry.Register(ctx, capability); err != nil {
 			return nil, err
 		}
 	}
-	registered, err := registry.ToolsForNode(ActionExecutorNode)
-	if err != nil {
-		return nil, err
-	}
 	result := &ActionExecutor{capabilities: map[domain.RecoveryAction]tool.InvokableTool{}}
-	for _, candidate := range registered {
-		info, infoErr := candidate.Info(ctx)
-		if infoErr != nil {
-			return nil, infoErr
+	for action, name := range actionNames {
+		invokable, resolveErr := registry.InvokableForNode(ctx, ActionExecutorNode, name)
+		if resolveErr != nil {
+			return nil, resolveErr
 		}
-		invokable, ok := candidate.(tool.InvokableTool)
-		if !ok {
-			return nil, fmt.Errorf("action capability %s is not invokable", info.Name)
-		}
-		switch info.Name {
-		case "restart_workload":
-			result.capabilities[domain.ActionRestartPod] = invokable
-		case "scale_deployment":
-			result.capabilities[domain.ActionScaleDeployment] = invokable
-		case "rollback_deployment":
-			result.capabilities[domain.ActionRollbackDeployment] = invokable
-		}
+		result.capabilities[action] = invokable
 	}
 	return result, nil
 }

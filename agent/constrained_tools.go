@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudwego/eino/components/tool"
-	toolutils "github.com/cloudwego/eino/components/tool/utils"
 	"github.com/kubepilot-aiops/kubepilot/internal/causal"
 	causaldiscovery "github.com/kubepilot-aiops/kubepilot/internal/causal/discovery"
 	causalextractor "github.com/kubepilot-aiops/kubepilot/internal/causal/extractor"
@@ -78,47 +76,20 @@ type constrainedToolOutput struct {
 	CausalValidation        *causalknowledge.ValidationResult          `json:"causal_validation,omitempty"`
 }
 
-func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, error) {
-	var result []tool.BaseTool
+func buildConstrainedDiagnosisCapabilities(deps constrainedToolDeps) ([]captools.Capability, error) {
+	var result []captools.Capability
 	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
 		source := source
-		candidate, err := toolutils.InferTool(evidenceToolName(source), "Collect bounded structured evidence. Filters are constrained to the authoritative Incident namespace and time window.", func(ctx context.Context, in investigationRequest) (constrainedToolOutput, error) {
+		candidate, err := captools.NewCapability(evidenceToolName(source), "Collect bounded structured evidence. Filters are constrained to the authoritative Incident namespace and time window.", func(ctx context.Context, in investigationRequest) (constrainedToolOutput, error) {
 			return collectConstrainedEvidence(ctx, deps, source, in)
-		})
+		}, constrainedRegistration(captools.CategoryObservability, captools.NodeDiagnosisReact))
 		if err != nil {
 			return nil, err
 		}
 		result = append(result, candidate)
 	}
 
-	add := func(name, description string, fn any) error {
-		var candidate tool.BaseTool
-		var err error
-		switch typed := fn.(type) {
-		case func(context.Context, emptyToolInput) (constrainedToolOutput, error):
-			candidate, err = toolutils.InferTool(name, description, typed)
-		case func(context.Context, boundedLimit) (constrainedToolOutput, error):
-			candidate, err = toolutils.InferTool(name, description, typed)
-		case func(context.Context, HypothesisSubmission) (constrainedToolOutput, error):
-			candidate, err = toolutils.InferTool(name, description, typed)
-		case func(context.Context, hypothesisSelection) (constrainedToolOutput, error):
-			candidate, err = toolutils.InferTool(name, description, typed)
-		case func(context.Context, graphBuildRequest) (constrainedToolOutput, error):
-			candidate, err = toolutils.InferTool(name, description, typed)
-		case func(context.Context, causalPathRequest) (constrainedToolOutput, error):
-			candidate, err = toolutils.InferTool(name, description, typed)
-		case func(context.Context, causalPatternProposalRequest) (constrainedToolOutput, error):
-			candidate, err = toolutils.InferTool(name, description, typed)
-		default:
-			return fmt.Errorf("unsupported constrained tool %s", name)
-		}
-		if err == nil {
-			result = append(result, candidate)
-		}
-		return err
-	}
-
-	if err := add("rank_incident_evidence", "Rank and bound current evidence with the pinned attribution policy.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "rank_incident_evidence", "Rank and bound current evidence with the pinned attribution policy.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -137,14 +108,14 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 	}
 
 	if deps.Reranker != nil && deps.Reranker.Enabled() {
-		if err := add("rerank_incident_evidence", "Use the configured API reranker to score whether current evidence explains this Incident.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+		if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "rerank_incident_evidence", "Use the configured API reranker to score whether current evidence explains this Incident.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 			return neuralRerankEvidence(ctx, deps)
 		}); err != nil {
 			return nil, err
 		}
 	}
 
-	if err := add("build_incident_features", "Build deterministic observed features and dependency attributes from current evidence.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "build_incident_features", "Build deterministic observed features and dependency attributes from current evidence.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -169,7 +140,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		return nil, err
 	}
 
-	if err := add("build_incident_graph", "Build the current Incident dependency graph from server-owned evidence. The graph is observational and cannot authorize mutations.", func(ctx context.Context, _ graphBuildRequest) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "build_incident_graph", "Build the current Incident dependency graph from server-owned evidence. The graph is observational and cannot authorize mutations.", func(ctx context.Context, _ graphBuildRequest) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -192,7 +163,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 	}
 
 	if deps.TopologyPatterns != nil {
-		if err := add("retrieve_topology_patterns", "Retrieve bounded reusable topology patterns from resolved Incident knowledge. Concrete pod and IP identities are not returned.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
+		if err := appendConstrainedCapability(&result, captools.CategoryRetrieval, captools.NodeDiagnosisReact, "retrieve_topology_patterns", "Retrieve bounded reusable topology patterns from resolved Incident knowledge. Concrete pod and IP identities are not returned.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
 			runtime, err := runtimeFromContext(ctx)
 			if err != nil {
 				return constrainedToolOutput{}, err
@@ -220,7 +191,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 	}
 
 	if deps.CausalPatterns != nil {
-		if err := add("retrieve_causal_patterns", "Retrieve bounded validated causal patterns. Patterns are observational knowledge and cannot be modified by the Agent.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
+		if err := appendConstrainedCapability(&result, captools.CategoryRetrieval, captools.NodeDiagnosisReact, "retrieve_causal_patterns", "Retrieve bounded validated causal patterns. Patterns are observational knowledge and cannot be modified by the Agent.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
 			limit := in.Limit
 			if limit <= 0 || limit > 20 {
 				limit = 10
@@ -233,7 +204,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		}); err != nil {
 			return nil, err
 		}
-		if err := add("propose_causal_pattern", "Propose a causal pattern from observed Evidence. This returns an unpersisted proposal for deterministic validation.", func(ctx context.Context, in causalPatternProposalRequest) (constrainedToolOutput, error) {
+		if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "propose_causal_pattern", "Propose a causal pattern from observed Evidence. This returns an unpersisted proposal for deterministic validation.", func(ctx context.Context, in causalPatternProposalRequest) (constrainedToolOutput, error) {
 			runtime, err := runtimeFromContext(ctx)
 			if err != nil {
 				return constrainedToolOutput{}, err
@@ -252,7 +223,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		}); err != nil {
 			return nil, err
 		}
-		if err := add("validate_causal_pattern", "Validate a causal pattern proposal against current Incident Evidence and knowledge repetition. Validation never writes the knowledge store.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+		if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "validate_causal_pattern", "Validate a causal pattern proposal against current Incident Evidence and knowledge repetition. Validation never writes the knowledge store.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 			runtime, err := runtimeFromContext(ctx)
 			if err != nil {
 				return constrainedToolOutput{}, err
@@ -293,7 +264,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 	}
 
 	if deps.DiscoveredPatterns != nil {
-		if err := add("retrieve_discovered_causal_patterns", "Retrieve bounded accepted causal patterns discovered from independent resolved Incidents. Results are observational and cannot be modified by the Agent.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
+		if err := appendConstrainedCapability(&result, captools.CategoryRetrieval, captools.NodeDiagnosisReact, "retrieve_discovered_causal_patterns", "Retrieve bounded accepted causal patterns discovered from independent resolved Incidents. Results are observational and cannot be modified by the Agent.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
 			runtime, err := runtimeFromContext(ctx)
 			if err != nil {
 				return constrainedToolOutput{}, err
@@ -337,7 +308,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		if deps.Historical == nil {
 			continue
 		}
-		if err := add(spec.name, "Retrieve bounded "+spec.source+" historical Incident candidates.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
+		if err := appendConstrainedCapability(&result, captools.CategoryRetrieval, captools.NodeDiagnosisReact, spec.name, "Retrieve bounded "+spec.source+" historical Incident candidates.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
 			runtime, err := runtimeFromContext(ctx)
 			if err != nil {
 				return constrainedToolOutput{}, err
@@ -366,7 +337,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		}
 	}
 
-	if err := add("fuse_incident_candidates", "Generate a high-recall candidate set from semantic and lexical retrieval; topology is a later soft reranking feature.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "fuse_incident_candidates", "Generate a high-recall candidate set from semantic and lexical retrieval; topology is a later soft reranking feature.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -380,13 +351,13 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		return nil, err
 	}
 
-	if err := add("rerank_incident_candidates", "Rerank current historical candidates using deterministic features and the optional configured neural API.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "rerank_incident_candidates", "Rerank current historical candidates using deterministic features and the optional configured neural API.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		return rerankCandidates(ctx, deps)
 	}); err != nil {
 		return nil, err
 	}
 
-	if err := add("match_causal_patterns", "Match active causal patterns against current observed features without inventing missing nodes.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "match_causal_patterns", "Match active causal patterns against current observed features without inventing missing nodes.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -418,7 +389,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		return nil, err
 	}
 
-	if err := add("expand_causal_path", "Expand a selected causal pattern against the current observations and report missing nodes.", func(ctx context.Context, in causalPathRequest) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "expand_causal_path", "Expand a selected causal pattern against the current observations and report missing nodes.", func(ctx context.Context, in causalPathRequest) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -444,7 +415,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		return nil, err
 	}
 
-	if err := add("score_hypothesis_causality", "Score one hypothesis using observed support, causal coverage, topology, history, prior, and contradiction without trusting model confidence.", func(ctx context.Context, in hypothesisSelection) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "score_hypothesis_causality", "Score one hypothesis using observed support, causal coverage, topology, history, prior, and contradiction without trusting model confidence.", func(ctx context.Context, in hypothesisSelection) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -478,25 +449,25 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		return nil, err
 	}
 
-	if err := add("submit_hypotheses", "Record one to three falsifiable hypothesis drafts. Safety feedback is returned for invalid evidence references.", func(ctx context.Context, in HypothesisSubmission) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryDecision, captools.NodeDiagnosisReact, "submit_hypotheses", "Record one to three falsifiable hypothesis drafts. Safety feedback is returned for invalid evidence references.", func(ctx context.Context, in HypothesisSubmission) (constrainedToolOutput, error) {
 		return recordHypotheses(ctx, in)
 	}); err != nil {
 		return nil, err
 	}
 
-	if err := add("verify_incident_hypotheses", "Verify the current hypothesis ledger against current evidence, causal paths, history, and topology.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryReasoning, captools.NodeDiagnosisReact, "verify_incident_hypotheses", "Verify the current hypothesis ledger against current evidence, causal paths, history, and topology.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		return verifyConstrainedHypotheses(ctx, deps)
 	}); err != nil {
 		return nil, err
 	}
 
-	if err := add("submit_diagnosis", "Ask the Safety Controller to accept one supported hypothesis as the root cause.", func(ctx context.Context, in hypothesisSelection) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryDecision, captools.NodeDiagnosisReact, "submit_diagnosis", "Ask the Safety Controller to accept one supported hypothesis as the root cause.", func(ctx context.Context, in hypothesisSelection) (constrainedToolOutput, error) {
 		return submitConstrainedDiagnosis(ctx, in)
 	}); err != nil {
 		return nil, err
 	}
 
-	if err := add("escalate_diagnosis", "Stop autonomous diagnosis when the remaining hypotheses cannot be safely distinguished.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	if err := appendConstrainedCapability(&result, captools.CategoryDecision, captools.NodeDiagnosisReact, "escalate_diagnosis", "Stop autonomous diagnosis when the remaining hypotheses cannot be safely distinguished.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -511,7 +482,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 	}); err != nil {
 		return nil, err
 	}
-	return registerConstrainedToolSet(context.Background(), result, "diagnosis_react", captools.CategoryDecision)
+	return result, nil
 }
 
 func nonEmptyTerms(values []string) []string {
@@ -528,8 +499,8 @@ func nonEmptyTerms(values []string) []string {
 	return out
 }
 
-func buildConstrainedRecoveryTools(deps constrainedToolDeps) ([]tool.BaseTool, error) {
-	proposal, err := toolutils.InferTool("submit_recovery_proposal", "Record one allowed recovery proposal. This tool cannot mutate Kubernetes.", func(ctx context.Context, in RecoveryDecision) (constrainedToolOutput, error) {
+func buildConstrainedRecoveryCapabilities(deps constrainedToolDeps) ([]captools.Capability, error) {
+	proposal, err := captools.NewCapability("submit_recovery_proposal", "Record one allowed recovery proposal. This tool cannot mutate Kubernetes.", func(ctx context.Context, in RecoveryDecision) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -561,11 +532,11 @@ func buildConstrainedRecoveryTools(deps constrainedToolDeps) ([]tool.BaseTool, e
 		}
 		runtime.state.Incident.Proposal = p
 		return constrainedToolOutput{OK: true, Message: "proposal recorded for validation and dry-run"}, nil
-	})
+	}, constrainedRegistration(captools.CategoryDecision, captools.NodeRecoveryReact))
 	if err != nil {
 		return nil, err
 	}
-	dryRun, err := toolutils.InferTool("dry_run_recovery_proposal", "Validate the recorded proposal using Kubernetes DryRunAll. No mutation is performed.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	dryRun, err := captools.NewCapability("dry_run_recovery_proposal", "Validate the recorded proposal using Kubernetes DryRunAll. No mutation is performed.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -590,11 +561,11 @@ func buildConstrainedRecoveryTools(deps constrainedToolDeps) ([]tool.BaseTool, e
 		runtime.state.DryRun = result
 		runtime.state.Incident.DryRun = result
 		return constrainedToolOutput{OK: true, DryRun: result}, nil
-	})
+	}, constrainedRegistration(captools.CategoryDryRun, captools.NodeRecoveryReact))
 	if err != nil {
 		return nil, err
 	}
-	accept, err := toolutils.InferTool("accept_recovery_proposal", "Submit the validated and fresh dry-run proposal to the deterministic approval boundary.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	accept, err := captools.NewCapability("accept_recovery_proposal", "Submit the validated and fresh dry-run proposal to the deterministic approval boundary.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -616,11 +587,11 @@ func buildConstrainedRecoveryTools(deps constrainedToolDeps) ([]tool.BaseTool, e
 		}
 		runtime.markDoneLocked(RecoveryAgentName)
 		return constrainedToolOutput{OK: true, Message: "proposal accepted for deterministic approval interrupt", DryRun: runtime.state.DryRun}, nil
-	})
+	}, constrainedRegistration(captools.CategoryDecision, captools.NodeRecoveryReact))
 	if err != nil {
 		return nil, err
 	}
-	escalate, err := toolutils.InferTool("escalate_recovery", "Stop autonomous proposal planning when a safe proposal cannot be produced.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	escalate, err := captools.NewCapability("escalate_recovery", "Stop autonomous proposal planning when a safe proposal cannot be produced.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -632,26 +603,24 @@ func buildConstrainedRecoveryTools(deps constrainedToolDeps) ([]tool.BaseTool, e
 		_ = runtime.transitionIncident(ctx, domain.StatusNeedsAttention)
 		runtime.markDoneLocked(RecoveryAgentName)
 		return constrainedToolOutput{Feedback: &feedback}, nil
-	})
+	}, constrainedRegistration(captools.CategoryDecision, captools.NodeRecoveryReact))
 	if err != nil {
 		return nil, err
 	}
-	return registerConstrainedToolSet(context.Background(), []tool.BaseTool{proposal, dryRun, accept, escalate}, "recovery_react", captools.CategoryDecision)
+	return []captools.Capability{proposal, dryRun, accept, escalate}, nil
 }
 
-// registerConstrainedToolSet makes the runtime registry, rather than a
-// parallel hand-maintained catalog, enforce schema, node allowlist, timeout,
-// and payload bounds for every ADK capability. The context passed to this
-// helper is only used for schema inspection; invocation receives the caller's
-// context through the bounded registry wrapper.
-func registerConstrainedToolSet(ctx context.Context, candidates []tool.BaseTool, node string, category captools.ToolCategory) ([]tool.BaseTool, error) {
-	registry := captools.NewRegistry()
-	for _, candidate := range candidates {
-		if err := registry.Register(ctx, candidate, captools.Registration{Category: category, AllowedNodes: []string{node}, Timeout: 2 * time.Minute, MaxArgumentBytes: 128 << 10, MaxOutputBytes: 2 << 20}); err != nil {
-			return nil, err
-		}
+func constrainedRegistration(category captools.ToolCategory, node string) captools.Registration {
+	return captools.Registration{Category: category, AllowedNodes: []string{node}, Timeout: 2 * time.Minute, MaxArgumentBytes: 128 << 10, MaxOutputBytes: 2 << 20}
+}
+
+func appendConstrainedCapability[I any](items *[]captools.Capability, category captools.ToolCategory, node, name, description string, handler func(context.Context, I) (constrainedToolOutput, error)) error {
+	capability, err := captools.NewCapability(name, description, handler, constrainedRegistration(category, node))
+	if err != nil {
+		return err
 	}
-	return registry.ToolsForNode(node)
+	*items = append(*items, capability)
+	return nil
 }
 
 func fatalRecoveryLocked(ctx context.Context, runtime *constrainedRuntime, code, reason string) (constrainedToolOutput, error) {

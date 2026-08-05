@@ -41,7 +41,7 @@ flowchart TD
 - **只有三个嵌套 ADK Agent：** Supervisor 作为 Incident Commander，通过 Eino AgentTool 委托；Diagnosis 自主探索证据和可证伪假设；Recovery 只生成并 Dry-run 一个 Proposal。Recovery 无法发现 Mutation、Approval Data 或 Verification Tool。
 - **固定 Agent Skill：** 每个 Agent 通过 Eino Middleware 注入独立 `SKILL.md`。Skill 只描述角色、边界、判断标准、能力语义和输出 Schema，不包含隐藏 Tool 顺序。Skill hash 与 Incident/Checkpoint 绑定，指令变化后不能静默恢复旧 Workflow。
 - **Safety 是反馈环境：** 可修复问题以带 Scope 的 `SafetyFeedback` Observation 返回同一个 ReAct 循环，只描述缺失条件，不指定 Tool 或泄露答案；Fatal 违规立即停止，基础设施失败或 Correction Budget 耗尽时请求人工。
-- **四维预算：** 每个 Agent 和整个 Incident 同时限制 Iteration、Tool Count、固定 Tool Cost、Provider Token，并使用独立 Correction Budget。并行调用原子计费，AgentTool 同时计入父 Agent 与 Incident，Resume 不会重置预算。
+- **Agent 独立预算：** Supervisor、Diagnosis 和 Recovery 分别限制 Iteration、Tool Uses、Provider Token 与 Correction 次数；默认每个 Agent 有 50 次 Tool Uses。并行调用原子计费，Resume 不会重置用量。Tool Cost 和 Incident 汇总只用于遥测，不参与执行拦截。
 - **类型安全且可恢复：** 命名的 WorkflowState、Evidence Schema、Dry-run 结果和服务端生成的 ExecutionContext 存入 Redis checkpoint；PostgreSQL 保存可审计的长期业务状态。
 - **Evidence-driven Hypothesis Lifecycle：** Evidence 先按时间、Service/Resource、Trace/Request/Pod 和因果贡献进行归属与排序。Diagnosis 最多维护三个假设，经历 `CREATED → EVIDENCE_SEARCHING → SUPPORTED/REFUTED → ACCEPTED`；支持证据与反证变化会使置信度上升或衰减，模型先验是权重最低的正项。
 - **真正的 Hybrid Incident Retrieval：** 三个并行 Eino Tool 分别从 Milvus 语义索引、PostgreSQL 全文索引和跨服务拓扑召回候选；Weighted RRF 保留 30 个候选，确定性特征重排只将 Top 5 送入诊断，并持久化全部分项得分和排序原因。
@@ -51,7 +51,7 @@ flowchart TD
 - **持续演化的 Incident Knowledge：** Resolved Incident 经过独立 Knowledge Evolution Layer。Trace/Kubernetes/Evidence 图会把 Pod/IP 等实例归一化为可复用的 `business-service → database/cache/queue` 模式，按确定性签名合并并服务后续拓扑检索。Causal Proposal 必须来自已接受的 Hypothesis Ledger 和真实 Evidence，经过完整路径、独立来源、反证与重复支持校验后才能进入 pending/active 知识。Agent Tool 只能读取、提出和校验，只有服务端 Resolved-Incident Extractor 可以写入。
 - **因果模式发现：** 独立的服务端 Discovery Engine 将多个已验证的 Resolved Incident 提取为 Incident Causal Graph，挖掘重复因果路径并记录反例，使用确定性评分后复用现有 Causal Validator；只有通过校验的候选模式才能入库。Diagnosis 只能通过 `retrieve_discovered_causal_patterns` 读取已接受模式，不能写入或提升模式状态。
 - **发现评测：** `go run ./cmd/benchmark intelligence` 包含固定的 100 个 Resolved Incident 发现数据集，输出 Pattern Precision/Recall 和 Confidence Calibration；该评测与生产知识学习及正式故障注入评分隔离。
-- **统一 Capability Registry：** 所有 Agent 可见的业务能力都是 Eino Tool，具备 JSON Schema、Agent allowlist、timeout、输入/输出限制和固定 Cost。Tool 不接受原始 SQL、PromQL、LogQL、kubectl、Shell、Milvus filter 或任意 Kubernetes manifest；AST 测试禁止生产 Agent 主链路手工构造 `schema.ToolCall`。
+- **统一 Capability Registry：** 所有类型化 handler、嵌套 AgentTool 和确定性 Action 都组合为同一个 `tools.Capability` contract，并且只能通过 `tools.Registry` 进入 Eino。Registry 统一负责 JSON Schema 校验、节点 allowlist、timeout、输入/输出限制、审批要求和 ToolsNode 构造。Tool 不接受原始 SQL、PromQL、LogQL、kubectl、Shell、Milvus filter 或任意 Kubernetes manifest；架构测试禁止替代注册路径和生产 Agent 主链路手工构造业务 `schema.ToolCall`。
 - **官方流式模型组件：** OpenAI-compatible 和 Anthropic-compatible 均使用锁定版本的 Eino 扩展。Eino 负责合并流式 Tool Call 分片；URL、API Path、API Key 和模型名完全由用户配置。
 - **能力门控：** 启用恢复能力前，Agent 会执行无副作用的 Tool Calling 探测。无法生成指定结构化工具调用的 endpoint 不会进入真实恢复模式。
 - **预索引 Hybrid Log：** 查询 Tool 组合 Loki metadata/keyword 与持续维护的 Drain3/BGE/Milvus 索引，不会等待同步日志解析。
@@ -105,14 +105,15 @@ RERANKER_API_KEY=...
 RERANKER_MODEL=<your-reranker-model>
 MODEL_EVIDENCE_MAX_ITEMS=12
 MODEL_CONTEXT_MAX_BYTES=32768
-SUPERVISOR_MAX_TOOL_USES=8
-DIAGNOSIS_MAX_TOOL_USES=24
-RECOVERY_MAX_TOOL_USES=10
-INCIDENT_MAX_AGENT_TOOL_USES=30
+SUPERVISOR_MAX_TOOL_USES=50
+DIAGNOSIS_MAX_TOOL_USES=50
+RECOVERY_MAX_TOOL_USES=50
 CAUSAL_LEARNING_NAMESPACES=kubepilot-demo
 DRAIN3_TOKEN=...
 BUSINESS_PROBE_URL=...                # 可选的端到端恢复探针
 ```
+
+ToolCall 上限按每个 Agent 独立执行。Tool Cost 和 Incident 汇总值仅用于可观测性，不参与执行拦截。
 
 密钥只从环境变量或未纳入版本控制的 `.env` 读取。健康检查响应、日志、Trace 和 Benchmark manifest 均不会记录密钥；Docker 构建上下文也会排除 `.env`、运行时凭据和 Benchmark 产物。
 
@@ -197,9 +198,9 @@ curl -X POST http://localhost:8080/api/v1/incidents \
 
 ### Autonomous Incident Benchmark
 
-除现有的真实故障注入档位外，仓库新增了隔离的评测框架，代码位于 `benchmark/diagnosis`、`benchmark/incident_retrieval`、`benchmark/agent`、`benchmark/evolution`、`benchmark/evaluator` 和 `benchmark/reports`。它通过公开 Incident API 测量从输入、诊断、Proposal、审批、执行、验证到知识演化的完整生命周期，不导入 Agent Runtime。`benchmark/manifests/autonomous.yaml` 保存可复现实验契约。
+除现有的真实故障注入档位外，仓库提供隔离的评测框架，代码位于 `benchmark/runner`、`benchmark/incident_retrieval`、`benchmark/log_retrieval`、`benchmark/evaluator`、`benchmark/reporter` 和 `benchmark/reports`。`benchmark/` 只包含数据集、执行适配、评测器、Manifest 和报告；Agent 编排、预算、遥测、检索排序、推理、安全与知识演化只在生产包实现一次，不存在 Benchmark 专用版本。`benchmark/manifests/autonomous.yaml` 保存可复现实验契约。
 
-评测器将期望根因、证据、恢复动作和因果路径保留在 Agent 上下文之外。Incident Harness 只向公开 Agent 接口发送观测数据；可选的知识演化接收器也只接收已观测到的 RESOLVED 结果。`benchmark/isolation` 提供隔离测试，并统一计算 Recall@K、Precision@K、MRR、NDCG、Hypothesis、Tool Efficiency、自动修正、恢复安全、验证成功、MTTD/MTTR、Topology 和因果演化指标。
+评测器将期望根因、证据、恢复动作和因果路径保留在 Agent 上下文之外，公开 API 请求只包含观测数据。仓库级 Audit Test 强制生产包与 Benchmark 的单向依赖边界，并计算 Recall@K、Precision@K、MRR、NDCG、Hypothesis、Tool Efficiency、自动修正、恢复安全、验证成功、MTTD/MTTR、Topology 和因果演化指标。
 
 只校验契约而不启动线上 Benchmark：
 

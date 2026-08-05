@@ -49,30 +49,3 @@ func WriteSuite(dir string, report SuiteReport) error {
 		"Log Retrieval, Incident Retrieval, Diagnosis, Recovery, Agent Behavior and Knowledge Evolution are evaluated as independent suites. Ground truth is evaluator-only.\n"
 	return os.WriteFile(filepath.Join(dir, "benchmark_report.md"), []byte(markdown), 0o640)
 }
-
-type MigrationReport struct {
-	Version          string   `json:"version"`
-	RemovedCouplings []string `json:"removed_couplings"`
-	Suites           []string `json:"suites"`
-	DatasetRules     []string `json:"dataset_rules"`
-	Metrics          []string `json:"metrics"`
-	Execution        string   `json:"execution"`
-	Limitations      []string `json:"remaining_limitations"`
-}
-
-func WriteMigrationReport(path string, report MigrationReport) error {
-	if path == "" {
-		return fmt.Errorf("migration report path is required")
-	}
-	if report.Version == "" {
-		report.Version = "autonomous-sre-benchmark"
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(report, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, b, 0o640)
-}

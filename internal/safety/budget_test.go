@@ -9,8 +9,8 @@ import (
 
 func TestParallelToolReservationIsAtomic(t *testing.T) {
 	state := &domain.AgentBudgetState{}
-	limits := map[string]domain.AgentBudget{"diagnosis": {MaxIterations: 4, MaxToolUses: 3, MaxToolCost: 4, MaxTokens: 100, MaxCorrections: 2}}
-	controller := NewBudgetController(state, limits, domain.AgentBudget{MaxToolUses: 3, MaxToolCost: 4, MaxTokens: 100}, map[string]int{"metric": 1, "semantic": 3})
+	limits := map[string]domain.AgentBudget{"diagnosis": {MaxIterations: 4, MaxToolUses: 2, MaxTokens: 100, MaxCorrections: 2}}
+	controller := NewBudgetController(state, limits, map[string]int{"metric": 1, "semantic": 3})
 	if _, err := controller.ReserveTool("diagnosis", "metric"); err != nil {
 		t.Fatal(err)
 	}
@@ -31,9 +31,8 @@ func TestParallelToolReservationIsAtomic(t *testing.T) {
 
 func TestBudgetStateSurvivesControllerRecreation(t *testing.T) {
 	state := &domain.AgentBudgetState{}
-	limits := map[string]domain.AgentBudget{"diagnosis": {MaxIterations: 4, MaxToolUses: 5, MaxToolCost: 8, MaxTokens: 100, MaxCorrections: 2}}
-	incident := domain.AgentBudget{MaxToolUses: 8, MaxToolCost: 12, MaxTokens: 200}
-	first := NewBudgetController(state, limits, incident, map[string]int{"lookup": 2})
+	limits := map[string]domain.AgentBudget{"diagnosis": {MaxIterations: 4, MaxToolUses: 5, MaxTokens: 100, MaxCorrections: 2}}
+	first := NewBudgetController(state, limits, map[string]int{"lookup": 2})
 	_, _ = first.ReserveTool("diagnosis", "lookup")
 	_ = first.AddTokens("diagnosis", 25)
 	remaining, err := first.UseCorrection("diagnosis")
@@ -41,7 +40,7 @@ func TestBudgetStateSurvivesControllerRecreation(t *testing.T) {
 		t.Fatalf("unexpected correction result: remaining=%d err=%v", remaining, err)
 	}
 
-	second := NewBudgetController(state, limits, incident, map[string]int{"lookup": 2})
+	second := NewBudgetController(state, limits, map[string]int{"lookup": 2})
 	snapshot := second.State()
 	usage := snapshot.Usage["diagnosis"]
 	if usage.ToolUses != 1 || usage.ToolCost != 2 || usage.Tokens != 25 || usage.Corrections != 1 {
@@ -52,13 +51,10 @@ func TestBudgetStateSurvivesControllerRecreation(t *testing.T) {
 func TestToolBudgetIsScopedPerAgent(t *testing.T) {
 	state := &domain.AgentBudgetState{}
 	limits := map[string]domain.AgentBudget{
-		"supervisor": {MaxToolUses: 2, MaxToolCost: 2, MaxTokens: 100},
-		"diagnosis":  {MaxToolUses: 2, MaxToolCost: 2, MaxTokens: 100},
+		"supervisor": {MaxToolUses: 2, MaxTokens: 100},
+		"diagnosis":  {MaxToolUses: 2, MaxTokens: 100},
 	}
-	// The incident limit is deliberately smaller than either agent's budget.
-	// It remains observable telemetry, but must not make one agent's tool
-	// reservations consume another agent's exploration budget.
-	controller := NewBudgetController(state, limits, domain.AgentBudget{MaxToolUses: 1, MaxToolCost: 1, MaxTokens: 100}, map[string]int{"lookup": 1})
+	controller := NewBudgetController(state, limits, map[string]int{"lookup": 1})
 	if _, err := controller.ReserveTools("supervisor", []string{"lookup", "lookup"}); err != nil {
 		t.Fatalf("supervisor reservation incorrectly used an incident-wide tool cap: %v", err)
 	}
@@ -67,5 +63,36 @@ func TestToolBudgetIsScopedPerAgent(t *testing.T) {
 	}
 	if _, err := controller.ReserveTools("diagnosis", []string{"lookup", "lookup"}); err != nil {
 		t.Fatalf("diagnosis reservation incorrectly used an incident-wide tool cap: %v", err)
+	}
+}
+
+func TestToolCostIsTelemetryOnly(t *testing.T) {
+	state := &domain.AgentBudgetState{}
+	limits := map[string]domain.AgentBudget{"diagnosis": {MaxToolUses: 3, MaxTokens: 100}}
+	controller := NewBudgetController(state, limits, map[string]int{"expensive": 1000})
+	if _, err := controller.ReserveTools("diagnosis", []string{"expensive", "expensive", "expensive"}); err != nil {
+		t.Fatalf("tool cost incorrectly blocked calls within the per-Agent use limit: %v", err)
+	}
+	usage := controller.State().Usage["diagnosis"]
+	if usage.ToolUses != 3 || usage.ToolCost != 3000 {
+		t.Fatalf("tool telemetry mismatch: %+v", usage)
+	}
+}
+
+func TestTokenBudgetIsScopedPerAgent(t *testing.T) {
+	state := &domain.AgentBudgetState{}
+	limits := map[string]domain.AgentBudget{
+		"supervisor": {MaxToolUses: 1, MaxTokens: 100},
+		"diagnosis":  {MaxToolUses: 1, MaxTokens: 100},
+	}
+	controller := NewBudgetController(state, limits, nil)
+	if err := controller.AddTokens("supervisor", 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.AddTokens("diagnosis", 100); err != nil {
+		t.Fatalf("supervisor tokens incorrectly reduced the diagnosis budget: %v", err)
+	}
+	if got := controller.State().IncidentTokens; got != 200 {
+		t.Fatalf("aggregate token telemetry=%d, want 200", got)
 	}
 }

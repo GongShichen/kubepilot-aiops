@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
-	"github.com/kubepilot-aiops/kubepilot/reasoning"
 )
 
 type engineKnowledge struct{}
@@ -36,7 +35,6 @@ func (engineVectors) Search(context.Context, []float32, map[string]string, int) 
 func TestIncidentRetrievalEngineRunsThreeSourcesAndBoundsCanonicalResult(t *testing.T) {
 	engine := IncidentRetrievalEngine{
 		HistoricalRetriever: HistoricalRetriever{Embedder: engineEmbedder{}, Vectors: engineVectors{}, Knowledge: engineKnowledge{}},
-		Engine:              reasoning.New(reasoning.DefaultConfig()),
 	}
 	features := domain.IncidentFeatures{Namespace: "kubepilot-demo", Service: "payment-service", Resource: "payment-deployment", Terms: []string{"database", "timeout"}, TopologyServices: []string{"mysql"}}
 	lists, ranked, err := engine.Search(context.Background(), features)

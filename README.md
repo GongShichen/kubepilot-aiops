@@ -41,7 +41,7 @@ flowchart TD
 - **Exactly three nested ADK Agents:** Supervisor acts as incident commander and delegates through Eino AgentTools; Diagnosis explores evidence and falsifiable hypotheses; Recovery creates and dry-runs one proposal. Recovery cannot discover mutation, approval-data, or verification tools.
 - **Pinned Agent Skills:** each Agent receives an independent `SKILL.md` through Eino middleware. Skills define role, boundaries, decision criteria, capability semantics, and output schema—not a hidden tool sequence. Skill hashes are pinned to the Incident and checkpoint, so changed instructions cannot silently resume an old workflow.
 - **Safety is a feedback environment:** repairable violations return a scoped `SafetyFeedback` observation to the same ReAct loop. Feedback states missing conditions without prescribing a tool or revealing an answer. Fatal policy violations stop immediately; infrastructure failures and exhausted correction budgets require a human.
-- **Four-dimensional budgets:** every Agent and the whole Incident enforce max iterations, Tool Count, pinned Tool Cost, provider tokens, and a separate correction budget. Parallel calls are charged atomically, AgentTool delegation is charged at both parent and Incident scope, and resume never resets usage.
+- **Per-Agent budgets:** Supervisor, Diagnosis, and Recovery independently enforce max iterations, Tool Uses, provider tokens, and correction attempts. Each Agent has 50 Tool Uses by default; parallel calls are charged atomically and resume never resets usage. Tool Cost and Incident totals are telemetry only and never block execution.
 - **Typed, resumable workflow:** the named `WorkflowState`, Evidence schema, Dry-run result, and server-owned ExecutionContext are checkpointed in Redis. PostgreSQL remains the auditable long-term business store.
 - **Evidence-grounded hypothesis lifecycle:** Evidence is attributed to the current time, service/resource, Trace/request/Pod, and causal path before ranking. Diagnosis maintains at most three hypotheses through `CREATED → EVIDENCE_SEARCHING → SUPPORTED/REFUTED → ACCEPTED`; confidence can rise or decay as support and contradiction change. The model prior is deliberately the smallest positive term.
 - **True hybrid incident retrieval:** three parallel Eino Tools recall semantic Milvus candidates, PostgreSQL lexical candidates, and cross-service topology candidates. Weighted RRF keeps 30 candidates and an explainable feature reranker sends only the top five into diagnosis; every score component and ranking reason is persisted.
@@ -51,7 +51,7 @@ flowchart TD
 - **Evolving incident knowledge:** resolved Incidents pass through a server-side Knowledge Evolution Layer. Trace/Kubernetes/Evidence graphs normalize pod/IP identities into reusable `business-service → database/cache/queue` patterns, merge them by deterministic signatures, and expose them to topology retrieval. Causal proposals are grounded in the accepted hypothesis ledger and real Evidence, then validated for complete paths, independent sources, contradiction, and repeated support before entering pending/active knowledge. Agent Tools can read, propose, and validate; only the resolved-Incident extractor can write.
 - **Causal pattern discovery:** a separate server-side discovery engine extracts Incident Causal Graphs from independently verified resolutions, mines repeated paths, records explicit counter-observations, scores candidates deterministically, and persists only candidates that pass the existing causal validator. Diagnosis can read accepted discovered patterns through `retrieve_discovered_causal_patterns`; it cannot write or promote them.
 - **Discovery evaluation:** `go run ./cmd/benchmark intelligence` includes a deterministic 100-resolved-Incident discovery corpus and reports pattern precision/recall plus confidence calibration; this evaluator is isolated from production learning and formal fault-injection scoring.
-- **Central capability registry:** every Agent-visible business capability is an Eino Tool with JSON Schema, Agent allowlist, timeout, argument/output bounds, and pinned cost. Tools never accept raw SQL, PromQL, LogQL, kubectl, shell, Milvus filters, or arbitrary Kubernetes manifests. Production Agent code is AST-tested to reject hand-built `schema.ToolCall` values.
+- **Central capability registry:** every typed handler, nested AgentTool, and deterministic action is composed into the same `tools.Capability` contract and reaches Eino only through `tools.Registry`. The registry owns JSON Schema validation, node allowlists, timeout and argument/output bounds, approval requirements, and ToolsNode construction. Tools never accept raw SQL, PromQL, LogQL, kubectl, shell, Milvus filters, or arbitrary Kubernetes manifests. Architecture tests reject alternate registration paths and hand-built business `schema.ToolCall` values.
 - **Official streaming model components:** OpenAI-compatible and Anthropic-compatible protocols use the pinned Eino extension packages. Eino assembles fragmented streaming Tool Calls; URL, API path, key, and model remain user-configured.
 - **Capability gating:** the Agent performs a side-effect-free Tool Calling probe before enabling recovery. A chat endpoint that cannot produce the required structured tool call remains diagnosis-disabled rather than executing an unsafe fallback.
 - **Pre-indexed hybrid logs:** the query Tool combines Loki metadata/keyword results with the continuously maintained Drain3/BGE/Milvus index; it never waits for synchronous log parsing.
@@ -105,14 +105,15 @@ RERANKER_API_KEY=...
 RERANKER_MODEL=<your-reranker-model>
 MODEL_EVIDENCE_MAX_ITEMS=12
 MODEL_CONTEXT_MAX_BYTES=32768
-SUPERVISOR_MAX_TOOL_USES=8
-DIAGNOSIS_MAX_TOOL_USES=24
-RECOVERY_MAX_TOOL_USES=10
-INCIDENT_MAX_AGENT_TOOL_USES=30
+SUPERVISOR_MAX_TOOL_USES=50
+DIAGNOSIS_MAX_TOOL_USES=50
+RECOVERY_MAX_TOOL_USES=50
 CAUSAL_LEARNING_NAMESPACES=kubepilot-demo
 DRAIN3_TOKEN=...
 BUSINESS_PROBE_URL=...                # optional end-to-end recovery probe
 ```
+
+Tool-call limits are enforced independently for each Agent. Tool cost and Incident-wide totals are retained as telemetry only and do not block execution.
 
 Secrets are read only from environment variables or the untracked `.env`. Health responses, logs, traces, and benchmark manifests never include keys.
 The Docker build context also excludes `.env`, generated runtime credentials, and benchmark artifacts.
@@ -198,9 +199,9 @@ curl -X POST http://localhost:8080/api/v1/incidents \
 
 ### Autonomous Incident Benchmark
 
-In addition to the existing live fault-injection profiles, the repository contains an isolated evaluator framework under `benchmark/diagnosis`, `benchmark/incident_retrieval`, `benchmark/agent`, `benchmark/evolution`, `benchmark/evaluator`, and `benchmark/reports`. It measures the complete public lifecycle—incident input, diagnosis, proposal, approval, execution, verification, and observed knowledge evolution—without importing the Agent runtime. `benchmark/manifests/autonomous.yaml` records the reproducibility contract.
+In addition to the existing live fault-injection profiles, the repository contains an isolated evaluator framework under `benchmark/runner`, `benchmark/incident_retrieval`, `benchmark/log_retrieval`, `benchmark/evaluator`, `benchmark/reporter`, and `benchmark/reports`. The directory contains only benchmark datasets, execution adapters, evaluators, manifests, and report writers. Agent orchestration, budgets, telemetry, retrieval ranking, reasoning, safety, and knowledge evolution remain in production packages and have no benchmark-specific implementations. `benchmark/manifests/autonomous.yaml` records the reproducibility contract.
 
-The evaluator keeps expected root cause, evidence, recovery, and causal-path labels outside the Agent payload. The public incident harness accepts only observations, and the optional evolution sink receives observed resolved incidents only. This provides explicit isolation tests in `benchmark/isolation` and deterministic Recall@K, Precision@K, MRR, NDCG, hypothesis, tool-efficiency, correction, recovery-safety, verification, MTTD/MTTR, topology, and causal-evolution metrics.
+The evaluator keeps expected root cause, evidence, recovery, and causal-path labels outside the Agent payload. Public API requests contain observations only. Repository-wide audit tests enforce the production-to-benchmark dependency boundary, while the suite computes deterministic Recall@K, Precision@K, MRR, NDCG, hypothesis, tool-efficiency, correction, recovery-safety, verification, MTTD/MTTR, topology, and causal-evolution metrics.
 
 Validate the contract without starting a live benchmark:
 

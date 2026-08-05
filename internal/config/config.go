@@ -70,18 +70,14 @@ type RerankerConfig struct {
 type AgentBudgetConfig struct {
 	MaxIterations  int
 	MaxToolUses    int
-	MaxToolCost    int
 	MaxTokens      int
 	MaxCorrections int
 }
 
 type AgentBudgetsConfig struct {
-	Supervisor     AgentBudgetConfig
-	Diagnosis      AgentBudgetConfig
-	Recovery       AgentBudgetConfig
-	IncidentUses   int
-	IncidentCost   int
-	IncidentTokens int
+	Supervisor AgentBudgetConfig
+	Diagnosis  AgentBudgetConfig
+	Recovery   AgentBudgetConfig
 }
 
 type ChatConfig struct {
@@ -298,48 +294,30 @@ func loadAgentBudgets() (AgentBudgetsConfig, error) {
 		if defaults.MaxToolUses, err = integer(prefix+"_MAX_TOOL_USES", defaults.MaxToolUses); err != nil {
 			return AgentBudgetConfig{}, err
 		}
-		if defaults.MaxToolCost, err = integer(prefix+"_MAX_TOOL_COST", defaults.MaxToolCost); err != nil {
-			return AgentBudgetConfig{}, err
-		}
 		if defaults.MaxTokens, err = integer(prefix+"_MAX_TOKENS", defaults.MaxTokens); err != nil {
 			return AgentBudgetConfig{}, err
 		}
 		if defaults.MaxCorrections, err = integer(prefix+"_MAX_CORRECTIONS", defaults.MaxCorrections); err != nil {
 			return AgentBudgetConfig{}, err
 		}
-		if defaults.MaxIterations <= 0 || defaults.MaxToolUses <= 0 || defaults.MaxToolCost <= 0 || defaults.MaxTokens <= 0 || defaults.MaxCorrections < 0 {
+		if defaults.MaxIterations <= 0 || defaults.MaxToolUses <= 0 || defaults.MaxTokens <= 0 || defaults.MaxCorrections < 0 {
 			return AgentBudgetConfig{}, fmt.Errorf("%s budget values are invalid", prefix)
 		}
 		return defaults, nil
 	}
-	supervisor, err := load("SUPERVISOR", AgentBudgetConfig{10, 8, 24, 12000, 3})
+	supervisor, err := load("SUPERVISOR", AgentBudgetConfig{MaxIterations: 10, MaxToolUses: 50, MaxTokens: 12000, MaxCorrections: 3})
 	if err != nil {
 		return AgentBudgetsConfig{}, err
 	}
-	diagnosis, err := load("DIAGNOSIS", AgentBudgetConfig{12, 24, 48, 30000, 3})
+	diagnosis, err := load("DIAGNOSIS", AgentBudgetConfig{MaxIterations: 12, MaxToolUses: 50, MaxTokens: 30000, MaxCorrections: 3})
 	if err != nil {
 		return AgentBudgetsConfig{}, err
 	}
-	recovery, err := load("RECOVERY", AgentBudgetConfig{10, 10, 16, 16000, 2})
+	recovery, err := load("RECOVERY", AgentBudgetConfig{MaxIterations: 10, MaxToolUses: 50, MaxTokens: 16000, MaxCorrections: 2})
 	if err != nil {
 		return AgentBudgetsConfig{}, err
 	}
-	uses, err := integer("INCIDENT_MAX_AGENT_TOOL_USES", 30)
-	if err != nil {
-		return AgentBudgetsConfig{}, err
-	}
-	cost, err := integer("INCIDENT_MAX_AGENT_TOOL_COST", 72)
-	if err != nil {
-		return AgentBudgetsConfig{}, err
-	}
-	tokens, err := integer("INCIDENT_MAX_TOKENS", 58000)
-	if err != nil {
-		return AgentBudgetsConfig{}, err
-	}
-	if uses <= 0 || cost <= 0 || tokens <= 0 {
-		return AgentBudgetsConfig{}, errors.New("incident agent budgets must be positive")
-	}
-	return AgentBudgetsConfig{Supervisor: supervisor, Diagnosis: diagnosis, Recovery: recovery, IncidentUses: uses, IncidentCost: cost, IncidentTokens: tokens}, nil
+	return AgentBudgetsConfig{Supervisor: supervisor, Diagnosis: diagnosis, Recovery: recovery}, nil
 }
 
 func (c Config) ValidateModel() error {

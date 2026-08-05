@@ -10,12 +10,10 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/components/tool"
-	toolutils "github.com/cloudwego/eino/components/tool/utils"
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/safety"
+	captools "github.com/kubepilot-aiops/kubepilot/tools"
 )
 
 const (
@@ -29,7 +27,6 @@ type AgentRegistry struct {
 	chat             model.BaseChatModel
 	skills           map[string]agentSkill
 	limits           map[string]domain.AgentBudget
-	incidentLimit    domain.AgentBudget
 	toolCosts        map[string]int
 	requestMaxTokens int
 	modelMaxRetries  int
@@ -56,29 +53,38 @@ func NewAgentRegistry(ctx context.Context, chat model.BaseChatModel) (*AgentRegi
 	return out, nil
 }
 
-// CorrelateWithCandidateTool lets the Supervisor model decide when to query
+// CorrelateWithCandidateCapability lets the Supervisor model decide when to query
 // the repository and when the available observations justify a grouping
 // decision. No application code constructs a business ToolCall.
-func (r *AgentRegistry) CorrelateWithCandidateTool(ctx context.Context, alert domain.Alert, service, namespace, resource string, candidateTool tool.BaseTool) (string, error) {
-	if candidateTool == nil {
+func (r *AgentRegistry) CorrelateWithCandidateCapability(ctx context.Context, alert domain.Alert, service, namespace, resource string, candidateCapability captools.Capability) (string, error) {
+	if candidateCapability == nil {
 		return "", fmt.Errorf("candidate query tool is required")
 	}
-	decisionTool, err := toolutils.InferTool("submit_correlation_decision", "Submit the final structured alert-correlation decision.", func(_ context.Context, in CorrelationDecision) (CorrelationDecision, error) {
+	registration := captools.Registration{Category: captools.CategoryDecision, AllowedNodes: []string{captools.NodeAlertCorrelation}, Timeout: 30 * time.Second, MaxArgumentBytes: 64 << 10, MaxOutputBytes: 64 << 10}
+	decisionCapability, err := captools.NewCapability("submit_correlation_decision", "Submit the final structured alert-correlation decision.", func(_ context.Context, in CorrelationDecision) (CorrelationDecision, error) {
 		if in.Confidence < 0 || in.Confidence > 1 || strings.TrimSpace(in.Reason) == "" || (in.Merge && in.IncidentID == "") {
 			return CorrelationDecision{}, fmt.Errorf("invalid correlation decision")
 		}
 		return in, nil
-	})
+	}, registration)
+	if err != nil {
+		return "", err
+	}
+	capabilityRegistry := captools.NewRegistry()
+	if err = capabilityRegistry.RegisterAll(ctx, candidateCapability, decisionCapability); err != nil {
+		return "", err
+	}
+	toolsNodeConfig, err := capabilityRegistry.ToolsNodeConfig(captools.NodeAlertCorrelation, true)
 	if err != nil {
 		return "", err
 	}
 	budgetState := &domain.AgentBudgetState{}
-	budgets := safety.NewBudgetController(budgetState, r.limits, r.incidentLimit, r.toolCosts)
+	budgets := safety.NewBudgetController(budgetState, r.limits, r.toolCosts)
 	state := &WorkflowState{Workflow: WorkflowName, Incident: &domain.Incident{Namespace: namespace, Service: service, Resource: resource, AgentBudget: budgetState}}
 	runtime := &constrainedRuntime{state: state, budgets: budgets, done: map[string]bool{}}
 	ctx = withConstrainedRuntime(ctx, runtime)
 	middleware := newConstrainedAgentMiddleware(SupervisorAgentName, r.skills[SupervisorAgentName], "submit_correlation_decision")
-	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: SupervisorAgentName, Description: "Use operational metadata to correlate one alert.", Instruction: "Act as the bounded Supervisor. For this pre-intake task, decide correlation only from tool-returned operational metadata and finish with the correlation decision capability.", Model: r.chat, MaxIterations: r.limits[SupervisorAgentName].MaxIterations, ModelRetryConfig: r.modelRetryConfig(), ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{candidateTool, decisionTool}, ExecuteSequentially: true}, ReturnDirectly: map[string]bool{"submit_correlation_decision": true}}, Handlers: []adk.ChatModelAgentMiddleware{middleware}})
+	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: SupervisorAgentName, Description: "Use operational metadata to correlate one alert.", Instruction: "Act as the bounded Supervisor. For this pre-intake task, decide correlation only from tool-returned operational metadata and finish with the correlation decision capability.", Model: r.chat, MaxIterations: r.limits[SupervisorAgentName].MaxIterations, ModelRetryConfig: r.modelRetryConfig(), ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: toolsNodeConfig, ReturnDirectly: map[string]bool{"submit_correlation_decision": true}}, Handlers: []adk.ChatModelAgentMiddleware{middleware}})
 	if err != nil {
 		return "", err
 	}

@@ -115,6 +115,16 @@ func cardinalitySimilarity(left, right int) float64 {
 	return clamp(1 - float64(delta)/float64(maximum))
 }
 
+func clamp(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
+}
+
 func setJaccard(left, right map[string]bool) float64 {
 	if len(left) == 0 && len(right) == 0 {
 		return 1

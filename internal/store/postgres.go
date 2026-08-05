@@ -30,6 +30,17 @@ func NewPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
 }
 func (s *PostgresStore) Close() { s.pool.Close() }
 
+// DeleteIncidents removes explicitly identified incidents. It is intended for
+// administrative lifecycle cleanup; foreign-key cascades remove normalized
+// evidence and incident knowledge. Agent tools never expose this method.
+func (s *PostgresStore) DeleteIncidents(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `DELETE FROM incidents WHERE id=ANY($1::text[])`, ids)
+	return err
+}
+
 // ListResolvedIncidents is used only by the server-side Knowledge Evolution
 // layer. It returns bounded, resolved payloads and never crosses the Agent Tool
 // boundary.

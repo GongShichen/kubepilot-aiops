@@ -3,7 +3,6 @@ package correlation
 import (
 	"fmt"
 	"math/rand/v2"
-	"sort"
 	"time"
 )
 
@@ -36,36 +35,6 @@ func Generate(groups, minAlerts, maxAlerts int, seed uint64) []Alert {
 	}
 	rng.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
 	return out
-}
-func Correlate(items []Alert) map[string]string {
-	sort.Slice(items, func(i, j int) bool { return items[i].StartsAt.Before(items[j].StartsAt) })
-	groups := map[string]string{}
-	fingerprints := map[string]string{}
-	traces := map[string]string{}
-	revisions := map[string]string{}
-	next := 0
-	for _, a := range items {
-		group := fingerprints[a.Fingerprint]
-		if group == "" && a.TraceID != "" {
-			group = traces[a.Namespace+"/"+a.TraceID]
-		}
-		if group == "" && a.Revision != "" {
-			group = revisions[a.Namespace+"/"+a.Service+"/"+a.Revision]
-		}
-		if group == "" {
-			next++
-			group = fmt.Sprintf("incident-%03d", next)
-		}
-		groups[a.ID] = group
-		fingerprints[a.Fingerprint] = group
-		if a.TraceID != "" {
-			traces[a.Namespace+"/"+a.TraceID] = group
-		}
-		if a.Revision != "" {
-			revisions[a.Namespace+"/"+a.Service+"/"+a.Revision] = group
-		}
-	}
-	return groups
 }
 func Expected(items []Alert) map[string]string {
 	out := map[string]string{}

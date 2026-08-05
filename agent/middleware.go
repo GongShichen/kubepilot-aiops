@@ -162,12 +162,10 @@ func newConstrainedAgentMiddleware(agent string, skill agentSkill, terminalTools
 }
 
 func (m *constrainedAgentMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
-	runtime, err := runtimeFromContext(ctx)
-	if err != nil {
+	if _, err := runtimeFromContext(ctx); err != nil {
 		return ctx, runCtx, err
 	}
-	remaining := runtime.budgets.RemainingTools(m.agent)
-	runCtx.Instruction = strings.TrimSpace(runCtx.Instruction + "\n\n" + m.skill.Content + fmt.Sprintf("\n\nCurrent operational tool uses remaining: %d. The injected skill is authoritative for role and output boundaries.", remaining))
+	runCtx.Instruction = strings.TrimSpace(runCtx.Instruction + "\n\n" + m.skill.Content + "\n\nThe injected skill is authoritative for role and output boundaries. A live independent ToolCall budget snapshot is supplied before every model turn.")
 	return ctx, runCtx, nil
 }
 
@@ -179,6 +177,7 @@ func (m *constrainedAgentMiddleware) BeforeModelRewriteState(ctx context.Context
 	if err = runtime.budgets.AddIteration(m.agent); err != nil {
 		return ctx, state, err
 	}
+	updateAgentBudgetMessage(state, m.agent, runtime.budgets.RemainingTools(m.agent))
 	if m.allToolInfos == nil {
 		m.allToolInfos = append([]*schema.ToolInfo(nil), state.ToolInfos...)
 	} else {
@@ -208,6 +207,22 @@ func (m *constrainedAgentMiddleware) BeforeModelRewriteState(ctx context.Context
 		state.ToolInfos = filtered
 	}
 	return ctx, state, nil
+}
+
+const budgetMessagePrefix = "KubePilot independent Agent budget:"
+
+func updateAgentBudgetMessage(state *adk.ChatModelAgentState, agent string, remaining int) {
+	if state == nil {
+		return
+	}
+	content := fmt.Sprintf("%s agent=%s, remaining_tool_uses=%d. Tool cost is telemetry only and has no execution limit. Plan within this Agent's own remaining calls; no Incident-wide ToolCall budget exists.", budgetMessagePrefix, agent, remaining)
+	for _, message := range state.Messages {
+		if message != nil && message.Role == schema.System && strings.HasPrefix(message.Content, budgetMessagePrefix) {
+			message.Content = content
+			return
+		}
+	}
+	state.Messages = append(state.Messages, &schema.Message{Role: schema.System, Content: content})
 }
 
 func (m *constrainedAgentMiddleware) AfterModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {

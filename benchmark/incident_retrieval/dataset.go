@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"gopkg.in/yaml.v3"
 )
 
@@ -209,6 +210,96 @@ func (d Dataset) Queries() []Query {
 		queries = append(queries, Query{ID: incident.IncidentID, Context: incident.AgentContext()})
 	}
 	return queries
+}
+
+// Isolate rewrites storage identifiers for one execution so the live
+// production stores cannot collide with prior runs. Evaluator relationships
+// are rewritten consistently; observation content is unchanged.
+func (d Dataset) Isolate(runID string) Dataset {
+	prefix := "evaluation-" + sanitizeID(runID) + "-"
+	namespace := "kubepilot-evaluation-" + sanitizeID(runID)
+	out := d
+	out.Incidents = make([]Incident, len(d.Incidents))
+	for index, incident := range d.Incidents {
+		incident.IncidentID = prefix + incident.IncidentID
+		incident.Namespace = namespace
+		incident.RelatedIncidents = append([]string(nil), incident.RelatedIncidents...)
+		for relatedIndex := range incident.RelatedIncidents {
+			incident.RelatedIncidents[relatedIndex] = prefix + incident.RelatedIncidents[relatedIndex]
+		}
+		out.Incidents[index] = incident
+	}
+	return out
+}
+
+// Features converts observation-only dataset fields to the production
+// retrieval contract. Evaluator labels are deliberately excluded.
+func (i Incident) Features() domain.IncidentFeatures {
+	terms := append([]string(nil), i.Symptoms...)
+	terms = append(terms, i.Metrics...)
+	terms = append(terms, i.Logs...)
+	terms = append(terms, i.Traces...)
+	terms = append(terms, i.KubernetesEvents...)
+	evidenceTypes := make([]string, 0, 4)
+	if len(i.Metrics) > 0 {
+		evidenceTypes = append(evidenceTypes, "metric")
+	}
+	if len(i.Logs) > 0 {
+		evidenceTypes = append(evidenceTypes, "log")
+	}
+	if len(i.Traces) > 0 {
+		evidenceTypes = append(evidenceTypes, "trace")
+	}
+	if len(i.KubernetesEvents) > 0 {
+		evidenceTypes = append(evidenceTypes, "kubernetes")
+	}
+	graph := domain.IncidentDependencyGraph{RootService: i.Service}
+	topologyServices := make([]string, 0, len(i.TopologyGraph.Nodes))
+	for _, node := range i.TopologyGraph.Nodes {
+		graph.Nodes = append(graph.Nodes, domain.DependencyNode{ID: node.ID, Kind: node.Type, Role: node.Type})
+		topologyServices = append(topologyServices, node.ID)
+	}
+	for _, edge := range i.TopologyGraph.Edges {
+		graph.Edges = append(graph.Edges, domain.DependencyEdge{From: edge.Source, To: edge.Target, Kind: edge.Type})
+		graph.ErrorPropagationPaths = append(graph.ErrorPropagationPaths, []string{edge.Source, edge.Target})
+	}
+	return domain.IncidentFeatures{
+		IncidentID: i.IncidentID, Namespace: i.Namespace, Service: i.Service,
+		Terms: terms, EvidenceTypes: evidenceTypes, TopologyServices: topologyServices,
+		TopologyGraph: graph, CausalNodeIDs: append([]string(nil), i.CausalFeatures...),
+	}
+}
+
+// Candidate converts a resolved historical record to the canonical production
+// candidate. RootCause is historical corpus content, never query context.
+func (i Incident) Candidate() domain.RetrievalCandidate {
+	return domain.RetrievalCandidate{
+		IncidentID: i.IncidentID, Namespace: i.Namespace, Service: i.Service,
+		Category: i.Category, RootCause: i.RootCause,
+		Summary:  strings.Join(append(append(append([]string(nil), i.Symptoms...), i.Metrics...), i.Logs...), "; "),
+		Features: i.Features(),
+	}
+}
+
+func (d Dataset) Candidates() []domain.RetrievalCandidate {
+	out := make([]domain.RetrievalCandidate, len(d.Incidents))
+	for index, incident := range d.Incidents {
+		out[index] = incident.Candidate()
+	}
+	return out
+}
+
+func sanitizeID(value string) string {
+	var builder strings.Builder
+	for _, r := range strings.ToLower(value) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+		}
+	}
+	if builder.Len() == 0 {
+		return "run"
+	}
+	return builder.String()
 }
 
 func cloneMetadata(in map[string]string) map[string]string {

@@ -15,6 +15,7 @@ import (
 	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
 	topologyknowledge "github.com/kubepilot-aiops/kubepilot/internal/topology/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
+	captools "github.com/kubepilot-aiops/kubepilot/tools"
 )
 
 func TestAgentProductionCodeHasNoManualEinoToolCallOrBenchmarkDependency(t *testing.T) {
@@ -81,10 +82,11 @@ func TestSkillsArePinnedAndDoNotEncodeHiddenWorkflow(t *testing.T) {
 }
 
 func TestRecoveryAgentCannotDiscoverMutationTools(t *testing.T) {
-	tools, err := buildConstrainedRecoveryTools(constrainedToolDeps{})
+	capabilities, err := buildConstrainedRecoveryCapabilities(constrainedToolDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	tools := registeredCapabilitiesForTest(t, captools.NodeRecoveryReact, capabilities)
 	for _, candidate := range tools {
 		info, infoErr := candidate.Info(context.Background())
 		if infoErr != nil {
@@ -99,10 +101,11 @@ func TestRecoveryAgentCannotDiscoverMutationTools(t *testing.T) {
 }
 
 func TestDiagnosisRegistryExposesOptionalTopologyAndCausalCapabilities(t *testing.T) {
-	tools, err := buildConstrainedDiagnosisTools(constrainedToolDeps{Reasoning: reasoning.New(reasoning.DefaultConfig())})
+	capabilities, err := buildConstrainedDiagnosisCapabilities(constrainedToolDeps{Reasoning: reasoning.New(reasoning.DefaultConfig())})
 	if err != nil {
 		t.Fatal(err)
 	}
+	tools := registeredCapabilitiesForTest(t, captools.NodeDiagnosisReact, capabilities)
 	wanted := map[string]bool{"build_incident_graph": false, "match_causal_patterns": false, "expand_causal_path": false, "score_hypothesis_causality": false}
 	for _, candidate := range tools {
 		info, infoErr := candidate.Info(context.Background())
@@ -123,10 +126,11 @@ func TestDiagnosisRegistryExposesOptionalTopologyAndCausalCapabilities(t *testin
 func TestDiagnosisRegistryExposesKnowledgeEvolutionCapabilities(t *testing.T) {
 	topologyStore := topologyknowledge.NewMemoryStore()
 	causalStore := causalknowledge.NewMemoryStore()
-	tools, err := buildConstrainedDiagnosisTools(constrainedToolDeps{Reasoning: reasoning.New(reasoning.DefaultConfig()), TopologyPatterns: topologyStore, CausalPatterns: causalStore})
+	capabilities, err := buildConstrainedDiagnosisCapabilities(constrainedToolDeps{Reasoning: reasoning.New(reasoning.DefaultConfig()), TopologyPatterns: topologyStore, CausalPatterns: causalStore})
 	if err != nil {
 		t.Fatal(err)
 	}
+	tools := registeredCapabilitiesForTest(t, captools.NodeDiagnosisReact, capabilities)
 	wanted := map[string]bool{"retrieve_topology_patterns": false, "retrieve_causal_patterns": false, "propose_causal_pattern": false, "validate_causal_pattern": false}
 	for _, candidate := range tools {
 		info, infoErr := candidate.Info(context.Background())
@@ -149,10 +153,11 @@ func TestDiagnosisRegistryExposesDiscoveredCausalPatternsReadOnly(t *testing.T) 
 	if err := patterns.Upsert(context.Background(), causaldiscovery.CausalPatternCandidate{CausalPath: []string{"memory_growth", "oom_killed", "pod_restart"}, Status: causaldiscovery.StatusAccepted, Frequency: 3, Coverage: 1, Confidence: .9}); err != nil {
 		t.Fatal(err)
 	}
-	tools, err := buildConstrainedDiagnosisTools(constrainedToolDeps{Reasoning: reasoning.New(reasoning.DefaultConfig()), DiscoveredPatterns: patterns})
+	capabilities, err := buildConstrainedDiagnosisCapabilities(constrainedToolDeps{Reasoning: reasoning.New(reasoning.DefaultConfig()), DiscoveredPatterns: patterns})
 	if err != nil {
 		t.Fatal(err)
 	}
+	tools := registeredCapabilitiesForTest(t, captools.NodeDiagnosisReact, capabilities)
 	for _, candidate := range tools {
 		info, infoErr := candidate.Info(context.Background())
 		if infoErr != nil {

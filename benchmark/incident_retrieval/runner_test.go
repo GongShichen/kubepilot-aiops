@@ -4,43 +4,50 @@ import (
 	"context"
 	"testing"
 
-	rerankerclient "github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
+	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	"github.com/kubepilot-aiops/kubepilot/retrieval"
 )
 
-type boundedReranker struct {
-	maxDocuments int
+type runnerEmbedder struct{}
+
+func (runnerEmbedder) Embed(context.Context, []string) ([][]float32, error) {
+	return [][]float32{{1, 0}}, nil
 }
 
-func (r *boundedReranker) Enabled() bool               { return true }
-func (r *boundedReranker) Probe(context.Context) error { return nil }
-func (r *boundedReranker) ConfigHash() string          { return "test" }
-func (r *boundedReranker) Health() map[string]any      { return map[string]any{"configured": true} }
-func (r *boundedReranker) Rerank(_ context.Context, _ string, documents []string, _ int) ([]rerankerclient.Result, error) {
-	if len(documents) > r.maxDocuments {
-		r.maxDocuments = len(documents)
-	}
-	results := make([]rerankerclient.Result, len(documents))
-	for i := range documents {
-		results[i] = rerankerclient.Result{Index: i, Score: float64(len(documents)-i) / float64(len(documents))}
-	}
-	return results, nil
+type runnerVectors struct{}
+
+func (runnerVectors) Upsert(context.Context, []retrieval.Document) error { return nil }
+func (runnerVectors) Search(context.Context, []float32, map[string]string, int) ([]retrieval.Document, error) {
+	return []retrieval.Document{{ID: "related", Namespace: "demo", Service: "payment", Template: "memory growth", RootCause: "memory leak", Score: .9}}, nil
 }
 
-func TestFullIncidentRerankUsesBoundedShortlist(t *testing.T) {
-	query := Incident{IncidentID: "query", Category: "memory", Service: "payment", Namespace: "demo", Symptoms: []string{"error"}, RootCause: "memory_leak"}
-	candidates := make([]Incident, 0, 500)
-	for i := 0; i < 500; i++ {
-		candidates = append(candidates, Incident{IncidentID: "candidate-" + string(rune('a'+i%26)) + string(rune('a'+i/26)), Category: "memory", Service: "payment", Namespace: "demo", Symptoms: []string{"error"}, RootCause: "memory_leak"})
+type runnerKnowledge struct{}
+
+func (runnerKnowledge) SearchLexicalIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error) {
+	return []domain.RetrievalCandidate{{IncidentID: "related", Namespace: "demo", Service: "payment", SourceScores: map[string]float64{"lexical": .9}}}, nil
+}
+func (runnerKnowledge) SearchTopologyIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error) {
+	return nil, nil
+}
+
+func TestRunUsesProductionIncidentRetrievalEngine(t *testing.T) {
+	dataset := Dataset{Version: "test", Incidents: []Incident{{
+		IncidentID: "query", Category: "memory", Service: "payment", Namespace: "demo",
+		Symptoms: []string{"memory growth"}, RootCause: "memory leak", RelatedIncidents: []string{"related"},
+	}}}
+	engine := &retrieval.IncidentRetrievalEngine{
+		HistoricalRetriever: retrieval.HistoricalRetriever{Embedder: runnerEmbedder{}, Vectors: runnerVectors{}, Knowledge: runnerKnowledge{}},
 	}
-	reranker := &boundedReranker{maxDocuments: 0}
-	ranked, err := rankIncident(context.Background(), query, candidates, StrategyFull, reranker)
+	report, err := Run(context.Background(), RunnerConfig{Dataset: dataset, Engine: engine})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reranker.maxDocuments > incidentReasoningTopK {
-		t.Fatalf("neural reranker received %d documents, want <= %d", reranker.maxDocuments, incidentReasoningTopK)
+	if len(report.Strategies) != len(AblationStrategies) {
+		t.Fatalf("strategies=%d, want %d", len(report.Strategies), len(AblationStrategies))
 	}
-	if len(ranked) != incidentCandidateTopK {
-		t.Fatalf("ranked candidates = %d, want %d", len(ranked), incidentCandidateTopK)
+	for _, metrics := range report.Strategies {
+		if metrics.RecallAt1 != 1 {
+			t.Fatalf("strategy %s did not receive production-ranked candidate: %+v", metrics.Strategy, metrics)
+		}
 	}
 }

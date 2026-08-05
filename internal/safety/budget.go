@@ -7,20 +7,16 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
 
-// BudgetController atomically enforces each agent's exploration budget. Tool
-// count and cost are intentionally scoped to the agent that requested them;
-// the incident counters are retained for telemetry and the incident token cap
-// remains a separate circuit breaker. Rejected calls consume budget because
-// malformed and unsafe attempts are still model decisions that must not be
-// allowed to loop indefinitely.
+// BudgetController atomically enforces each Agent's independent iteration,
+// ToolCall, token, and correction budgets. Tool cost and Incident totals are
+// retained only as telemetry and never reject an Agent action.
 type BudgetController struct {
-	mu             sync.Mutex
-	state          *domain.AgentBudgetState
-	incidentLimits domain.AgentBudget
-	costs          map[string]int
+	mu    sync.Mutex
+	state *domain.AgentBudgetState
+	costs map[string]int
 }
 
-func NewBudgetController(state *domain.AgentBudgetState, limits map[string]domain.AgentBudget, incident domain.AgentBudget, costs map[string]int) *BudgetController {
+func NewBudgetController(state *domain.AgentBudgetState, limits map[string]domain.AgentBudget, costs map[string]int) *BudgetController {
 	if state == nil {
 		state = &domain.AgentBudgetState{}
 	}
@@ -30,7 +26,7 @@ func NewBudgetController(state *domain.AgentBudgetState, limits map[string]domai
 	if state.Usage == nil {
 		state.Usage = map[string]domain.AgentBudgetUsage{}
 	}
-	return &BudgetController{state: state, incidentLimits: incident, costs: cloneCosts(costs)}
+	return &BudgetController{state: state, costs: cloneCosts(costs)}
 }
 
 func (b *BudgetController) State() *domain.AgentBudgetState {
@@ -71,7 +67,7 @@ func (b *BudgetController) ReserveTools(agent string, names []string) (domain.Ag
 	if count == 0 {
 		return usage, nil
 	}
-	if usage.ToolUses+count > limit.MaxToolUses || usage.ToolCost+totalCost > limit.MaxToolCost {
+	if usage.ToolUses+count > limit.MaxToolUses {
 		return usage, ErrBudgetExceeded{Agent: agent, Tool: names[0]}
 	}
 	usage.ToolUses += count
@@ -109,7 +105,7 @@ func (b *BudgetController) AddTokens(agent string, tokens int) error {
 		return fmt.Errorf("agent %q has no budget", agent)
 	}
 	usage := b.state.Usage[agent]
-	if usage.Tokens+tokens > limit.MaxTokens || b.state.IncidentTokens+tokens > b.incidentLimits.MaxTokens {
+	if usage.Tokens+tokens > limit.MaxTokens {
 		return ErrBudgetExceeded{Agent: agent, Resource: "tokens"}
 	}
 	usage.Tokens += tokens
@@ -167,7 +163,7 @@ type ErrBudgetExceeded struct {
 func (e ErrBudgetExceeded) Error() string {
 	resource := e.Resource
 	if resource == "" {
-		resource = "tool count or cost"
+		resource = "tool count"
 	}
 	if e.Tool != "" {
 		return fmt.Sprintf("%s budget exhausted for agent %s before tool %s", resource, e.Agent, e.Tool)

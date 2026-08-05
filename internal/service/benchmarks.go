@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	artifactlayout "github.com/kubepilot-aiops/kubepilot/benchmark/artifactlayout"
+	artifactlayout "github.com/kubepilot-aiops/kubepilot/internal/artifacts"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -47,10 +47,10 @@ func (m *BenchmarkManager) Start(profile string, autoApprove bool) (*BenchmarkRu
 	run := &BenchmarkRun{ID: id, Profile: profile, Status: "queued", ArtifactRoot: artifactlayout.RunDirectory(m.ArtifactRoot, artifactSuite(profile), artifactProfile(profile), now), CreatedAt: now, UpdatedAt: now}
 	m.mu.Lock()
 	m.runs[id] = run
+	snapshot := cloneBenchmarkRun(run)
 	m.mu.Unlock()
 	go m.execute(id, autoApprove)
-	cp := *run
-	return &cp, nil
+	return snapshot, nil
 }
 func (m *BenchmarkManager) execute(id string, autoApprove bool) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -167,18 +167,25 @@ func (m *BenchmarkManager) Get(id string) (*BenchmarkRun, error) {
 	if run == nil {
 		return nil, fmt.Errorf("benchmark run not found")
 	}
-	cp := *run
-	cp.Output = append([]string(nil), run.Output...)
-	return &cp, nil
+	return cloneBenchmarkRun(run), nil
 }
 func (m *BenchmarkManager) List() []BenchmarkRun {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]BenchmarkRun, 0, len(m.runs))
 	for _, run := range m.runs {
-		out = append(out, *run)
+		out = append(out, *cloneBenchmarkRun(run))
 	}
 	return out
+}
+
+func cloneBenchmarkRun(run *BenchmarkRun) *BenchmarkRun {
+	if run == nil {
+		return nil
+	}
+	copy := *run
+	copy.Output = append([]string(nil), run.Output...)
+	return &copy
 }
 func (m *BenchmarkManager) Cancel(id string) error {
 	m.mu.Lock()

@@ -19,7 +19,7 @@ func TestBuildServiceGraphUsesObservedDependencyMetadata(t *testing.T) {
 func TestServiceGraphSimilarityRecognizesRenamedRootWithSharedDependency(t *testing.T) {
 	current := ServiceGraph{Nodes: []ServiceNode{{Name: "payment-service"}, {Name: "mysql"}}, Edges: []ServiceEdge{{Source: "payment-service", Target: "mysql", Type: "observed_call", Weight: 1}}}
 	historical := ServiceGraph{Nodes: []ServiceNode{{Name: "order-service"}, {Name: "mysql"}}, Edges: []ServiceEdge{{Source: "order-service", Target: "mysql", Type: "observed_call", Weight: 1}}}
-	if score := SimilarityGraph(current, historical); score < .39 || score > .41 {
-		t.Fatalf("shared dependency similarity=%f, want approximately .4", score)
+	if score := SimilarityGraph(current, historical); score < .999999 {
+		t.Fatalf("shared dependency similarity=%f, want a complete structural match", score)
 	}
 }

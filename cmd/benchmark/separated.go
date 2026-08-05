@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,16 +11,19 @@ import (
 	"strings"
 	"time"
 
-	agentbench "github.com/kubepilot-aiops/kubepilot/benchmark/agent"
-	artifactlayout "github.com/kubepilot-aiops/kubepilot/benchmark/artifactlayout"
+	"github.com/kubepilot-aiops/kubepilot/benchmark/evaluator"
 	incidentretrieval "github.com/kubepilot-aiops/kubepilot/benchmark/incident_retrieval"
 	logretrieval "github.com/kubepilot-aiops/kubepilot/benchmark/log_retrieval"
 	benchmarkmanifests "github.com/kubepilot-aiops/kubepilot/benchmark/manifests"
 	recoverybench "github.com/kubepilot-aiops/kubepilot/benchmark/recovery"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/reporter"
 	benchmarkreports "github.com/kubepilot-aiops/kubepilot/benchmark/reports"
+	artifactlayout "github.com/kubepilot-aiops/kubepilot/internal/artifacts"
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
+	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	llm "github.com/kubepilot-aiops/kubepilot/internal/model"
 	rerankerclient "github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
+	"github.com/kubepilot-aiops/kubepilot/internal/store"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
 	"github.com/kubepilot-aiops/kubepilot/tools"
 )
@@ -74,18 +78,113 @@ func runIncidentRetrieval(args []string) {
 	if *output == "" {
 		*output = artifactlayout.RunDirectory("artifacts/benchmark", "incident-retrieval", "full", time.Now().UTC())
 	}
-	service := newBenchmarkReranker()
-	report, err := incidentretrieval.Run(context.Background(), incidentretrieval.RunnerConfig{DatasetPath: *dataset, Count: *count, OutputDir: *output, Reranker: service, Progress: func(current, total int) { fmt.Printf("suite=incident_retrieval progress=%d/%d\n", current, total) }})
-	fatal(err)
-	fatal(writeSuiteManifest(filepath.Join(*output, "manifest.json"), map[string]any{"suite": "incident_retrieval", "dataset": *dataset, "queries": report.Queries(), "strategies": len(report.Strategies), "category_counts": report.CategoryCounts, "git_commit": gitCommit()}))
-	fatal(benchmarkreports.WriteEnvelope(filepath.Join(*output, "benchmark_report.json"), benchmarkreports.Envelope{
+	fatal(executeIncidentRetrieval(context.Background(), *dataset, *count, *output))
+}
+
+func executeIncidentRetrieval(ctx context.Context, datasetPath string, count int, output string) (runErr error) {
+	dataset, err := incidentretrieval.LoadExpanded(datasetPath, count)
+	if err != nil {
+		return err
+	}
+	runID := time.Now().UTC().Format("20060102T150405000000000Z")
+	dataset = dataset.Isolate(runID)
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if err = cfg.ValidateEmbedding(); err != nil {
+		return err
+	}
+	postgres, err := store.NewPostgres(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer postgres.Close()
+	collection := "kubepilot_evaluation_" + runID
+	vectors := retrieval.NewMilvusStore(cfg.MilvusAddress, collection, cfg.Embedding.Dimensions)
+	if err = vectors.Ensure(ctx); err != nil {
+		return err
+	}
+	ids := dataset.IncidentIDs()
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		runErr = errors.Join(runErr,
+			postgres.DeleteIncidents(cleanupCtx, ids),
+			vectors.Drop(cleanupCtx),
+		)
+	}()
+	candidates := dataset.Candidates()
+	createdAt := time.Now().UTC()
+	for _, candidate := range candidates {
+		incident := &domain.Incident{
+			ID: candidate.IncidentID, Status: domain.StatusResolved,
+			Namespace: candidate.Namespace, Service: candidate.Service, Resource: candidate.Resource,
+			Summary: candidate.Summary, RootCause: candidate.RootCause,
+			RootCauseCategory: candidate.Category, CreatedAt: createdAt, UpdatedAt: createdAt,
+		}
+		if err = postgres.Create(ctx, incident); err != nil {
+			return fmt.Errorf("create isolated incident knowledge source: %w", err)
+		}
+		if err = postgres.UpsertIncidentKnowledge(ctx, incident, candidate.Features, cfg.Embedding.Model); err != nil {
+			return fmt.Errorf("index isolated lexical incident knowledge: %w", err)
+		}
+	}
+	embedder := llm.NewEmbedder(cfg.Embedding)
+	texts := make([]string, len(candidates))
+	for index, candidate := range candidates {
+		texts[index] = retrieval.StructuredIncidentDocument(candidate)
+	}
+	embeddings, err := embedder.Embed(ctx, texts)
+	if err != nil {
+		return fmt.Errorf("embed isolated incident corpus: %w", err)
+	}
+	if len(embeddings) != len(candidates) {
+		return fmt.Errorf("embedding count %d, expected %d", len(embeddings), len(candidates))
+	}
+	documents := make([]retrieval.Document, len(candidates))
+	for index, candidate := range candidates {
+		documents[index] = retrieval.Document{
+			ID: candidate.IncidentID, Namespace: candidate.Namespace, Service: candidate.Service,
+			Category: candidate.Category, Template: candidate.Summary, RootCause: candidate.RootCause,
+			Vector: embeddings[index],
+		}
+	}
+	for start := 0; start < len(documents); start += 100 {
+		end := min(start+100, len(documents))
+		if err = vectors.Upsert(ctx, documents[start:end]); err != nil {
+			return fmt.Errorf("index isolated semantic incident knowledge: %w", err)
+		}
+	}
+	var neural rerankerclient.Service
+	if cfg.Reranker.Enabled {
+		neural = rerankerclient.New(cfg.Reranker)
+	}
+	engine := &retrieval.IncidentRetrievalEngine{
+		HistoricalRetriever: retrieval.HistoricalRetriever{Embedder: embedder, Vectors: vectors, Knowledge: postgres},
+		Reranker:            neural,
+	}
+	report, err := incidentretrieval.Run(ctx, incidentretrieval.RunnerConfig{
+		Dataset: dataset, Engine: engine, OutputDir: output,
+		Progress: func(current, total int) { fmt.Printf("suite=incident_retrieval progress=%d/%d\n", current, total) },
+	})
+	if err != nil {
+		return err
+	}
+	if err = writeSuiteManifest(filepath.Join(output, "manifest.json"), map[string]any{"suite": "incident_retrieval", "dataset": datasetPath, "queries": report.Queries(), "strategies": len(report.Strategies), "category_counts": report.CategoryCounts, "git_commit": gitCommit()}); err != nil {
+		return err
+	}
+	if err = benchmarkreports.WriteEnvelope(filepath.Join(output, "benchmark_report.json"), benchmarkreports.Envelope{
 		Benchmark: "incident_retrieval",
 		Manifest:  runtimeManifest(),
 		Dataset:   benchmarkreports.DatasetInfo{Name: "incident-retrieval", Size: report.Queries(), CategoryCounts: report.CategoryCounts},
 		Metrics:   report,
 		Cases:     report.Queries(),
-	}))
-	fmt.Printf("suite=incident_retrieval queries=%d strategies=%d output=%s\n", report.Queries(), len(report.Strategies), *output)
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("suite=incident_retrieval queries=%d strategies=%d output=%s\n", report.Queries(), len(report.Strategies), output)
+	return nil
 }
 
 func runAgentReport(args []string) {
@@ -100,7 +199,7 @@ func runAgentReport(args []string) {
 		*output = filepath.Join(artifactlayout.RunDirectory("artifacts/benchmark", "agent", "full", time.Now().UTC()), "agent_behavior_report.json")
 	}
 	items := loadCaseResults(*input)
-	metrics := agentbench.EvaluateCaseResults(items)
+	metrics := evaluator.EvaluateAgentCaseResults(items)
 	fatal(benchmarkreports.WriteEnvelope(*output, benchmarkreports.Envelope{
 		Benchmark:   "agent_behavior",
 		Manifest:    runtimeManifest(),
@@ -219,16 +318,6 @@ func runtimeManifest() any {
 		return nil
 	}
 	return value
-}
-
-func newBenchmarkReranker() rerankerclient.Service {
-	enabled := strings.EqualFold(env("RERANKER_ENABLED", "false"), "true")
-	if !enabled {
-		return nil
-	}
-	cfg := config.RerankerConfig{Enabled: true, Protocol: env("RERANKER_PROTOCOL", "openai-compatible"), BaseURL: os.Getenv("RERANKER_BASE_URL"), APIPath: env("RERANKER_API_PATH", "/reranks"), APIKey: os.Getenv("RERANKER_API_KEY"), Model: os.Getenv("RERANKER_MODEL"), Timeout: envDuration("RERANKER_TIMEOUT", 30*time.Second), MaxRetries: envInt("RERANKER_MAX_RETRIES", 1), MaxDocumentBytes: envInt("RERANKER_MAX_DOCUMENT_BYTES", 8192), MaxPayloadBytes: envInt("RERANKER_MAX_PAYLOAD_BYTES", 1048576)}
-	fatal(config.ValidateReranker(cfg))
-	return rerankerclient.New(cfg)
 }
 
 func writeSuiteManifest(path string, payload map[string]any) error {

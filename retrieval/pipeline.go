@@ -14,8 +14,8 @@ import (
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
-	topologyretrieval "github.com/kubepilot-aiops/kubepilot/internal/retrieval/topology"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
+	topologyretrieval "github.com/kubepilot-aiops/kubepilot/retrieval/topology"
 )
 
 // PipelineConfig bounds each stage independently.  Keeping the limits in one

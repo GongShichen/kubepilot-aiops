@@ -3,9 +3,8 @@ package tools
 import (
 	"context"
 	"fmt"
+	"time"
 
-	"github.com/cloudwego/eino/components/tool"
-	toolutils "github.com/cloudwego/eino/components/tool/utils"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
 
@@ -29,11 +28,12 @@ type RelatedIncidentQuery struct {
 	Limit     int    `json:"limit,omitempty"`
 }
 
-func NewIncidentQueryTools(repo IncidentQueryRepository) ([]tool.BaseTool, error) {
+func NewIncidentQueryCapabilities(repo IncidentQueryRepository) ([]Capability, error) {
 	if repo == nil {
 		return nil, fmt.Errorf("incident repository is required")
 	}
-	find, err := toolutils.InferTool("find_incident_candidates", "Find bounded active Incident candidates by namespace.", func(ctx context.Context, in IncidentCandidateQuery) ([]domain.Incident, error) {
+	registration := Registration{Category: CategoryIncident, AllowedNodes: []string{NodeAlertCorrelation}, Timeout: 30 * time.Second, MaxArgumentBytes: 64 << 10, MaxOutputBytes: 2 << 20}
+	find, err := NewCapability("find_incident_candidates", "Find bounded active Incident candidates by namespace.", func(ctx context.Context, in IncidentCandidateQuery) ([]domain.Incident, error) {
 		limit := in.Limit
 		if limit <= 0 || limit > 100 {
 			limit = 100
@@ -55,32 +55,32 @@ func NewIncidentQueryTools(repo IncidentQueryRepository) ([]tool.BaseTool, error
 			out = append(out, item)
 		}
 		return out, nil
-	})
+	}, registration)
 	if err != nil {
 		return nil, err
 	}
-	loadContext, err := toolutils.InferTool("load_incident_context", "Load one bounded Incident context without execution secrets.", func(ctx context.Context, in IncidentIDQuery) (domain.Incident, error) {
+	loadContext, err := NewCapability("load_incident_context", "Load one bounded Incident context without execution secrets.", func(ctx context.Context, in IncidentIDQuery) (domain.Incident, error) {
 		item, err := repo.Get(ctx, in.IncidentID)
 		if err != nil {
 			return domain.Incident{}, err
 		}
 		item.Evidence, item.ExecutionContext = nil, nil
 		return *item, nil
-	})
+	}, registration)
 	if err != nil {
 		return nil, err
 	}
-	loadEvidence, err := toolutils.InferTool("load_incident_evidence", "Load normalized Evidence for one Incident.", func(ctx context.Context, in IncidentIDQuery) ([]domain.Evidence, error) {
+	loadEvidence, err := NewCapability("load_incident_evidence", "Load normalized Evidence for one Incident.", func(ctx context.Context, in IncidentIDQuery) ([]domain.Evidence, error) {
 		item, err := repo.Get(ctx, in.IncidentID)
 		if err != nil {
 			return nil, err
 		}
 		return item.Evidence, nil
-	})
+	}, registration)
 	if err != nil {
 		return nil, err
 	}
-	related, err := toolutils.InferTool("load_related_incidents", "Load bounded related Incidents by namespace and service.", func(ctx context.Context, in RelatedIncidentQuery) ([]domain.Incident, error) {
+	related, err := NewCapability("load_related_incidents", "Load bounded related Incidents by namespace and service.", func(ctx context.Context, in RelatedIncidentQuery) ([]domain.Incident, error) {
 		limit := in.Limit
 		if limit <= 0 || limit > 20 {
 			limit = 20
@@ -100,9 +100,9 @@ func NewIncidentQueryTools(repo IncidentQueryRepository) ([]tool.BaseTool, error
 			}
 		}
 		return out, nil
-	})
+	}, registration)
 	if err != nil {
 		return nil, err
 	}
-	return []tool.BaseTool{find, loadContext, loadEvidence, related}, nil
+	return []Capability{find, loadContext, loadEvidence, related}, nil
 }

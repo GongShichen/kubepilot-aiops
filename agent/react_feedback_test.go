@@ -8,12 +8,10 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/components/tool"
-	toolutils "github.com/cloudwego/eino/components/tool/utils"
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/safety"
+	captools "github.com/kubepilot-aiops/kubepilot/tools"
 )
 
 type reflectingDiagnosisModel struct {
@@ -63,29 +61,37 @@ func (m *reflectingDiagnosisModel) Stream(ctx context.Context, messages []*schem
 func TestSameReActAgentConsumesSafetyFeedbackAndReplans(t *testing.T) {
 	ctx := context.Background()
 	state := &WorkflowState{Incident: &domain.Incident{ID: "feedback-incident", Namespace: "kubepilot-demo", Service: "gateway", Resource: "gateway", Evidence: []domain.Evidence{{ID: "e1", Source: "kubernetes"}}, AgentBudget: &domain.AgentBudgetState{}}}
-	budget := safety.NewBudgetController(state.Incident.AgentBudget, map[string]domain.AgentBudget{DiagnosisAgentName: {MaxIterations: 5, MaxToolUses: 5, MaxToolCost: 10, MaxTokens: 10000, MaxCorrections: 2}}, domain.AgentBudget{MaxToolUses: 5, MaxToolCost: 10, MaxTokens: 10000}, map[string]int{"submit_hypotheses": 1, "escalate_diagnosis": 1})
+	budget := safety.NewBudgetController(state.Incident.AgentBudget, map[string]domain.AgentBudget{DiagnosisAgentName: {MaxIterations: 5, MaxToolUses: 5, MaxTokens: 10000, MaxCorrections: 2}}, map[string]int{"submit_hypotheses": 1, "escalate_diagnosis": 1})
 	runtime := &constrainedRuntime{state: state, budgets: budget, done: map[string]bool{}, hypotheses: safety.NewHypothesisTransitionService(&state.DiagnosisLedger, nil)}
 	runCtx := withConstrainedRuntime(ctx, runtime)
-	submit, err := toolutils.InferTool("submit_hypotheses", "Submit hypotheses for verification.", func(callCtx context.Context, input HypothesisSubmission) (constrainedToolOutput, error) {
+	submit, err := captools.NewCapability("submit_hypotheses", "Submit hypotheses for verification.", func(callCtx context.Context, input HypothesisSubmission) (constrainedToolOutput, error) {
 		return recordHypotheses(callCtx, input)
-	})
+	}, constrainedRegistration(captools.CategoryDecision, captools.NodeDiagnosisReact))
 	if err != nil {
 		t.Fatal(err)
 	}
-	escalate, err := toolutils.InferTool("escalate_diagnosis", "Escalate when the specialist cannot proceed.", func(callCtx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	escalate, err := captools.NewCapability("escalate_diagnosis", "Escalate when the specialist cannot proceed.", func(callCtx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		runtime, runtimeErr := runtimeFromContext(callCtx)
 		if runtimeErr != nil {
 			return constrainedToolOutput{}, runtimeErr
 		}
 		runtime.markDone(DiagnosisAgentName)
 		return constrainedToolOutput{OK: true}, nil
-	})
+	}, constrainedRegistration(captools.CategoryDecision, captools.NodeDiagnosisReact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilityRegistry := captools.NewRegistry()
+	if err = capabilityRegistry.RegisterAll(ctx, submit, escalate); err != nil {
+		t.Fatal(err)
+	}
+	toolsNodeConfig, err := capabilityRegistry.ToolsNodeConfig(captools.NodeDiagnosisReact, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	modelClient := &reflectingDiagnosisModel{}
 	middleware := newConstrainedAgentMiddleware(DiagnosisAgentName, agentSkill{Content: "# Mission\n# Boundaries\n# Decision criteria\n# Output"}, "escalate_diagnosis")
-	specialist, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: DiagnosisAgentName, Model: modelClient, MaxIterations: 5, ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{submit, escalate}, ExecuteSequentially: true}}, Handlers: []adk.ChatModelAgentMiddleware{middleware}})
+	specialist, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: DiagnosisAgentName, Model: modelClient, MaxIterations: 5, ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: toolsNodeConfig}, Handlers: []adk.ChatModelAgentMiddleware{middleware}})
 	if err != nil {
 		t.Fatal(err)
 	}

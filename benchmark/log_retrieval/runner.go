@@ -11,11 +11,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
-	"strings"
 	"time"
-	"unicode"
 
 	"github.com/kubepilot-aiops/kubepilot/benchmark/datasets"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
@@ -89,7 +86,7 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		if len(found) == 0 {
 			found = entries[query.Service+"\x00"+query.Namespace]
 		}
-		ranked := rank(query.Text, found)
+		ranked := retrieval.RankLogTemplates(query.Text, found)
 		observations = append(observations, Observation{QueryID: query.ID, RankedTemplateIDs: ranked, Latency: time.Since(startedQuery)})
 		if cfg.Progress != nil && (i == len(queries)-1 || (i+1)%25 == 0) {
 			cfg.Progress("query", i+1, len(queries))
@@ -200,60 +197,6 @@ func ingest(ctx context.Context, cfg Config) (map[string][]tools.LokiEntry, int,
 	return entries, len(clusters), len(templates), nil
 }
 
-func rank(text string, entries []tools.LokiEntry) []string {
-	q := tokens(text)
-	scores := map[string]float64{}
-	for _, entry := range entries {
-		id := entry.Labels["template_id"]
-		if id == "" {
-			continue
-		}
-		overlap := 0.0
-		for token := range q {
-			if tokens(entry.Line)[token] {
-				overlap++
-			}
-		}
-		score := overlap / float64(maxInt(1, len(q)))
-		if score > scores[id] {
-			scores[id] = score
-		}
-	}
-	type item struct {
-		id    string
-		score float64
-	}
-	items := make([]item, 0, len(scores))
-	for id, score := range scores {
-		items = append(items, item{id, score})
-	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].score == items[j].score {
-			return items[i].id < items[j].id
-		}
-		return items[i].score > items[j].score
-	})
-	out := make([]string, len(items))
-	for i := range items {
-		out[i] = items[i].id
-	}
-	return out
-}
-func tokens(s string) map[string]bool {
-	out := map[string]bool{}
-	for _, t := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
-		if len(t) >= 3 {
-			out[t] = true
-		}
-	}
-	return out
-}
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
 func stats(parser retrieval.Parser) retrieval.ParserStats {
 	if p, ok := parser.(retrieval.ParserStatsProvider); ok {
 		return p.Stats()

@@ -43,6 +43,12 @@ func (m *MilvusStore) Ensure(ctx context.Context) error {
 	return m.call(ctx, "/v2/vectordb/collections/create", map[string]any{"collectionName": m.collection, "dimension": m.dim, "metricType": "COSINE"}, nil)
 }
 
+// Drop removes this explicitly named collection. It is an administrative
+// lifecycle operation and is not registered as an Agent capability.
+func (m *MilvusStore) Drop(ctx context.Context) error {
+	return m.call(ctx, "/v2/vectordb/collections/drop", map[string]any{"collectionName": m.collection}, nil)
+}
+
 func (m *MilvusStore) Upsert(ctx context.Context, docs []Document) error {
 	if len(docs) == 0 {
 		return nil

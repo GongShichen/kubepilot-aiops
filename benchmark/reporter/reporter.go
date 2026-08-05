@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	artifactlayout "github.com/kubepilot-aiops/kubepilot/benchmark/artifactlayout"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scorer"
+	artifactlayout "github.com/kubepilot-aiops/kubepilot/internal/artifacts"
 )
 
 type Manifest struct {
@@ -43,12 +43,8 @@ type Manifest struct {
 	FinishedAt          time.Time `json:"finished_at,omitempty"`
 }
 
-func WriteManifest(root string, manifest Manifest) error {
-	return WriteManifestDir(artifactlayout.RunDirectory(root, "diagnosis", manifest.Profile, time.Now().UTC()), manifest)
-}
-
 // WriteManifestDir writes a manifest to an explicitly selected logical run
-// directory. It keeps the legacy WriteManifest wrapper for old readers.
+// directory.
 func WriteManifestDir(dir string, manifest Manifest) error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
@@ -71,6 +67,7 @@ type CaseResult struct {
 	Resource                string        `json:"resource,omitempty"`
 	Confidence              float64       `json:"confidence"`
 	DiagnosisMethod         string        `json:"diagnosis_method,omitempty"`
+	AgentIterations         int           `json:"agent_iterations"`
 	AgentToolUses           int           `json:"agent_tool_uses"`
 	AgentToolCost           int           `json:"agent_tool_cost"`
 	AgentTokens             int           `json:"agent_tokens"`
@@ -114,6 +111,7 @@ type Summary struct {
 	HighConfidenceErrorRate       float64 `json:"high_confidence_error_rate"`
 	CategoryMacroF1               float64 `json:"category_macro_f1"`
 	MeanDurationSeconds           float64 `json:"mean_duration_seconds"`
+	MeanAgentIterations           float64 `json:"mean_agent_iterations"`
 	MeanAgentToolUses             float64 `json:"mean_agent_tool_uses"`
 	MeanAgentToolCost             float64 `json:"mean_agent_tool_cost"`
 	MeanAgentTokens               float64 `json:"mean_agent_tokens"`
@@ -154,7 +152,7 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 	var strict, localized, category, variant, service, resource, decision int
 	var evidencePrecision, evidenceRecall, evidenceGroundedness float64
 	var duration time.Duration
-	var toolUses, toolCost, tokens, corrections, confidenceUpdates int
+	var iterations, toolUses, toolCost, tokens, corrections, confidenceUpdates int
 	var safetyRejections, hypothesisConverged, hypothesisCount, evidenceQueries int
 	var selfCorrectionCases, selfCorrectionSuccesses int
 	var evidenceEfficiency float64
@@ -191,6 +189,7 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 			decision++
 		}
 		duration += item.Duration
+		iterations += item.AgentIterations
 		toolUses += item.AgentToolUses
 		toolCost += item.AgentToolCost
 		tokens += item.AgentTokens
@@ -227,6 +226,7 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 		sum.EvidenceGroundedness = evidenceGroundedness / float64(sum.Total)
 		sum.DecisionAccuracy = float64(decision) / float64(sum.Total)
 		sum.MeanDurationSeconds = duration.Seconds() / float64(sum.Total)
+		sum.MeanAgentIterations = float64(iterations) / float64(sum.Total)
 		sum.MeanAgentToolUses = float64(toolUses) / float64(sum.Total)
 		sum.MeanAgentToolCost = float64(toolCost) / float64(sum.Total)
 		sum.MeanAgentTokens = float64(tokens) / float64(sum.Total)
@@ -277,7 +277,7 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 	if err = os.MkdirAll(filepath.Join(dir, "traces"), 0o750); err != nil {
 		return sum, err
 	}
-	report := fmt.Sprintf("# KubePilot Diagnosis Benchmark Report\n\n- Run: `%s`\n- Profile: `%s`\n- Diagnosis method: `%s`\n- Cases: %d\n- Passed: %d\n- Failed: %d\n- Diagnosis workflow failures: %d\n- Strict Root Cause Accuracy: %.2f%%\n- Root Cause Localization Accuracy: %.2f%%\n- Fault Category Accuracy: %.2f%%\n- Root Cause Variant Accuracy: %.2f%%\n- Category Macro F1: %.2f%%\n- Evidence Precision: %.2f%%\n- Evidence Recall: %.2f%%\n- Evidence Groundedness: %.2f%%\n- Confidence Brier Score: %.4f\n- Confidence ECE: %.4f\n- High-confidence Error Rate: %.2f%%\n- Recovery Decision Accuracy: %.2f%%\n- Mean Agent Tool Uses: %.2f\n- Mean Agent Tool Cost: %.2f\n- Mean Agent Tokens: %.2f\n- Mean Safety Corrections: %.2f\n- Total Safety Rejections: %d\n- Self-correction Success Rate: %.2f%%\n- Hypothesis Convergence Rate: %.2f%%\n- Mean Hypothesis Count: %.2f\n- Mean Evidence Queries: %.2f\n- Mean Evidence Efficiency: %.4f\n- Mean Confidence Updates: %.2f\n- Mean Duration: %.3fs\n\nRoot cause localization requires an exact category, variant, service, and resource match. Strict root cause accuracy additionally requires at least 50%% required-evidence recall. Workflow failures remain in the end-to-end denominator and are reported separately. All values in this report are measured from this run.\n", m.RunID, m.Profile, m.DiagnosisMethod, sum.Total, sum.Passed, sum.Failed, sum.DiagnosisFailures, sum.RootCauseAccuracy*100, sum.RootCauseLocalizationAccuracy*100, sum.CategoryAccuracy*100, sum.VariantAccuracy*100, sum.CategoryMacroF1*100, sum.EvidencePrecision*100, sum.EvidenceRecall*100, sum.EvidenceGroundedness*100, sum.ConfidenceBrierScore, sum.ConfidenceECE, sum.HighConfidenceErrorRate*100, sum.DecisionAccuracy*100, sum.MeanAgentToolUses, sum.MeanAgentToolCost, sum.MeanAgentTokens, sum.MeanAgentCorrections, sum.TotalSafetyRejections, sum.SelfCorrectionSuccessRate*100, sum.HypothesisConvergenceRate*100, sum.MeanHypothesisCount, sum.MeanEvidenceQueries, sum.MeanEvidenceEfficiency, sum.MeanConfidenceUpdates, sum.MeanDurationSeconds)
+	report := fmt.Sprintf("# KubePilot Diagnosis Benchmark Report\n\n- Run: `%s`\n- Profile: `%s`\n- Diagnosis method: `%s`\n- Cases: %d\n- Passed: %d\n- Failed: %d\n- Diagnosis workflow failures: %d\n- Strict Root Cause Accuracy: %.2f%%\n- Root Cause Localization Accuracy: %.2f%%\n- Fault Category Accuracy: %.2f%%\n- Root Cause Variant Accuracy: %.2f%%\n- Category Macro F1: %.2f%%\n- Evidence Precision: %.2f%%\n- Evidence Recall: %.2f%%\n- Evidence Groundedness: %.2f%%\n- Confidence Brier Score: %.4f\n- Confidence ECE: %.4f\n- High-confidence Error Rate: %.2f%%\n- Recovery Decision Accuracy: %.2f%%\n- Mean Agent Iterations: %.2f\n- Mean Agent Tool Uses: %.2f\n- Mean Agent Tool Cost: %.2f\n- Mean Agent Tokens: %.2f\n- Mean Safety Corrections: %.2f\n- Total Safety Rejections: %d\n- Self-correction Success Rate: %.2f%%\n- Hypothesis Convergence Rate: %.2f%%\n- Mean Hypothesis Count: %.2f\n- Mean Evidence Queries: %.2f\n- Mean Evidence Efficiency: %.4f\n- Mean Confidence Updates: %.2f\n- Mean Duration: %.3fs\n\nRoot cause localization requires an exact category, variant, service, and resource match. Strict root cause accuracy additionally requires at least 50%% required-evidence recall. Workflow failures remain in the end-to-end denominator and are reported separately. All values in this report are measured from this run.\n", m.RunID, m.Profile, m.DiagnosisMethod, sum.Total, sum.Passed, sum.Failed, sum.DiagnosisFailures, sum.RootCauseAccuracy*100, sum.RootCauseLocalizationAccuracy*100, sum.CategoryAccuracy*100, sum.VariantAccuracy*100, sum.CategoryMacroF1*100, sum.EvidencePrecision*100, sum.EvidenceRecall*100, sum.EvidenceGroundedness*100, sum.ConfidenceBrierScore, sum.ConfidenceECE, sum.HighConfidenceErrorRate*100, sum.DecisionAccuracy*100, sum.MeanAgentIterations, sum.MeanAgentToolUses, sum.MeanAgentToolCost, sum.MeanAgentTokens, sum.MeanAgentCorrections, sum.TotalSafetyRejections, sum.SelfCorrectionSuccessRate*100, sum.HypothesisConvergenceRate*100, sum.MeanHypothesisCount, sum.MeanEvidenceQueries, sum.MeanEvidenceEfficiency, sum.MeanConfidenceUpdates, sum.MeanDurationSeconds)
 	err = os.WriteFile(filepath.Join(dir, "report.md"), []byte(report), 0o640)
 	return sum, err
 }
@@ -460,9 +460,9 @@ func writeCSV(path string, items []CaseResult) error {
 	defer f.Close()
 	w := csv.NewWriter(f)
 	defer w.Flush()
-	_ = w.Write([]string{"case_id", "incident_id", "diagnosis_method", "category", "predicted_category", "predicted_variant", "status", "case_restarts", "root_cause_correct", "strict_root_cause", "category_correct", "variant_correct", "service_correct", "resource_correct", "decision_correct", "evidence_precision", "evidence_recall", "evidence_groundedness", "confidence", "agent_tool_uses", "agent_tool_cost", "agent_tokens", "agent_corrections", "safety_rejections", "self_correction_attempts", "self_correction_succeeded", "hypothesis_count", "hypothesis_converged", "evidence_queries", "evidence_efficiency", "confidence_updates", "duration_seconds", "error"})
+	_ = w.Write([]string{"case_id", "incident_id", "diagnosis_method", "category", "predicted_category", "predicted_variant", "status", "case_restarts", "root_cause_correct", "strict_root_cause", "category_correct", "variant_correct", "service_correct", "resource_correct", "decision_correct", "evidence_precision", "evidence_recall", "evidence_groundedness", "confidence", "agent_iterations", "agent_tool_uses", "agent_tool_cost", "agent_tokens", "agent_corrections", "safety_rejections", "self_correction_attempts", "self_correction_succeeded", "hypothesis_count", "hypothesis_converged", "evidence_queries", "evidence_efficiency", "confidence_updates", "duration_seconds", "error"})
 	for _, v := range items {
-		_ = w.Write([]string{v.CaseID, v.IncidentID, v.DiagnosisMethod, v.Category, v.RootCauseCategory, v.RootCauseVariant, v.Status, strconv.Itoa(v.CaseRestarts), strconv.FormatBool(v.Score.RootCauseCorrect), strconv.FormatBool(v.Score.StrictRootCause), strconv.FormatBool(v.Score.CategoryCorrect), strconv.FormatBool(v.Score.VariantCorrect), strconv.FormatBool(v.Score.ServiceCorrect), strconv.FormatBool(v.Score.ResourceCorrect), strconv.FormatBool(v.Score.DecisionCorrect), strconv.FormatFloat(v.Score.EvidencePrecision, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceRecall, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceGroundedness, 'f', 4, 64), strconv.FormatFloat(v.Confidence, 'f', 4, 64), strconv.Itoa(v.AgentToolUses), strconv.Itoa(v.AgentToolCost), strconv.Itoa(v.AgentTokens), strconv.Itoa(v.AgentCorrections), strconv.Itoa(v.SafetyRejections), strconv.Itoa(v.SelfCorrectionAttempts), strconv.FormatBool(v.SelfCorrectionSucceeded), strconv.Itoa(v.HypothesisCount), strconv.FormatBool(v.HypothesisConverged), strconv.Itoa(v.EvidenceQueries), strconv.FormatFloat(v.EvidenceEfficiency, 'f', 4, 64), strconv.Itoa(v.ConfidenceUpdates), strconv.FormatFloat(v.Duration.Seconds(), 'f', 3, 64), v.Error})
+		_ = w.Write([]string{v.CaseID, v.IncidentID, v.DiagnosisMethod, v.Category, v.RootCauseCategory, v.RootCauseVariant, v.Status, strconv.Itoa(v.CaseRestarts), strconv.FormatBool(v.Score.RootCauseCorrect), strconv.FormatBool(v.Score.StrictRootCause), strconv.FormatBool(v.Score.CategoryCorrect), strconv.FormatBool(v.Score.VariantCorrect), strconv.FormatBool(v.Score.ServiceCorrect), strconv.FormatBool(v.Score.ResourceCorrect), strconv.FormatBool(v.Score.DecisionCorrect), strconv.FormatFloat(v.Score.EvidencePrecision, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceRecall, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceGroundedness, 'f', 4, 64), strconv.FormatFloat(v.Confidence, 'f', 4, 64), strconv.Itoa(v.AgentIterations), strconv.Itoa(v.AgentToolUses), strconv.Itoa(v.AgentToolCost), strconv.Itoa(v.AgentTokens), strconv.Itoa(v.AgentCorrections), strconv.Itoa(v.SafetyRejections), strconv.Itoa(v.SelfCorrectionAttempts), strconv.FormatBool(v.SelfCorrectionSucceeded), strconv.Itoa(v.HypothesisCount), strconv.FormatBool(v.HypothesisConverged), strconv.Itoa(v.EvidenceQueries), strconv.FormatFloat(v.EvidenceEfficiency, 'f', 4, 64), strconv.Itoa(v.ConfidenceUpdates), strconv.FormatFloat(v.Duration.Seconds(), 'f', 3, 64), v.Error})
 	}
 	return w.Error()
 }

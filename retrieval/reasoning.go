@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
@@ -28,35 +29,79 @@ type HistoricalRetriever struct {
 // after candidate generation.
 type IncidentRetrievalEngine struct {
 	HistoricalRetriever
-	Engine   *reasoning.Engine
 	Reranker reranker.Service
 }
 
 func (h IncidentRetrievalEngine) Search(ctx context.Context, features domain.IncidentFeatures) (reasoning.CandidateLists, []domain.RetrievalCandidate, error) {
+	result, err := h.RunPipeline(ctx, features, DefaultPipelineConfig())
+	if err != nil {
+		return reasoning.CandidateLists{}, nil, err
+	}
+	return result.Sources, result.Final, nil
+}
+
+// IncidentPipelineResult exposes the auditable stages of the one production
+// retrieval pipeline. It is used by runtime telemetry and evaluators alike;
+// no caller is expected to reproduce the stage formulas.
+type IncidentPipelineResult struct {
+	Sources         reasoning.CandidateLists
+	Semantic        []domain.RetrievalCandidate
+	SemanticLexical []domain.RetrievalCandidate
+	Topology        []domain.RetrievalCandidate
+	Causal          []domain.RetrievalCandidate
+	Final           []domain.RetrievalCandidate
+}
+
+// RunPipeline executes the canonical production retrieval implementation and
+// returns immutable snapshots after each stage.
+func (h IncidentRetrievalEngine) RunPipeline(ctx context.Context, features domain.IncidentFeatures, config PipelineConfig) (IncidentPipelineResult, error) {
+	config = normalizePipelineConfig(config)
 	var semantic, lexical []domain.RetrievalCandidate
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() error { var err error; semantic, err = h.Semantic(groupCtx, features, 50); return err })
 	group.Go(func() error { var err error; lexical, err = h.Lexical(groupCtx, features, 50); return err })
 	if err := group.Wait(); err != nil {
-		return reasoning.CandidateLists{}, nil, err
+		return IncidentPipelineResult{}, err
 	}
-	// Topology remains an explicit ReAct capability through Topology(), but it
-	// is not a candidate generator in the production facade.
+	semantic = excludeIncident(semantic, features.IncidentID)
+	lexical = excludeIncident(lexical, features.IncidentID)
 	lists := reasoning.CandidateLists{Semantic: semantic, Lexical: lexical}
-	config := DefaultPipelineConfig()
+	semanticOnly := GenerateCandidates(reasoning.CandidateLists{Semantic: semantic}, config)
 	candidates := GenerateCandidates(lists, config)
-	if h.Engine == nil {
-		return lists, candidates, nil
-	}
+	topology := RerankTopology(features, candidates, config)
 	reasoningCandidates := RerankReasoning(features, candidates, config)
+	final := reasoningCandidates
 	if h.Reranker != nil && h.Reranker.Enabled() {
-		final, err := RerankNeural(ctx, h.Reranker, features, reasoningCandidates, config)
+		var err error
+		final, err = RerankNeural(ctx, h.Reranker, features, reasoningCandidates, config)
 		if err != nil {
-			return lists, nil, err
+			return IncidentPipelineResult{}, err
 		}
-		return lists, final, nil
+	} else if len(final) > config.FinalTopK {
+		final = append([]domain.RetrievalCandidate(nil), final[:config.FinalTopK]...)
 	}
-	return lists, reasoningCandidates, nil
+	return IncidentPipelineResult{
+		Sources: lists, Semantic: cloneCandidates(semanticOnly),
+		SemanticLexical: cloneCandidates(candidates), Topology: cloneCandidates(topology),
+		Causal: cloneCandidates(reasoningCandidates), Final: cloneCandidates(final),
+	}, nil
+}
+
+func excludeIncident(items []domain.RetrievalCandidate, incidentID string) []domain.RetrievalCandidate {
+	if incidentID == "" {
+		return items
+	}
+	out := make([]domain.RetrievalCandidate, 0, len(items))
+	for _, item := range items {
+		if item.IncidentID != incidentID {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func cloneCandidates(items []domain.RetrievalCandidate) []domain.RetrievalCandidate {
+	return append([]domain.RetrievalCandidate(nil), items...)
 }
 
 func (r HistoricalRetriever) Semantic(ctx context.Context, features domain.IncidentFeatures, limit int) ([]domain.RetrievalCandidate, error) {
@@ -67,6 +112,9 @@ func (r HistoricalRetriever) Semantic(ctx context.Context, features domain.Incid
 	vectors, err := r.Embedder.Embed(ctx, []string{query})
 	if err != nil {
 		return nil, err
+	}
+	if len(vectors) != 1 || len(vectors[0]) == 0 {
+		return nil, fmt.Errorf("embedding provider returned %d vectors for one incident query", len(vectors))
 	}
 	docs, err := r.Vectors.Search(ctx, vectors[0], map[string]string{"namespace": features.Namespace}, limit)
 	if err != nil {
@@ -81,7 +129,7 @@ func (r HistoricalRetriever) Semantic(ctx context.Context, features domain.Incid
 		if doc.Service == features.Service {
 			score += .1
 		}
-		out = append(out, domain.RetrievalCandidate{IncidentID: doc.ID, Namespace: doc.Namespace, Service: doc.Service, Category: doc.Category, RootCause: doc.RootCause, Summary: doc.Template, Features: domain.IncidentFeatures{Namespace: doc.Namespace, Service: doc.Service, Terms: strings.Fields(strings.ToLower(doc.Template + " " + doc.RootCause)), TopologyServices: []string{doc.Service}}, SourceScores: map[string]float64{"semantic": score}})
+		out = append(out, domain.RetrievalCandidate{IncidentID: doc.ID, Namespace: doc.Namespace, Service: doc.Service, Category: doc.Category, RootCause: doc.RootCause, Summary: doc.Template, Features: domain.IncidentFeatures{IncidentID: doc.ID, Namespace: doc.Namespace, Service: doc.Service, Terms: strings.Fields(strings.ToLower(doc.Template + " " + doc.RootCause)), TopologyServices: []string{doc.Service}}, SourceScores: map[string]float64{"semantic": score}})
 	}
 	return out, nil
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 )
 
 type ToolCategory string
@@ -15,10 +16,21 @@ type ToolCategory string
 const (
 	CategoryIncident      ToolCategory = "incident"
 	CategoryObservability ToolCategory = "observability"
+	CategoryRetrieval     ToolCategory = "retrieval"
+	CategoryReasoning     ToolCategory = "reasoning"
+	CategoryAgent         ToolCategory = "agent"
 	CategoryDecision      ToolCategory = "decision"
 	CategoryDryRun        ToolCategory = "dry_run"
 	CategoryAction        ToolCategory = "action"
 	CategoryVerification  ToolCategory = "verification"
+)
+
+const (
+	NodeAlertCorrelation = "alert_correlation"
+	NodeDiagnosisReact   = "diagnosis_react"
+	NodeRecoveryReact    = "recovery_react"
+	NodeSupervisorReact  = "supervisor_react"
+	NodeActionExecutor   = "deterministic_action_executor"
 )
 
 type Registration struct {
@@ -31,8 +43,9 @@ type Registration struct {
 }
 
 type registeredTool struct {
-	tool tool.BaseTool
-	meta Registration
+	tool       tool.BaseTool
+	capability Capability
+	meta       Registration
 }
 
 type boundedTool struct {
@@ -65,33 +78,83 @@ type Registry struct {
 
 func NewRegistry() *Registry { return &Registry{items: map[string]registeredTool{}} }
 
-func (r *Registry) Register(ctx context.Context, candidate tool.BaseTool, meta Registration) error {
+func (r *Registry) Register(ctx context.Context, capability Capability) error {
+	return r.RegisterAll(ctx, capability)
+}
+
+func prepareCapability(ctx context.Context, capability Capability) (string, registeredTool, error) {
+	if capability == nil {
+		return "", registeredTool{}, fmt.Errorf("capability is required")
+	}
+	candidate := capability.EinoTool()
+	meta := capability.Registration()
 	if candidate == nil {
-		return fmt.Errorf("tool is required")
+		return "", registeredTool{}, fmt.Errorf("capability Eino tool is required")
 	}
 	info, err := candidate.Info(ctx)
 	if err != nil {
-		return err
+		return "", registeredTool{}, err
 	}
 	if info == nil || info.Name == "" || info.ParamsOneOf == nil {
-		return fmt.Errorf("tool schema and unique name are required")
+		return "", registeredTool{}, fmt.Errorf("tool schema and unique name are required")
 	}
-	if meta.Category == "" || len(meta.AllowedNodes) == 0 || meta.Timeout <= 0 || meta.MaxArgumentBytes <= 0 || meta.MaxOutputBytes <= 0 {
-		return fmt.Errorf("tool %s has incomplete category, allowlist, timeout, or size limits", info.Name)
-	}
-	if meta.Category == CategoryAction && !meta.ApprovalMiddleware {
-		return fmt.Errorf("action tool %s requires approval middleware", info.Name)
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, exists := r.items[info.Name]; exists {
-		return fmt.Errorf("duplicate tool %q", info.Name)
+	if err = validateRegistration(info.Name, meta); err != nil {
+		return "", registeredTool{}, err
 	}
 	invokable, ok := candidate.(tool.InvokableTool)
 	if !ok {
-		return fmt.Errorf("tool %s must be invokable", info.Name)
+		return "", registeredTool{}, fmt.Errorf("tool %s must be invokable", info.Name)
 	}
-	r.items[info.Name] = registeredTool{tool: boundedTool{InvokableTool: invokable, meta: meta}, meta: meta}
+	return info.Name, registeredTool{tool: boundedTool{InvokableTool: invokable, meta: meta}, capability: capability, meta: cloneRegistration(meta)}, nil
+}
+
+func (r *Registry) RegisterAll(ctx context.Context, capabilities ...Capability) error {
+	prepared := make(map[string]registeredTool, len(capabilities))
+	for _, capability := range capabilities {
+		name, item, err := prepareCapability(ctx, capability)
+		if err != nil {
+			return err
+		}
+		if _, exists := prepared[name]; exists {
+			return fmt.Errorf("duplicate tool %q", name)
+		}
+		prepared[name] = item
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name := range prepared {
+		if _, exists := r.items[name]; exists {
+			return fmt.Errorf("duplicate tool %q", name)
+		}
+	}
+	for name, item := range prepared {
+		r.items[name] = item
+	}
+	return nil
+}
+
+func validateRegistration(name string, meta Registration) error {
+	switch meta.Category {
+	case CategoryIncident, CategoryObservability, CategoryRetrieval, CategoryReasoning, CategoryAgent, CategoryDecision, CategoryDryRun, CategoryAction, CategoryVerification:
+	default:
+		return fmt.Errorf("tool %s has unknown category %q", name, meta.Category)
+	}
+	if len(meta.AllowedNodes) == 0 || meta.Timeout <= 0 || meta.MaxArgumentBytes <= 0 || meta.MaxOutputBytes <= 0 {
+		return fmt.Errorf("tool %s has incomplete allowlist, timeout, or size limits", name)
+	}
+	seen := make(map[string]bool, len(meta.AllowedNodes))
+	for _, node := range meta.AllowedNodes {
+		if node == "" {
+			return fmt.Errorf("tool %s has an empty allowed node", name)
+		}
+		if seen[node] {
+			return fmt.Errorf("tool %s repeats allowed node %q", name, node)
+		}
+		seen[node] = true
+	}
+	if meta.Category == CategoryAction && !meta.ApprovalMiddleware {
+		return fmt.Errorf("action tool %s requires approval middleware", name)
+	}
 	return nil
 }
 
@@ -116,4 +179,38 @@ func (r *Registry) ToolsForNode(node string) ([]tool.BaseTool, error) {
 		out = append(out, r.items[name].tool)
 	}
 	return out, nil
+}
+
+// ToolsNodeConfig is the single bridge from KubePilot capabilities to Eino
+// ADK/ToolsNode configuration.
+func (r *Registry) ToolsNodeConfig(node string, executeSequentially bool) (compose.ToolsNodeConfig, error) {
+	items, err := r.ToolsForNode(node)
+	if err != nil {
+		return compose.ToolsNodeConfig{}, err
+	}
+	return compose.ToolsNodeConfig{Tools: items, ExecuteSequentially: executeSequentially}, nil
+}
+
+// InvokableForNode resolves a deterministic capability through the same node
+// allowlist used by Agent ToolsNodes.
+func (r *Registry) InvokableForNode(ctx context.Context, node, name string) (tool.InvokableTool, error) {
+	items, err := r.ToolsForNode(node)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range items {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			return nil, infoErr
+		}
+		if info.Name != name {
+			continue
+		}
+		invokable, ok := candidate.(tool.InvokableTool)
+		if !ok {
+			return nil, fmt.Errorf("capability %s is not invokable", name)
+		}
+		return invokable, nil
+	}
+	return nil, fmt.Errorf("capability %q is not registered for node %q", name, node)
 }

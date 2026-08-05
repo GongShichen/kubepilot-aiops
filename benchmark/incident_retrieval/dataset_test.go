@@ -17,6 +17,35 @@ func TestAgentContextExcludesTruth(t *testing.T) {
 	}
 }
 
+func TestProductionFeaturesExcludeEvaluatorTruth(t *testing.T) {
+	incident := Incident{
+		IncidentID: "i1", Service: "payment", Namespace: "demo",
+		Symptoms: []string{"memory growth"}, RootCause: "secret-root-cause",
+		RelatedIncidents: []string{"secret-related"},
+	}
+	b, err := json.Marshal(incident.Features())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "secret-root-cause") || strings.Contains(string(b), "secret-related") {
+		t.Fatalf("evaluator truth leaked into production features: %s", b)
+	}
+}
+
+func TestDatasetIsolationDoesNotMutateSource(t *testing.T) {
+	original := Dataset{Version: "test", Incidents: []Incident{{
+		IncidentID: "query", Namespace: "demo", Service: "payment",
+		RootCause: "memory leak", RelatedIncidents: []string{"related"},
+	}}}
+	isolated := original.Isolate("run")
+	if original.Incidents[0].IncidentID != "query" || original.Incidents[0].RelatedIncidents[0] != "related" {
+		t.Fatalf("source dataset was mutated: %+v", original)
+	}
+	if isolated.Incidents[0].IncidentID == original.Incidents[0].IncidentID || isolated.Incidents[0].RelatedIncidents[0] == "related" {
+		t.Fatalf("dataset was not isolated: %+v", isolated)
+	}
+}
+
 func TestIncidentRankingMetricsUseRelatedIncidents(t *testing.T) {
 	dataset := Dataset{
 		Version: "incident-retrieval",
