@@ -1,3 +1,7 @@
+// Deprecated: retrievalbench is the legacy mixed log benchmark. New runs
+// must use benchmark/log_retrieval for 500k log/template evaluation and
+// benchmark/incident_retrieval for structured historical incidents. This
+// package remains only for backwards-compatible artifact readers.
 package retrievalbench
 
 import (
@@ -16,7 +20,6 @@ import (
 
 	"github.com/kubepilot-aiops/kubepilot/benchmark/datasets"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
-	rankpolicy "github.com/kubepilot-aiops/kubepilot/internal/reasoning/evidence"
 	rerankerclient "github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
@@ -94,6 +97,8 @@ type Summary struct {
 	NamespaceDistribution       map[string]int `json:"namespace_distribution"`
 	ServiceDistribution         map[string]int `json:"service_distribution"`
 	Metrics                     []Metrics      `json:"metrics"`
+	AblationMetrics             []Metrics      `json:"ablation_metrics,omitempty"`
+	Pipeline                    string         `json:"pipeline,omitempty"`
 }
 
 type Config struct {
@@ -204,14 +209,6 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 
 	results := make([]Result, 0, len(queries)*5)
 	reasoningEngine := reasoning.New(reasoning.DefaultConfig())
-	rankingFile := cfg.RankingPolicyFile
-	if rankingFile == "" {
-		rankingFile = "knowledge/ranking_policy.yaml"
-	}
-	rankingPolicy, err := rankpolicy.LoadPolicy(rankingFile)
-	if err != nil {
-		return Summary{}, err
-	}
 	patternFile := cfg.CausalPatternFile
 	if patternFile == "" {
 		patternFile = "knowledge/causal_patterns.yaml"
@@ -246,7 +243,7 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		}
 		semanticDuration := time.Since(semanticPipelineStarted)
 		queryIncident := &domain.Incident{ID: query.ID, Namespace: query.Namespace, Service: query.Service}
-		queryEvidence := []domain.Evidence{{ID: "query", Source: "loki", Summary: query.Text, Namespace: query.Namespace, Service: query.Service}}
+		queryEvidence := []domain.Evidence{{ID: "query", Source: "loki", Type: "query_observation", Summary: query.Text, Namespace: query.Namespace, Service: query.Service}}
 		causalStarted := time.Now()
 		queryEvidence = reasoningEngine.AnnotateCausalNodes(queryEvidence, seed.Patterns)
 		queryFeatures := reasoningEngine.BuildFeatures(queryIncident, queryEvidence)
@@ -256,45 +253,31 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		lexicalStarted := time.Now()
 		lexicalCandidates := lexicalCandidates(query, docs, loaded.Documents, 50, seed.Patterns, reasoningEngine)
 		lexicalDuration := time.Since(lexicalStarted)
+		pipelineConfig := retrieval.DefaultPipelineConfig()
+		candidateStarted := time.Now()
+		generated := retrieval.GenerateCandidates(reasoning.CandidateLists{Semantic: semanticCandidates, Lexical: lexicalCandidates}, pipelineConfig)
+		candidateDuration := time.Since(candidateStarted)
+		results = append(results, Result{QueryID: query.ID, Strategy: "semantic_lexical", Rank: rankCandidates(query, generated), Latency: candidateDuration + queryEmbeddingShare, BackendLatency: candidateDuration, CandidateCount: len(generated), CorpusCount: len(docs), SemanticLatency: semanticDuration, LexicalLatency: lexicalDuration})
+
 		topologyStarted := time.Now()
-		topologyCandidates := topologyCandidates(query, docs, loaded.Documents, 50, seed.Patterns, reasoningEngine)
+		topologyRanked := retrieval.RerankTopology(queryFeatures, generated, pipelineConfig)
 		topologyDuration := time.Since(topologyStarted)
-		results = append(results, Result{
-			QueryID: query.ID, Strategy: "topology", Rank: rankCandidates(query, topologyCandidates),
-			Latency: topologyDuration + queryEmbeddingShare, BackendLatency: topologyDuration,
-			CandidateCount: len(topologyCandidates), CorpusCount: len(docs), TopologyLatency: topologyDuration,
-		})
-		fusionStarted := time.Now()
-		fused := reasoningEngine.Fuse(reasoning.CandidateLists{Semantic: semanticCandidates, Lexical: lexicalCandidates, Topology: topologyCandidates})
-		fusionDuration := time.Since(fusionStarted)
+		results = append(results, Result{QueryID: query.ID, Strategy: "semantic_lexical_topology", Rank: rankCandidates(query, topologyRanked), Latency: candidateDuration + topologyDuration + queryEmbeddingShare, BackendLatency: candidateDuration + topologyDuration, CandidateCount: len(topologyRanked), CorpusCount: len(docs), SemanticLatency: semanticDuration, LexicalLatency: lexicalDuration, TopologyLatency: topologyDuration, FusionLatency: candidateDuration})
+
 		rerankStarted := time.Now()
-		reranked := reasoningEngine.Rerank(queryFeatures, fused)
+		reranked := retrieval.RerankReasoning(queryFeatures, generated, pipelineConfig)
 		rerankDuration := time.Since(rerankStarted)
 		pipelineDuration := time.Since(pipelineStarted)
-		results = append(results, Result{QueryID: query.ID, Strategy: "causal_hybrid", Rank: rankCandidates(query, reranked), Latency: pipelineDuration + queryEmbeddingShare, BackendLatency: pipelineDuration, CandidateCount: len(fused), CorpusCount: len(docs), SemanticLatency: semanticDuration, LexicalLatency: lexicalDuration, TopologyLatency: topologyDuration, FusionLatency: fusionDuration, RerankLatency: rerankDuration, CausalLatency: causalDuration})
+		results = append(results, Result{QueryID: query.ID, Strategy: "semantic_lexical_topology_causal", Rank: rankCandidates(query, reranked), Latency: pipelineDuration + queryEmbeddingShare, BackendLatency: pipelineDuration, CandidateCount: len(reranked), CorpusCount: len(docs), SemanticLatency: semanticDuration, LexicalLatency: lexicalDuration, TopologyLatency: topologyDuration, FusionLatency: candidateDuration, RerankLatency: rerankDuration, CausalLatency: causalDuration})
 		if cfg.Reranker != nil && cfg.Reranker.Enabled() {
-			documents := make([]string, len(reranked))
-			for index, item := range reranked {
-				documents[index] = item.Summary + " " + item.RootCause
-			}
 			neuralStarted := time.Now()
-			scores, rerankErr := cfg.Reranker.Rerank(ctx, query.Text, documents, len(documents))
+			neuralCandidates, rerankErr := retrieval.RerankNeural(ctx, cfg.Reranker, queryFeatures, reranked, pipelineConfig)
 			if rerankErr != nil {
 				return Summary{}, rerankErr
 			}
 			neuralDuration := time.Since(neuralStarted)
-			neuralCandidates := append([]domain.RetrievalCandidate(nil), reranked...)
-			for _, score := range scores {
-				if score.Index >= 0 && score.Index < len(neuralCandidates) {
-					neuralCandidates[score.Index].Rank.NeuralSimilarity = score.Score
-					neuralCandidates[score.Index].Rank.NeuralRanked = true
-				}
-			}
-			policyStarted := time.Now()
-			neuralCandidates = rankpolicy.RankCandidates(rankingPolicy, neuralCandidates)
-			policyDuration := time.Since(policyStarted)
-			neuralPipelineDuration := pipelineDuration + neuralDuration + policyDuration
-			results = append(results, Result{QueryID: query.ID, Strategy: "neural_causal_hybrid", Rank: rankCandidates(query, neuralCandidates), Latency: neuralPipelineDuration + queryEmbeddingShare, BackendLatency: neuralPipelineDuration, CandidateCount: len(fused), CorpusCount: len(docs), SemanticLatency: semanticDuration, LexicalLatency: lexicalDuration, TopologyLatency: topologyDuration, FusionLatency: fusionDuration, RerankLatency: rerankDuration + neuralDuration + policyDuration, CausalLatency: causalDuration})
+			neuralPipelineDuration := pipelineDuration + neuralDuration
+			results = append(results, Result{QueryID: query.ID, Strategy: "full_neural", Rank: rankCandidates(query, neuralCandidates), Latency: neuralPipelineDuration + queryEmbeddingShare, BackendLatency: neuralPipelineDuration, CandidateCount: len(neuralCandidates), CorpusCount: len(docs), SemanticLatency: semanticDuration, LexicalLatency: lexicalDuration, TopologyLatency: topologyDuration, FusionLatency: candidateDuration, RerankLatency: rerankDuration + neuralDuration, CausalLatency: causalDuration})
 		}
 
 		semanticStarted := time.Now()
@@ -362,10 +345,30 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		NamespaceDistribution:       loaded.Namespaces,
 		ServiceDistribution:         loaded.Services,
 		Metrics:                     summarize(results),
+		Pipeline:                    "semantic+lexical candidate generation -> topology+causal reasoning rerank -> deterministic fusion -> neural rerank",
 	}
+	summary.AblationMetrics = selectAblationMetrics(summary.Metrics)
 	b, _ := json.MarshalIndent(summary, "", "  ")
 	err = os.WriteFile(cfg.OutputDir+"/summary.json", b, 0o640)
 	return summary, err
+}
+
+func selectAblationMetrics(metrics []Metrics) []Metrics {
+	allowed := map[string]bool{
+		"loki": true, "semantic": true, "hybrid": true,
+		"semantic_lexical": true, "semantic_lexical_topology": true,
+		"semantic_lexical_topology_causal": true, "full_neural": true,
+	}
+	out := make([]Metrics, 0, len(metrics))
+	for _, metric := range metrics {
+		if metric.Strategy == "loki" {
+			metric.Strategy = "baseline"
+		}
+		if allowed[metric.Strategy] {
+			out = append(out, metric)
+		}
+	}
+	return out
 }
 
 func load(ctx context.Context, cfg Config) (loadResult, error) {
@@ -664,64 +667,6 @@ func lexicalCandidates(query Query, docs []retrieval.Document, records map[strin
 		selected = append(selected, item.doc)
 	}
 	return documentsToCandidates(selected, records, "lexical", patterns, engine)
-}
-func topologyCandidates(query Query, docs []retrieval.Document, records map[string]datasets.LogRecord, limit int, patterns []domain.CausalPattern, engine *reasoning.Engine) []domain.RetrievalCandidate {
-	queryTopology := append([]string{query.Service}, reasoning.InferTopologyServices(query.Text)...)
-	type scored struct {
-		doc   retrieval.Document
-		score float64
-	}
-	items := make([]scored, 0, len(docs))
-	for _, doc := range docs {
-		if doc.Namespace != query.Namespace {
-			continue
-		}
-		candidateTopology := append([]string{doc.Service}, reasoning.InferTopologyServices(records[doc.ID].Message)...)
-		score := stringJaccard(queryTopology, candidateTopology)
-		if doc.Service == query.Service {
-			score += .15
-		}
-		if score > 0 {
-			items = append(items, scored{doc: doc, score: score})
-		}
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].score == items[j].score {
-			return items[i].doc.ID < items[j].doc.ID
-		}
-		return items[i].score > items[j].score
-	})
-	if len(items) > limit {
-		items = items[:limit]
-	}
-	selected := make([]retrieval.Document, 0, len(items))
-	for _, item := range items {
-		item.doc.Score = item.score
-		selected = append(selected, item.doc)
-	}
-	return documentsToCandidates(selected, records, "topology", patterns, engine)
-}
-
-func stringJaccard(left, right []string) float64 {
-	a, b := map[string]bool{}, map[string]bool{}
-	for _, value := range left {
-		a[value] = true
-	}
-	for _, value := range right {
-		b[value] = true
-	}
-	intersection, union := 0, len(a)
-	for value := range b {
-		if a[value] {
-			intersection++
-		} else {
-			union++
-		}
-	}
-	if union == 0 {
-		return 0
-	}
-	return float64(intersection) / float64(union)
 }
 func rankCandidates(query Query, candidates []domain.RetrievalCandidate) int {
 	for i, item := range candidates {

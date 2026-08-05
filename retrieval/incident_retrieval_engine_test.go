@@ -11,7 +11,10 @@ import (
 type engineKnowledge struct{}
 
 func (engineKnowledge) SearchLexicalIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error) {
-	return []domain.RetrievalCandidate{{IncidentID: "lexical", Namespace: "kubepilot-demo", Service: "order-service", Features: domain.IncidentFeatures{TopologyServices: []string{"mysql"}}, SourceScores: map[string]float64{"lexical": .9}}}, nil
+	return []domain.RetrievalCandidate{
+		{IncidentID: "lexical", Namespace: "kubepilot-demo", Service: "order-service", Features: domain.IncidentFeatures{TopologyServices: []string{"mysql"}}, SourceScores: map[string]float64{"lexical": .9}},
+		{IncidentID: "shared-db", Namespace: "kubepilot-demo", Service: "order-service", Features: domain.IncidentFeatures{TopologyServices: []string{"mysql"}}, SourceScores: map[string]float64{"lexical": .8}},
+	}, nil
 }
 func (engineKnowledge) SearchTopologyIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error) {
 	return []domain.RetrievalCandidate{{IncidentID: "shared-db", Namespace: "kubepilot-demo", Service: "order-service", Features: domain.IncidentFeatures{TopologyServices: []string{"mysql"}}, SourceScores: map[string]float64{"topology": .95}}}, nil
@@ -40,8 +43,8 @@ func TestIncidentRetrievalEngineRunsThreeSourcesAndBoundsCanonicalResult(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lists.Semantic) != 1 || len(lists.Lexical) != 1 || len(lists.Topology) != 1 {
-		t.Fatalf("three retrieval sources were not invoked: %+v", lists)
+	if len(lists.Semantic) != 1 || len(lists.Lexical) != 2 || len(lists.Topology) != 0 {
+		t.Fatalf("canonical facade should generate from semantic and lexical only: %+v", lists)
 	}
 	if len(ranked) == 0 || len(ranked) > 5 {
 		t.Fatalf("canonical engine did not return bounded reranked results: %d", len(ranked))

@@ -86,7 +86,7 @@ CHAT_BASE_URL=https://...
 CHAT_API_PATH=/chat/completions       # Anthropic 使用 /v1/messages
 CHAT_API_KEY=...
 CHAT_MODEL=...
-CHAT_MAX_RETRIES=1                    # 临时传输错误、429、5xx 最多重试一次
+CHAT_MAX_RETRIES=3                    # 每个模型请求最多重试三次
 CHAT_REASONING_EFFORT=low             # reasoning 模型可选
 CONFIG_RELOAD_INTERVAL=2s             # 无需重启 Agent，轮询挂载的 .env
 CONFIG_RELOAD_RETRY_INTERVAL=30s      # 候选模型探测失败后的重试间隔
@@ -106,7 +106,7 @@ RERANKER_MODEL=<your-reranker-model>
 MODEL_EVIDENCE_MAX_ITEMS=12
 MODEL_CONTEXT_MAX_BYTES=32768
 SUPERVISOR_MAX_TOOL_USES=8
-DIAGNOSIS_MAX_TOOL_USES=15
+DIAGNOSIS_MAX_TOOL_USES=24
 RECOVERY_MAX_TOOL_USES=10
 INCIDENT_MAX_AGENT_TOOL_USES=30
 CAUSAL_LEARNING_NAMESPACES=kubepilot-demo
@@ -197,14 +197,14 @@ curl -X POST http://localhost:8080/api/v1/incidents \
 
 ### Autonomous Incident Benchmark
 
-除现有的真实故障注入档位外，仓库新增了隔离的评测框架，代码位于 `benchmark/component`、`benchmark/reasoning`、`benchmark/agent`、`benchmark/incident`、`benchmark/evolution`、`benchmark/evaluator` 和 `benchmark/reports`。它通过公开 Incident API 测量从输入、诊断、Proposal、审批、执行、验证到知识演化的完整生命周期，不导入 Agent Runtime。`benchmark/manifests/v2.yaml` 保存可复现实验契约。
+除现有的真实故障注入档位外，仓库新增了隔离的评测框架，代码位于 `benchmark/diagnosis`、`benchmark/incident_retrieval`、`benchmark/agent`、`benchmark/evolution`、`benchmark/evaluator` 和 `benchmark/reports`。它通过公开 Incident API 测量从输入、诊断、Proposal、审批、执行、验证到知识演化的完整生命周期，不导入 Agent Runtime。`benchmark/manifests/autonomous.yaml` 保存可复现实验契约。
 
 评测器将期望根因、证据、恢复动作和因果路径保留在 Agent 上下文之外。Incident Harness 只向公开 Agent 接口发送观测数据；可选的知识演化接收器也只接收已观测到的 RESOLVED 结果。`benchmark/isolation` 提供隔离测试，并统一计算 Recall@K、Precision@K、MRR、NDCG、Hypothesis、Tool Efficiency、自动修正、恢复安全、验证成功、MTTD/MTTR、Topology 和因果演化指标。
 
 只校验契约而不启动线上 Benchmark：
 
 ```bash
-go run ./cmd/benchmark validate-v2
+go run ./cmd/benchmark environment
 ```
 
 正式全量运行仍需显式使用现有 `make benchmark-*` 命令；生成的报告和运行日志不会进入源码目录或版本库。
@@ -230,9 +230,9 @@ make benchmark-validate
 ```bash
 make benchmark-smoke       # 5 个 case
 make benchmark-standard    # 全部 100 个 case，串行且相互隔离
-make benchmark-diagnosis-compare # LLM-only、Vector-RAG、完整 KubePilot 各运行 100 个 case
 make benchmark-correlation # 通过真实 Agent webhook 发送 100 组 ground-truth 告警
-make benchmark-retrieval   # 通过 Loki、Drain3、Embedding、Milvus 处理 500,000 条日志
+make benchmark-log-retrieval      # 仅通过 Loki 和 Drain3 处理 500,000 条日志
+make benchmark-incident-retrieval # 结构化历史 Incident 排序
 make benchmark-full
 ```
 
@@ -251,7 +251,7 @@ Kubernetes Injector 只能执行编译进 Runner 的动作类型，拒绝操作 
 
 每次运行会在 `artifacts/benchmark/<run-id>/` 下生成 manifest、case JSONL、summary JSON、CSV 表格和 Markdown 报告。Manifest 包含场景 hash、模型协议/名称、endpoint hash、seed 和配置 hash，但不包含凭据。`artifacts/` 中的运行报告和日志不会提交到版本库。
 
-指标包括严格根因准确率、category/service/resource 准确率、Evidence Recall、恢复决策准确率、Tool Count/Cost 与 Correction 使用量、Confidence History、诊断/恢复延迟、告警分组 Precision/Recall/F1、Retrieval Recall@K/MRR 和 P50/P95/P99。Retrieval 报告 `loki`、`semantic`、`hybrid` 和 `causal_hybrid`；配置真实 Reranker 后额外报告 `neural_causal_hybrid`，并记录 lexical、topology、fusion、确定性/神经 rerank 与 causal 阶段延迟。正式报告只使用实际测量结果。
+指标包括严格根因准确率、category/service/resource 准确率、Evidence Recall、恢复决策准确率、Tool Count/Cost 与 Correction 使用量、Confidence History、诊断/恢复延迟、告警分组 Precision/Recall/F1，以及分离的日志模板和历史 Incident Recall@K/MRR/NDCG 与 P50/P95/P99。正式报告只使用实际测量结果。
 
 Diagnosis 对比在相同 Kubernetes 故障场景上评估三种方法：`llm-only` 只接收 Incident metadata；`vector-rag` 接收 Incident metadata 和历史 Incident；`kubepilot` 收集 Metric、Log、Trace、Kubernetes 和历史证据。根因定位要求 category、21 种 canonical variant 之一、service 和 resource 完全匹配；严格准确率还要求 required-evidence recall 至少为 50%。报告包含分类 Precision/Recall/F1、混淆矩阵、Evidence Precision/Recall/Groundedness、Brier Score、ECE、高置信错误率和十档置信度校准。
 

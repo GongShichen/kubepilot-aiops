@@ -1,0 +1,17 @@
+version: log-retrieval
+generator:
+  records: 500000
+  seed: 20260803
+  normal_ratio: 0.80
+  interference_ratio: 0.04
+  target_fault_ratio: 0.16
+  ground_truth: drain3_template_id
+allowed_features:
+  - loki_metadata
+  - drain3_template
+  - lexical_match
+  - embedding_similarity
+forbidden_features:
+  - topology_graph
+  - causal_pattern
+  - root_cause

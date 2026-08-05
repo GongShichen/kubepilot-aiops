@@ -181,7 +181,7 @@ func (fixedHistoricalRetriever) Semantic(_ context.Context, f domain.IncidentFea
 	return []domain.RetrievalCandidate{{IncidentID: "history-1", Namespace: f.Namespace, Service: f.Service, Resource: f.Resource, Category: "cpu", RootCause: "CPU saturation", Features: domain.IncidentFeatures{Namespace: f.Namespace, Service: f.Service, Resource: f.Resource, Terms: f.Terms, TopologyServices: f.TopologyServices}}}, nil
 }
 func (fixedHistoricalRetriever) Lexical(_ context.Context, _ domain.IncidentFeatures, _ int) ([]domain.RetrievalCandidate, error) {
-	return []domain.RetrievalCandidate{}, nil
+	return []domain.RetrievalCandidate{{IncidentID: "history-1", Category: "cpu", RootCause: "CPU saturation", SourceScores: map[string]float64{"lexical": .8}}}, nil
 }
 func (fixedHistoricalRetriever) Topology(_ context.Context, f domain.IncidentFeatures, _ int) ([]domain.RetrievalCandidate, error) {
 	return []domain.RetrievalCandidate{{IncidentID: "history-1", Namespace: f.Namespace, Service: f.Service, Resource: f.Resource, Category: "cpu", RootCause: "CPU saturation", Features: domain.IncidentFeatures{Namespace: f.Namespace, Service: f.Service, Resource: f.Resource, Terms: f.Terms, TopologyServices: f.TopologyServices}}}, nil

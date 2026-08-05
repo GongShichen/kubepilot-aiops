@@ -17,31 +17,70 @@ type HTTPClient struct {
 	BaseURL, Token  string
 	DiagnosisMethod string
 	HTTP            *http.Client
+	MaxRetries      int
 }
 
 func NewHTTPClient(base, token string) *HTTPClient {
-	return &HTTPClient{BaseURL: strings.TrimRight(base, "/"), Token: token, HTTP: &http.Client{Timeout: 30 * time.Second}}
+	return &HTTPClient{BaseURL: strings.TrimRight(base, "/"), Token: token, HTTP: &http.Client{Timeout: 30 * time.Second}, MaxRetries: 3}
 }
 func (c *HTTPClient) do(ctx context.Context, method, path string, body any, out any) error {
 	var b []byte
 	if body != nil {
-		b, _ = json.Marshal(body)
+		var err error
+		b, err = json.Marshal(body)
+		if err != nil {
+			return err
+		}
 	}
-	req, _ := http.NewRequestWithContext(ctx, method, c.BaseURL+path, bytes.NewReader(b))
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Content-Type", "application/json")
+	maxRetries := c.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+	idempotencyKey := ""
 	if method == http.MethodPost {
-		req.Header.Set("Idempotency-Key", fmt.Sprintf("bench-%d", time.Now().UnixNano()))
+		// The same key is reused for every retry so a timed-out create/approve
+		// request cannot create duplicate side effects.
+		idempotencyKey = fmt.Sprintf("bench-%d", time.Now().UnixNano())
 	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return err
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, bytes.NewReader(b))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("Content-Type", "application/json")
+		if idempotencyKey != "" {
+			req.Header.Set("Idempotency-Key", idempotencyKey)
+		}
+		resp, requestErr := c.HTTP.Do(req)
+		if requestErr == nil {
+			if resp.StatusCode/100 == 2 {
+				decodeErr := json.NewDecoder(resp.Body).Decode(out)
+				resp.Body.Close()
+				if decodeErr == nil {
+					return nil
+				}
+				lastErr = decodeErr
+			} else {
+				lastErr = fmt.Errorf("agent status %d", resp.StatusCode)
+				resp.Body.Close()
+			}
+		} else {
+			lastErr = requestErr
+		}
+		if ctx.Err() != nil || attempt == maxRetries {
+			break
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("agent status %d", resp.StatusCode)
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return fmt.Errorf("agent request failed after %d attempts: %w", maxRetries+1, lastErr)
 }
 func (c *HTTPClient) Create(ctx context.Context, s scenarios.Scenario) (*domain.Incident, error) {
 	body := map[string]any{"severity": "critical", "service": s.Service, "namespace": s.Namespace, "resource": s.Target, "summary": "Service degradation detected during an isolated observation window; determine the root cause from collected evidence.", "diagnosis_method": c.DiagnosisMethod, "evidence_start_at": time.Now().UTC().Add(-40 * time.Second)}

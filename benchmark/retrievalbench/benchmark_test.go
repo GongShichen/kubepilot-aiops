@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kubepilot-aiops/kubepilot/benchmark/datasets"
+	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
 	"github.com/kubepilot-aiops/kubepilot/tools"
@@ -100,18 +100,14 @@ func TestLokiQueryWindowUsesIngestionTimeNotCurrentWallClock(t *testing.T) {
 	}
 }
 
-func TestTopologyCandidatesAllowSharedDependencyAcrossServices(t *testing.T) {
-	docs := []retrieval.Document{{ID: "payment", Namespace: "n", Service: "payment-service"}, {ID: "gateway", Namespace: "n", Service: "gateway-service"}}
-	records := map[string]datasets.LogRecord{
-		"payment": {Namespace: "n", Service: "payment-service", Message: "mysql connection refused"},
-		"gateway": {Namespace: "n", Service: "gateway-service", Message: "request completed"},
-	}
-	items := topologyCandidates(Query{Namespace: "n", Service: "order-service", Text: "downstream mysql timeout"}, docs, records, 50, nil, reasoning.New(reasoning.DefaultConfig()))
-	found := false
-	for _, item := range items {
-		found = found || item.Service == "payment-service"
-	}
-	if !found {
-		t.Fatalf("shared MySQL dependency did not recall cross-service history: %#v", items)
+func TestTopologyRerankKeepsCrossServiceSharedDependencyCandidate(t *testing.T) {
+	features := domain.IncidentFeatures{Namespace: "n", Service: "order-service", TopologyServices: []string{"mysql"}}
+	generated := retrieval.GenerateCandidates(reasoning.CandidateLists{
+		Semantic: []domain.RetrievalCandidate{{IncidentID: "payment", Namespace: "n", Service: "payment-service", Features: domain.IncidentFeatures{TopologyServices: []string{"mysql"}}, SourceScores: map[string]float64{"semantic": .8}}},
+		Lexical:  []domain.RetrievalCandidate{{IncidentID: "gateway", Namespace: "n", Service: "gateway-service", Features: domain.IncidentFeatures{TopologyServices: []string{"frontend"}}, SourceScores: map[string]float64{"lexical": .7}}},
+	}, retrieval.DefaultPipelineConfig())
+	items := retrieval.RerankTopology(features, generated, retrieval.DefaultPipelineConfig())
+	if len(items) != 2 || items[0].IncidentID != "payment" {
+		t.Fatalf("topology rerank lost shared dependency or filtered candidates: %#v", items)
 	}
 }

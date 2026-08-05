@@ -50,6 +50,18 @@ func TestRetryServiceProxyStopsOnContextCancellation(t *testing.T) {
 	}
 }
 
+func TestHasReadyServiceEndpointRequiresNamedServicePort(t *testing.T) {
+	service := &corev1.Service{Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: 8080}}}}
+	withoutReady := &corev1.Endpoints{Subsets: []corev1.EndpointSubset{{NotReadyAddresses: []corev1.EndpointAddress{{IP: "10.0.0.2"}}, Ports: []corev1.EndpointPort{{Name: "http", Port: 8080}}}}}
+	if hasReadyServiceEndpoint(service, withoutReady) {
+		t.Fatal("not-ready endpoint was accepted")
+	}
+	ready := &corev1.Endpoints{Subsets: []corev1.EndpointSubset{{Addresses: []corev1.EndpointAddress{{IP: "10.0.0.2"}}, Ports: []corev1.EndpointPort{{Name: "http", Port: 8080}}}}}
+	if !hasReadyServiceEndpoint(service, ready) {
+		t.Fatal("ready named endpoint was not accepted")
+	}
+}
+
 func TestReplaceUnreadyPodsResetsCrashLoopBackoff(t *testing.T) {
 	ready := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "ready", Namespace: "kubepilot-benchmark", Labels: map[string]string{"app": "gateway-service"}},

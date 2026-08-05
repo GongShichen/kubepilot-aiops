@@ -1,0 +1,42 @@
+version: resolved-incidents
+incidents:
+  - incident_id: resolved-memory-001
+    status: RESOLVED
+    service: gateway-service
+    namespace: kubepilot-demo
+    causal_path: [memory_growth, oom_killed, pod_restart, error_rate]
+    evidence_sources: [prometheus, kubernetes]
+    topology_path: [gateway-service, mysql]
+    root_cause: memory_leak
+  - incident_id: resolved-memory-002
+    status: RESOLVED
+    service: order-service
+    namespace: kubepilot-demo
+    causal_path: [memory_growth, oom_killed, pod_restart, latency]
+    evidence_sources: [prometheus, kubernetes]
+    topology_path: [order-service, mysql]
+    root_cause: memory_leak
+  - incident_id: resolved-memory-003
+    status: RESOLVED
+    service: payment-service
+    namespace: kubepilot-demo
+    causal_path: [memory_growth, oom_killed, pod_restart]
+    evidence_sources: [prometheus, kubernetes]
+    topology_path: [payment-service, mysql]
+    root_cause: memory_leak
+  - incident_id: resolved-database-001
+    status: RESOLVED
+    service: order-service
+    namespace: kubepilot-demo
+    causal_path: [slow_query, pool_exhaustion, error_rate]
+    evidence_sources: [jaeger, loki]
+    topology_path: [order-service, mysql]
+    root_cause: database_latency
+  - incident_id: resolved-deployment-001
+    status: RESOLVED
+    service: payment-service
+    namespace: kubepilot-demo
+    causal_path: [bad_revision, readiness_failure, unavailable_pod]
+    evidence_sources: [kubernetes, prometheus]
+    topology_path: [payment-service, redis]
+    root_cause: bad_deployment_revision

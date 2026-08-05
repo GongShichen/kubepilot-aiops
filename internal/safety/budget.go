@@ -7,9 +7,12 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
 
-// BudgetController atomically enforces per-agent and per-incident budgets.
-// Rejected calls consume budget because malformed and unsafe attempts are still
-// model decisions that must not be allowed to loop indefinitely.
+// BudgetController atomically enforces each agent's exploration budget. Tool
+// count and cost are intentionally scoped to the agent that requested them;
+// the incident counters are retained for telemetry and the incident token cap
+// remains a separate circuit breaker. Rejected calls consume budget because
+// malformed and unsafe attempts are still model decisions that must not be
+// allowed to loop indefinitely.
 type BudgetController struct {
 	mu             sync.Mutex
 	state          *domain.AgentBudgetState
@@ -68,7 +71,7 @@ func (b *BudgetController) ReserveTools(agent string, names []string) (domain.Ag
 	if count == 0 {
 		return usage, nil
 	}
-	if usage.ToolUses+count > limit.MaxToolUses || usage.ToolCost+totalCost > limit.MaxToolCost || b.state.IncidentUses+count > b.incidentLimits.MaxToolUses || b.state.IncidentCost+totalCost > b.incidentLimits.MaxToolCost {
+	if usage.ToolUses+count > limit.MaxToolUses || usage.ToolCost+totalCost > limit.MaxToolCost {
 		return usage, ErrBudgetExceeded{Agent: agent, Tool: names[0]}
 	}
 	usage.ToolUses += count
@@ -137,10 +140,6 @@ func (b *BudgetController) RemainingTools(agent string) int {
 	limit := b.state.Limits[agent]
 	usage := b.state.Usage[agent]
 	remaining := limit.MaxToolUses - usage.ToolUses
-	global := b.incidentLimits.MaxToolUses - b.state.IncidentUses
-	if global < remaining {
-		remaining = global
-	}
 	if remaining < 0 {
 		return 0
 	}

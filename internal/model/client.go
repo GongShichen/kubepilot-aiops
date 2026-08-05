@@ -46,7 +46,11 @@ type Client interface {
 }
 
 func New(cfg config.ChatConfig) Client {
-	base := baseClient{cfg: cfg, http: &http.Client{Timeout: cfg.Timeout}}
+	// The legacy compatibility client also consumes streaming responses. Keep
+	// the configured timeout on connection/header establishment, while the
+	// caller context controls the lifetime of the streamed body. Using
+	// http.Client.Timeout here would abort a healthy slow stream midway.
+	base := baseClient{cfg: cfg, http: &http.Client{Transport: modelHTTPTransport(cfg.Timeout)}}
 	var inner Client
 	if cfg.Protocol == "anthropic-compatible" {
 		inner = &anthropicClient{base}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
@@ -29,5 +30,32 @@ func TestCreateDoesNotLeakGroundTruth(t *testing.T) {
 	_, err := client.Create(context.Background(), scenarios.Scenario{ID: "cpu-busy_loop-01", Service: "gateway-service", Namespace: "kubepilot-benchmark", Target: "gateway-service", GroundTruth: scenarios.GroundTruth{RootCauseDetail: "uncontrolled CPU busy loop"}})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHTTPClientRetriesEveryRequestThreeTimes(t *testing.T) {
+	var requests atomic.Int32
+	var firstKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if firstKey == "" {
+			firstKey = r.Header.Get("Idempotency-Key")
+		} else if r.Header.Get("Idempotency-Key") != firstKey {
+			t.Fatalf("retry changed idempotency key")
+		}
+		if requests.Add(1) <= 3 {
+			http.Error(w, "temporary", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"incident-1","status":"RECEIVED"}`))
+	}))
+	defer server.Close()
+	client := NewHTTPClient(server.URL, "token")
+	_, err := client.Create(context.Background(), scenarios.Scenario{Service: "gateway-service", Namespace: "kubepilot-benchmark", Target: "gateway-service"})
+	if err != nil {
+		t.Fatalf("request should succeed after retries: %v", err)
+	}
+	if got := requests.Load(); got != 4 {
+		t.Fatalf("requests=%d, want initial request plus three retries", got)
 	}
 }

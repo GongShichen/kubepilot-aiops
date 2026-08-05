@@ -667,10 +667,13 @@ func (e *Engine) Fuse(input CandidateLists) []domain.RetrievalCandidate {
 	retrievalCandidateCount.WithLabelValues("semantic").Observe(float64(len(input.Semantic)))
 	retrievalCandidateCount.WithLabelValues("lexical").Observe(float64(len(input.Lexical)))
 	retrievalCandidateCount.WithLabelValues("topology").Observe(float64(len(input.Topology)))
-	weights := map[string]float64{"semantic": 1, "lexical": 1, "topology": .8}
-	lists := map[string][]domain.RetrievalCandidate{"semantic": input.Semantic, "lexical": input.Lexical, "topology": input.Topology}
+	// Candidate generation is intentionally limited to dense and lexical
+	// recall. Topology is a reasoning feature and is applied by the retrieval
+	// pipeline after this stage; accepting it here would make sparse topology
+	// knowledge a hard recall filter.
+	lists := map[string][]domain.RetrievalCandidate{"semantic": input.Semantic, "lexical": input.Lexical}
 	merged := map[string]domain.RetrievalCandidate{}
-	for _, source := range []string{"semantic", "lexical", "topology"} {
+	for _, source := range []string{"semantic", "lexical"} {
 		list := lists[source]
 		for index, item := range list {
 			if item.IncidentID == "" {
@@ -685,27 +688,32 @@ func (e *Engine) Fuse(input CandidateLists) []domain.RetrievalCandidate {
 				current = mergeCandidate(current, item)
 			}
 			current.SourceRanks[source] = index + 1
-			current.SourceScores[source] = item.SourceScores[source]
-			current.RRFScore += weights[source] / float64(e.config.RRFK+index+1)
+			score := item.SourceScores[source]
+			if score <= 0 {
+				score = 1 / float64(index+1)
+			}
+			if score > 1 {
+				score = 1
+			}
+			current.SourceScores[source] = score
+			if source == "semantic" {
+				current.Rank.SemanticScore = score
+			} else {
+				current.Rank.LexicalScore = score
+			}
 			merged[item.IncidentID] = current
 		}
 	}
 	out := make([]domain.RetrievalCandidate, 0, len(merged))
-	maxRRF := 0.0
 	for _, item := range merged {
-		if item.RRFScore > maxRRF {
-			maxRRF = item.RRFScore
-		}
-	}
-	for _, item := range merged {
-		if maxRRF > 0 {
-			item.Rank.NormalizedRRF = item.RRFScore / maxRRF
-		}
+		item.Rank.DeterministicScore = .6*item.Rank.SemanticScore + .4*item.Rank.LexicalScore
+		item.Rank.FinalScore = item.Rank.DeterministicScore
+		item.RankingReasons = []string{fmt.Sprintf("candidate_generation=0.6*semantic(%.4f)+0.4*lexical(%.4f)", item.Rank.SemanticScore, item.Rank.LexicalScore)}
 		out = append(out, item)
 	}
 	sortCandidates(out)
-	if len(out) > 30 {
-		out = out[:30]
+	if len(out) > 100 {
+		out = out[:100]
 	}
 	retrievalCandidateCount.WithLabelValues("fusion").Observe(float64(len(out)))
 	return out

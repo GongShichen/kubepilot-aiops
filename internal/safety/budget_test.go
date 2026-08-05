@@ -48,3 +48,24 @@ func TestBudgetStateSurvivesControllerRecreation(t *testing.T) {
 		t.Fatalf("resume reset budget usage: %+v", usage)
 	}
 }
+
+func TestToolBudgetIsScopedPerAgent(t *testing.T) {
+	state := &domain.AgentBudgetState{}
+	limits := map[string]domain.AgentBudget{
+		"supervisor": {MaxToolUses: 2, MaxToolCost: 2, MaxTokens: 100},
+		"diagnosis":  {MaxToolUses: 2, MaxToolCost: 2, MaxTokens: 100},
+	}
+	// The incident limit is deliberately smaller than either agent's budget.
+	// It remains observable telemetry, but must not make one agent's tool
+	// reservations consume another agent's exploration budget.
+	controller := NewBudgetController(state, limits, domain.AgentBudget{MaxToolUses: 1, MaxToolCost: 1, MaxTokens: 100}, map[string]int{"lookup": 1})
+	if _, err := controller.ReserveTools("supervisor", []string{"lookup", "lookup"}); err != nil {
+		t.Fatalf("supervisor reservation incorrectly used an incident-wide tool cap: %v", err)
+	}
+	if remaining := controller.RemainingTools("diagnosis"); remaining != 2 {
+		t.Fatalf("diagnosis budget was reduced by supervisor calls: remaining=%d", remaining)
+	}
+	if _, err := controller.ReserveTools("diagnosis", []string{"lookup", "lookup"}); err != nil {
+		t.Fatalf("diagnosis reservation incorrectly used an incident-wide tool cap: %v", err)
+	}
+}

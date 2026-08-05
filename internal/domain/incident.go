@@ -147,6 +147,16 @@ type IncidentFeatures struct {
 }
 
 type RankBreakdown struct {
+	// Stage scores make the historical-incident ranking pipeline auditable.
+	// Semantic and lexical scores are candidate-generation signals; topology
+	// and causal scores are reasoning signals and must not be used as hard
+	// filters.
+	SemanticScore            float64                `json:"semantic_score,omitempty"`
+	LexicalScore             float64                `json:"lexical_score,omitempty"`
+	TopologyScore            float64                `json:"topology_score,omitempty"`
+	CausalScore              float64                `json:"causal_score,omitempty"`
+	MetadataScore            float64                `json:"metadata_score,omitempty"`
+	ReasoningScore           float64                `json:"reasoning_score,omitempty"`
 	NormalizedRRF            float64                `json:"normalized_rrf"`
 	TopologySimilarity       float64                `json:"topology_similarity"`
 	EvidenceFeatureOverlap   float64                `json:"evidence_feature_overlap"`
@@ -162,8 +172,13 @@ type RankBreakdown struct {
 
 type IncidentRankBreakdown struct {
 	IncidentID          string             `json:"incident_id"`
-	DeterministicScore  float64            `json:"deterministic_score"`
+	SemanticScore       float64            `json:"semantic_score"`
+	LexicalScore        float64            `json:"lexical_score"`
 	TopologyScore       float64            `json:"topology_score"`
+	CausalScore         float64            `json:"causal_score"`
+	MetadataScore       float64            `json:"metadata_score"`
+	ReasoningScore      float64            `json:"reasoning_score"`
+	DeterministicScore  float64            `json:"deterministic_score"`
 	NeuralScore         float64            `json:"neural_score,omitempty"`
 	DeterministicWeight float64            `json:"deterministic_weight"`
 	NeuralWeight        float64            `json:"neural_weight"`
@@ -299,9 +314,11 @@ type SafetyFeedback struct {
 }
 
 type AgentBudget struct {
-	MaxIterations  int `json:"max_iterations"`
-	MaxToolUses    int `json:"max_tool_uses"`
-	MaxToolCost    int `json:"max_tool_cost"`
+	MaxIterations int `json:"max_iterations"`
+	MaxToolUses   int `json:"max_tool_uses"`
+	MaxToolCost   int `json:"max_tool_cost"`
+	// MaxTokens is the cumulative generated-token budget for one agent run.
+	// The per-request output cap is supplied separately by the model runtime.
 	MaxTokens      int `json:"max_tokens"`
 	MaxCorrections int `json:"max_corrections"`
 }

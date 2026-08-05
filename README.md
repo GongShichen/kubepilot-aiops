@@ -86,7 +86,7 @@ CHAT_BASE_URL=https://...
 CHAT_API_PATH=/chat/completions       # /v1/messages for Anthropic
 CHAT_API_KEY=...
 CHAT_MODEL=...
-CHAT_MAX_RETRIES=1                    # retry transient transport errors, 429, and 5xx once
+CHAT_MAX_RETRIES=3                    # retry every model request up to three times
 CHAT_REASONING_EFFORT=low            # optional for reasoning models
 CONFIG_RELOAD_INTERVAL=2s            # poll the mounted .env without restarting Agent
 CONFIG_RELOAD_RETRY_INTERVAL=30s     # retry a candidate that failed capability probing
@@ -106,7 +106,7 @@ RERANKER_MODEL=<your-reranker-model>
 MODEL_EVIDENCE_MAX_ITEMS=12
 MODEL_CONTEXT_MAX_BYTES=32768
 SUPERVISOR_MAX_TOOL_USES=8
-DIAGNOSIS_MAX_TOOL_USES=15
+DIAGNOSIS_MAX_TOOL_USES=24
 RECOVERY_MAX_TOOL_USES=10
 INCIDENT_MAX_AGENT_TOOL_USES=30
 CAUSAL_LEARNING_NAMESPACES=kubepilot-demo
@@ -198,14 +198,14 @@ curl -X POST http://localhost:8080/api/v1/incidents \
 
 ### Autonomous Incident Benchmark
 
-In addition to the existing live fault-injection profiles, the repository contains an isolated evaluator framework under `benchmark/component`, `benchmark/reasoning`, `benchmark/agent`, `benchmark/incident`, `benchmark/evolution`, `benchmark/evaluator`, and `benchmark/reports`. It measures the complete public lifecycle—incident input, diagnosis, proposal, approval, execution, verification, and observed knowledge evolution—without importing the Agent runtime. `benchmark/manifests/v2.yaml` records the reproducibility contract.
+In addition to the existing live fault-injection profiles, the repository contains an isolated evaluator framework under `benchmark/diagnosis`, `benchmark/incident_retrieval`, `benchmark/agent`, `benchmark/evolution`, `benchmark/evaluator`, and `benchmark/reports`. It measures the complete public lifecycle—incident input, diagnosis, proposal, approval, execution, verification, and observed knowledge evolution—without importing the Agent runtime. `benchmark/manifests/autonomous.yaml` records the reproducibility contract.
 
 The evaluator keeps expected root cause, evidence, recovery, and causal-path labels outside the Agent payload. The public incident harness accepts only observations, and the optional evolution sink receives observed resolved incidents only. This provides explicit isolation tests in `benchmark/isolation` and deterministic Recall@K, Precision@K, MRR, NDCG, hypothesis, tool-efficiency, correction, recovery-safety, verification, MTTD/MTTR, topology, and causal-evolution metrics.
 
 Validate the contract without starting a live benchmark:
 
 ```bash
-go run ./cmd/benchmark validate-v2
+go run ./cmd/benchmark environment
 ```
 
 Formal full runs remain opt-in and still use the existing `make benchmark-*` commands; no generated report or runtime log is part of the source tree.
@@ -231,9 +231,9 @@ Run profiles:
 ```bash
 make benchmark-smoke       # 5 cases
 make benchmark-standard    # all 100 cases, serial and isolated
-make benchmark-diagnosis-compare # 100 cases each for LLM-only, Vector-RAG, and full KubePilot
 make benchmark-correlation # send 100 ground-truth groups through the live Agent webhook
-make benchmark-retrieval   # load 500,000 logs through Loki, Drain3, embeddings, and Milvus
+make benchmark-log-retrieval      # 500,000 logs through Loki and Drain3 only
+make benchmark-incident-retrieval # structured historical-incident ranking
 make benchmark-full
 ```
 
@@ -252,7 +252,7 @@ The Kubernetes injector only executes compiled action types. It refuses namespac
 
 Each run produces a manifest, case JSONL, summary JSON, CSV tables, and Markdown report under `artifacts/benchmark/<run-id>/`. Manifests include the catalog hash, model protocol/name, endpoint hash, seed, and configuration hashes, but no credentials.
 
-Metrics include strict root-cause accuracy, category/service/resource accuracy, evidence recall, recovery decision accuracy, Tool Count/Cost and correction usage, confidence history, diagnostic/recovery latency, alert grouping precision/recall/F1, retrieval Recall@K/MRR, and P50/P95/P99. Retrieval reports `loki`, `semantic`, `hybrid`, and `causal_hybrid`; when a real reranker is configured it additionally reports `neural_causal_hybrid`, including lexical, topology, fusion, deterministic/neural rerank, and causal-stage latency. Formal reports contain measured results only.
+Metrics include strict root-cause accuracy, category/service/resource accuracy, evidence recall, recovery decision accuracy, Tool Count/Cost and correction usage, confidence history, diagnostic/recovery latency, alert grouping precision/recall/F1, and separate log-template and historical-incident Recall@K/MRR/NDCG with P50/P95/P99. Formal reports contain measured results only.
 
 The diagnosis comparison evaluates three methods against the same injected Kubernetes scenarios: `llm-only` receives only incident metadata, `vector-rag` receives incident metadata plus seeded historical incidents, and `kubepilot` collects Metric, Log, Trace, Kubernetes, and historical evidence. Root-cause localization requires exact category, one of the 21 canonical fault variants, service, and resource matching; strict accuracy additionally requires at least 50% required-evidence recall. Reports include per-category precision/recall/F1, a confusion matrix, evidence precision/recall and groundedness, Brier score, ECE, high-confidence error rate, and ten-bin confidence calibration.
 

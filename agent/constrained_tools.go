@@ -22,6 +22,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/topology"
 	topologyknowledge "github.com/kubepilot-aiops/kubepilot/internal/topology/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
+	retrievalpipeline "github.com/kubepilot-aiops/kubepilot/retrieval"
 	captools "github.com/kubepilot-aiops/kubepilot/tools"
 )
 
@@ -365,7 +366,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		}
 	}
 
-	if err := add("fuse_incident_candidates", "Fuse all currently retrieved candidate sets with weighted reciprocal-rank fusion.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
+	if err := add("fuse_incident_candidates", "Generate a high-recall candidate set from semantic and lexical retrieval; topology is a later soft reranking feature.", func(ctx context.Context, _ emptyToolInput) (constrainedToolOutput, error) {
 		runtime, err := runtimeFromContext(ctx)
 		if err != nil {
 			return constrainedToolOutput{}, err
@@ -373,7 +374,7 @@ func buildConstrainedDiagnosisTools(deps constrainedToolDeps) ([]tool.BaseTool, 
 		runtime.mu.Lock()
 		defer runtime.mu.Unlock()
 		lists := runtime.state.CandidateLists
-		runtime.state.Candidates = deps.Reasoning.Fuse(reasoning.CandidateLists{Semantic: lists["semantic"], Lexical: lists["lexical"], Topology: lists["topology"]})
+		runtime.state.Candidates = retrievalpipeline.GenerateCandidates(reasoning.CandidateLists{Semantic: lists["semantic"], Lexical: lists["lexical"], Topology: lists["topology"]}, retrievalpipeline.DefaultPipelineConfig())
 		return constrainedToolOutput{OK: true, Candidates: compactToolCandidates(runtime.state.Candidates, 10)}, nil
 	}); err != nil {
 		return nil, err
@@ -781,31 +782,14 @@ func rerankCandidates(ctx context.Context, deps constrainedToolDeps) (constraine
 	}
 	runtime.mu.Lock()
 	features := runtime.state.Features
-	items := deps.Reasoning.Rerank(features, runtime.state.Candidates)
-	query := strings.Join(features.Terms, " ")
+	items := retrievalpipeline.RerankReasoning(features, runtime.state.Candidates, retrievalpipeline.DefaultPipelineConfig())
 	runtime.mu.Unlock()
 	if deps.Reranker != nil && deps.Reranker.Enabled() && len(items) > 0 {
-		docs := make([]string, len(items))
-		for i, item := range items {
-			docs[i] = item.Summary + " " + item.RootCause
-		}
-		results, callErr := deps.Reranker.Rerank(ctx, query, docs, len(items))
+		neuralItems, callErr := retrievalpipeline.RerankNeural(ctx, deps.Reranker, features, items, retrievalpipeline.DefaultPipelineConfig())
 		if callErr == nil {
-			for _, r := range results {
-				if r.Index >= 0 && r.Index < len(items) {
-					items[r.Index].Rank.NeuralSimilarity = r.Score
-					items[r.Index].Rank.NeuralRanked = true
-				}
-			}
+			items = neuralItems
 		}
 	}
-	items = rankpolicy.RankCandidates(effectiveRankingPolicy(deps.Policy), items)
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].Rank.FinalScore == items[j].Rank.FinalScore {
-			return items[i].IncidentID < items[j].IncidentID
-		}
-		return items[i].Rank.FinalScore > items[j].Rank.FinalScore
-	})
 	if len(items) > 5 {
 		items = items[:5]
 	}

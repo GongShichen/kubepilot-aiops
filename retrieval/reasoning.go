@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	"github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
 	"golang.org/x/sync/errgroup"
 )
@@ -21,31 +22,41 @@ type HistoricalRetriever struct {
 }
 
 // IncidentRetrievalEngine is the single production historical-retrieval
-// boundary. The
-// individual methods remain available because ReAct tools may choose their
-// own exploration order, while Search performs the canonical three-way
-// retrieval, weighted RRF fusion, and deterministic feature rerank when a
-// caller needs one bounded result.
+// boundary. ReAct tools may still explore topology explicitly, but the
+// canonical Search path keeps semantic and lexical retrieval responsible for
+// recall. Topology and causal signals are soft reranking features applied only
+// after candidate generation.
 type IncidentRetrievalEngine struct {
 	HistoricalRetriever
-	Engine *reasoning.Engine
+	Engine   *reasoning.Engine
+	Reranker reranker.Service
 }
 
 func (h IncidentRetrievalEngine) Search(ctx context.Context, features domain.IncidentFeatures) (reasoning.CandidateLists, []domain.RetrievalCandidate, error) {
-	var semantic, lexical, topology []domain.RetrievalCandidate
+	var semantic, lexical []domain.RetrievalCandidate
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() error { var err error; semantic, err = h.Semantic(groupCtx, features, 50); return err })
 	group.Go(func() error { var err error; lexical, err = h.Lexical(groupCtx, features, 50); return err })
-	group.Go(func() error { var err error; topology, err = h.Topology(groupCtx, features, 50); return err })
 	if err := group.Wait(); err != nil {
 		return reasoning.CandidateLists{}, nil, err
 	}
-	lists := reasoning.CandidateLists{Semantic: semantic, Lexical: lexical, Topology: topology}
+	// Topology remains an explicit ReAct capability through Topology(), but it
+	// is not a candidate generator in the production facade.
+	lists := reasoning.CandidateLists{Semantic: semantic, Lexical: lexical}
+	config := DefaultPipelineConfig()
+	candidates := GenerateCandidates(lists, config)
 	if h.Engine == nil {
-		return lists, append(append(semantic, lexical...), topology...), nil
+		return lists, candidates, nil
 	}
-	fused := h.Engine.Fuse(lists)
-	return lists, h.Engine.Rerank(features, fused), nil
+	reasoningCandidates := RerankReasoning(features, candidates, config)
+	if h.Reranker != nil && h.Reranker.Enabled() {
+		final, err := RerankNeural(ctx, h.Reranker, features, reasoningCandidates, config)
+		if err != nil {
+			return lists, nil, err
+		}
+		return lists, final, nil
+	}
+	return lists, reasoningCandidates, nil
 }
 
 func (r HistoricalRetriever) Semantic(ctx context.Context, features domain.IncidentFeatures, limit int) ([]domain.RetrievalCandidate, error) {

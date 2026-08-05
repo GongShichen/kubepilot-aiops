@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	claudemodel "github.com/cloudwego/eino-ext/components/model/claude"
@@ -24,16 +26,29 @@ func NewEinoChatModel(ctx context.Context, cfg config.ChatConfig) (model.BaseCha
 	if err := config.ValidateChat(cfg); err != nil {
 		return nil, err
 	}
-	transport := apiPathTransport{base: retryTransport{base: http.DefaultTransport, maxRetries: cfg.MaxRetries}, apiPath: joinedAPIPath(cfg.BaseURL, cfg.APIPath)}
-	httpClient := &http.Client{Timeout: cfg.Timeout, Transport: transport}
+	// Chat responses are streamed. http.Client.Timeout covers body reads as
+	// well as connection setup, so a healthy provider that is still emitting
+	// chunks can be aborted midway and surfaced as a misleading request
+	// timeout. Bound header establishment with the configured timeout and let
+	// the caller's workflow context bound the full stream instead.
+	transport := apiPathTransport{base: retryTransport{base: modelHTTPTransport(cfg.Timeout), maxRetries: cfg.MaxRetries}, apiPath: joinedAPIPath(cfg.BaseURL, cfg.APIPath)}
+	httpClient := &http.Client{Transport: transport}
+	streamTimeout := time.Duration(0)
+	if cfg.MaxRetries > 0 {
+		streamTimeout = cfg.Timeout
+	}
 	temperature := float32(cfg.Temperature)
 	switch cfg.Protocol {
 	case "openai-compatible":
 		maxTokens := cfg.MaxTokens
-		return openmodel.NewChatModel(ctx, &openmodel.ChatModelConfig{
+		chat, err := openmodel.NewChatModel(ctx, &openmodel.ChatModelConfig{
 			APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Model, HTTPClient: httpClient,
 			MaxTokens: &maxTokens, Temperature: &temperature,
 		})
+		if err != nil {
+			return nil, err
+		}
+		return requestScopedChatModel{inner: chat, timeout: streamTimeout}, nil
 	case "anthropic-compatible":
 		baseURL := cfg.BaseURL
 		// Claude's decoder starts its decoder goroutine before Stream returns and
@@ -43,15 +58,121 @@ func NewEinoChatModel(ctx context.Context, cfg config.ChatConfig) (model.BaseCha
 		httpClient.Transport = gatedStreamTransport{base: transport}
 		claude, err := claudemodel.NewChatModel(ctx, &claudemodel.Config{
 			APIKey: cfg.APIKey, BaseURL: &baseURL, Model: cfg.Model, MaxTokens: cfg.MaxTokens,
-			Temperature: &temperature, HTTPClient: httpClient, RequestTimeout: cfg.Timeout,
+			Temperature: &temperature, HTTPClient: httpClient,
+			// The workflow context owns the full streamed-response deadline.
+			// Anthropic's RequestTimeout wraps the response body too, which can
+			// terminate a healthy slow stream after the header was received.
+			RequestTimeout: 0,
 		})
 		if err != nil {
 			return nil, err
 		}
-		return gatedClaudeModel{inner: claude}, nil
+		return requestScopedChatModel{inner: gatedClaudeModel{inner: claude}, timeout: streamTimeout}, nil
 	default:
 		return nil, fmt.Errorf("unsupported chat protocol %q", cfg.Protocol)
 	}
+}
+
+// requestScopedChatModel gives every model request a bounded request context.
+// Generate remains bounded by the configured request timeout. Stream uses the
+// same value as an idle timeout: every received chunk resets the timer, so a
+// healthy provider may stream for longer than CHAT_TIMEOUT without being
+// cancelled. This keeps retries available when a stream actually stalls while
+// avoiding a wall-clock limit on a long, continuously-producing response.
+type requestScopedChatModel struct {
+	inner   model.BaseChatModel
+	timeout time.Duration
+}
+
+func (m requestScopedChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	if m.timeout <= 0 {
+		return m.inner.Generate(ctx, input, opts...)
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+	return m.inner.Generate(requestCtx, input, opts...)
+}
+
+func (m requestScopedChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	if m.timeout <= 0 {
+		return m.inner.Stream(ctx, input, opts...)
+	}
+	requestCtx, finish, notify, idleExpired := newIdleStreamContext(ctx, m.timeout)
+	reader, err := m.inner.Stream(requestCtx, input, opts...)
+	if err != nil {
+		finish()
+		return nil, err
+	}
+	return schema.StreamReaderWithConvert(reader, func(chunk *schema.Message) (*schema.Message, error) {
+		notify()
+		return chunk, nil
+	}, schema.WithErrWrapper(func(streamErr error) error {
+		if idleExpired() {
+			streamErr = fmt.Errorf("%w: model stream idle timeout: %v", context.DeadlineExceeded, streamErr)
+		}
+		finish()
+		return streamErr
+	}), schema.WithOnEOF(func() (any, error) {
+		finish()
+		return nil, io.EOF
+	})), nil
+}
+
+// newIdleStreamContext cancels the request only after no stream chunk has
+// arrived for timeout. The timer is deliberately reset from the stream
+// conversion callback, rather than from a wall-clock deadline, so a provider
+// that keeps producing chunks can run indefinitely. The response-header
+// timeout in modelHTTPTransport still bounds a connection that never starts.
+func newIdleStreamContext(parent context.Context, timeout time.Duration) (context.Context, func(), func(), func() bool) {
+	ctx, cancel := context.WithCancel(parent)
+	activity := make(chan struct{}, 1)
+	done := make(chan struct{})
+	var expired atomic.Bool
+	go func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-activity:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(timeout)
+			case <-timer.C:
+				expired.Store(true)
+				cancel()
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	finish := func() {
+		once.Do(func() { cancel() })
+		<-done
+	}
+	notify := func() {
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+	}
+	return ctx, finish, notify, expired.Load
+}
+
+func modelHTTPTransport(timeout time.Duration) http.RoundTripper {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return http.DefaultTransport
+	}
+	transport := base.Clone()
+	transport.ResponseHeaderTimeout = timeout
+	return transport
 }
 
 type streamGateKey struct{}

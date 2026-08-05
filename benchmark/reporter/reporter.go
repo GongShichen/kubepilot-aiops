@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	artifactlayout "github.com/kubepilot-aiops/kubepilot/benchmark/artifactlayout"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scorer"
 )
 
@@ -43,7 +44,12 @@ type Manifest struct {
 }
 
 func WriteManifest(root string, manifest Manifest) error {
-	dir := filepath.Join(root, manifest.RunID)
+	return WriteManifestDir(artifactlayout.RunDirectory(root, "diagnosis", manifest.Profile, time.Now().UTC()), manifest)
+}
+
+// WriteManifestDir writes a manifest to an explicitly selected logical run
+// directory. It keeps the legacy WriteManifest wrapper for old readers.
+func WriteManifestDir(dir string, manifest Manifest) error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
@@ -58,6 +64,7 @@ type CaseResult struct {
 	Score                   scorer.Score  `json:"score"`
 	Duration                time.Duration `json:"duration"`
 	Error                   string        `json:"error,omitempty"`
+	CaseRestarts            int           `json:"case_restarts,omitempty"`
 	RootCauseCategory       string        `json:"root_cause_category,omitempty"`
 	RootCauseVariant        string        `json:"root_cause_variant,omitempty"`
 	Service                 string        `json:"service,omitempty"`
@@ -78,6 +85,14 @@ type CaseResult struct {
 	ConfidenceUpdates       int           `json:"confidence_updates"`
 	AttributedEvidence      int           `json:"attributed_evidence"`
 	TopologyCandidates      int           `json:"topology_candidates"`
+	RecoveryProposed        bool          `json:"recovery_proposed"`
+	ApprovalRequested       bool          `json:"approval_requested"`
+	ApprovalGranted         bool          `json:"approval_granted"`
+	RecoveryExecuted        bool          `json:"recovery_executed"`
+	VerificationOK          bool          `json:"verification_ok"`
+	SafetyBlocked           bool          `json:"safety_blocked"`
+	DryRunSuccess           bool          `json:"dry_run_success"`
+	RecoveryDurationMS      float64       `json:"recovery_duration_ms"`
 }
 type Summary struct {
 	Total                         int     `json:"total"`
@@ -116,7 +131,12 @@ type Summary struct {
 }
 
 func Write(root string, m Manifest, items []CaseResult) (Summary, error) {
-	dir := filepath.Join(root, m.RunID)
+	return WriteDir(artifactlayout.RunDirectory(root, "diagnosis", m.Profile, time.Now().UTC()), m, items)
+}
+
+// WriteDir writes all diagnosis artifacts to an explicitly selected logical
+// run directory. The run ID remains a manifest field, not a filesystem name.
+func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return Summary{}, err
 	}
@@ -440,9 +460,9 @@ func writeCSV(path string, items []CaseResult) error {
 	defer f.Close()
 	w := csv.NewWriter(f)
 	defer w.Flush()
-	_ = w.Write([]string{"case_id", "incident_id", "diagnosis_method", "category", "predicted_category", "predicted_variant", "status", "root_cause_correct", "strict_root_cause", "category_correct", "variant_correct", "service_correct", "resource_correct", "decision_correct", "evidence_precision", "evidence_recall", "evidence_groundedness", "confidence", "agent_tool_uses", "agent_tool_cost", "agent_tokens", "agent_corrections", "safety_rejections", "self_correction_attempts", "self_correction_succeeded", "hypothesis_count", "hypothesis_converged", "evidence_queries", "evidence_efficiency", "confidence_updates", "duration_seconds", "error"})
+	_ = w.Write([]string{"case_id", "incident_id", "diagnosis_method", "category", "predicted_category", "predicted_variant", "status", "case_restarts", "root_cause_correct", "strict_root_cause", "category_correct", "variant_correct", "service_correct", "resource_correct", "decision_correct", "evidence_precision", "evidence_recall", "evidence_groundedness", "confidence", "agent_tool_uses", "agent_tool_cost", "agent_tokens", "agent_corrections", "safety_rejections", "self_correction_attempts", "self_correction_succeeded", "hypothesis_count", "hypothesis_converged", "evidence_queries", "evidence_efficiency", "confidence_updates", "duration_seconds", "error"})
 	for _, v := range items {
-		_ = w.Write([]string{v.CaseID, v.IncidentID, v.DiagnosisMethod, v.Category, v.RootCauseCategory, v.RootCauseVariant, v.Status, strconv.FormatBool(v.Score.RootCauseCorrect), strconv.FormatBool(v.Score.StrictRootCause), strconv.FormatBool(v.Score.CategoryCorrect), strconv.FormatBool(v.Score.VariantCorrect), strconv.FormatBool(v.Score.ServiceCorrect), strconv.FormatBool(v.Score.ResourceCorrect), strconv.FormatBool(v.Score.DecisionCorrect), strconv.FormatFloat(v.Score.EvidencePrecision, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceRecall, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceGroundedness, 'f', 4, 64), strconv.FormatFloat(v.Confidence, 'f', 4, 64), strconv.Itoa(v.AgentToolUses), strconv.Itoa(v.AgentToolCost), strconv.Itoa(v.AgentTokens), strconv.Itoa(v.AgentCorrections), strconv.Itoa(v.SafetyRejections), strconv.Itoa(v.SelfCorrectionAttempts), strconv.FormatBool(v.SelfCorrectionSucceeded), strconv.Itoa(v.HypothesisCount), strconv.FormatBool(v.HypothesisConverged), strconv.Itoa(v.EvidenceQueries), strconv.FormatFloat(v.EvidenceEfficiency, 'f', 4, 64), strconv.Itoa(v.ConfidenceUpdates), strconv.FormatFloat(v.Duration.Seconds(), 'f', 3, 64), v.Error})
+		_ = w.Write([]string{v.CaseID, v.IncidentID, v.DiagnosisMethod, v.Category, v.RootCauseCategory, v.RootCauseVariant, v.Status, strconv.Itoa(v.CaseRestarts), strconv.FormatBool(v.Score.RootCauseCorrect), strconv.FormatBool(v.Score.StrictRootCause), strconv.FormatBool(v.Score.CategoryCorrect), strconv.FormatBool(v.Score.VariantCorrect), strconv.FormatBool(v.Score.ServiceCorrect), strconv.FormatBool(v.Score.ResourceCorrect), strconv.FormatBool(v.Score.DecisionCorrect), strconv.FormatFloat(v.Score.EvidencePrecision, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceRecall, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceGroundedness, 'f', 4, 64), strconv.FormatFloat(v.Confidence, 'f', 4, 64), strconv.Itoa(v.AgentToolUses), strconv.Itoa(v.AgentToolCost), strconv.Itoa(v.AgentTokens), strconv.Itoa(v.AgentCorrections), strconv.Itoa(v.SafetyRejections), strconv.Itoa(v.SelfCorrectionAttempts), strconv.FormatBool(v.SelfCorrectionSucceeded), strconv.Itoa(v.HypothesisCount), strconv.FormatBool(v.HypothesisConverged), strconv.Itoa(v.EvidenceQueries), strconv.FormatFloat(v.EvidenceEfficiency, 'f', 4, 64), strconv.Itoa(v.ConfidenceUpdates), strconv.FormatFloat(v.Duration.Seconds(), 'f', 3, 64), v.Error})
 	}
 	return w.Error()
 }

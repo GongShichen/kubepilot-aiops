@@ -132,10 +132,12 @@ func main() {
 		os.Exit(1)
 	}
 	agents.ConfigureRuntimePolicy(agent.RuntimePolicy{
-		Supervisor: domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Supervisor.MaxIterations, MaxToolUses: cfg.AgentBudgets.Supervisor.MaxToolUses, MaxToolCost: cfg.AgentBudgets.Supervisor.MaxToolCost, MaxTokens: cfg.AgentBudgets.Supervisor.MaxTokens, MaxCorrections: cfg.AgentBudgets.Supervisor.MaxCorrections},
-		Diagnosis:  domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Diagnosis.MaxIterations, MaxToolUses: cfg.AgentBudgets.Diagnosis.MaxToolUses, MaxToolCost: cfg.AgentBudgets.Diagnosis.MaxToolCost, MaxTokens: cfg.AgentBudgets.Diagnosis.MaxTokens, MaxCorrections: cfg.AgentBudgets.Diagnosis.MaxCorrections},
-		Recovery:   domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Recovery.MaxIterations, MaxToolUses: cfg.AgentBudgets.Recovery.MaxToolUses, MaxToolCost: cfg.AgentBudgets.Recovery.MaxToolCost, MaxTokens: cfg.AgentBudgets.Recovery.MaxTokens, MaxCorrections: cfg.AgentBudgets.Recovery.MaxCorrections},
-		Incident:   domain.AgentBudget{MaxToolUses: cfg.AgentBudgets.IncidentUses, MaxToolCost: cfg.AgentBudgets.IncidentCost, MaxTokens: cfg.AgentBudgets.IncidentTokens},
+		Supervisor:       domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Supervisor.MaxIterations, MaxToolUses: cfg.AgentBudgets.Supervisor.MaxToolUses, MaxToolCost: cfg.AgentBudgets.Supervisor.MaxToolCost, MaxTokens: cfg.AgentBudgets.Supervisor.MaxTokens, MaxCorrections: cfg.AgentBudgets.Supervisor.MaxCorrections},
+		Diagnosis:        domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Diagnosis.MaxIterations, MaxToolUses: cfg.AgentBudgets.Diagnosis.MaxToolUses, MaxToolCost: cfg.AgentBudgets.Diagnosis.MaxToolCost, MaxTokens: cfg.AgentBudgets.Diagnosis.MaxTokens, MaxCorrections: cfg.AgentBudgets.Diagnosis.MaxCorrections},
+		Recovery:         domain.AgentBudget{MaxIterations: cfg.AgentBudgets.Recovery.MaxIterations, MaxToolUses: cfg.AgentBudgets.Recovery.MaxToolUses, MaxToolCost: cfg.AgentBudgets.Recovery.MaxToolCost, MaxTokens: cfg.AgentBudgets.Recovery.MaxTokens, MaxCorrections: cfg.AgentBudgets.Recovery.MaxCorrections},
+		Incident:         domain.AgentBudget{MaxToolUses: cfg.AgentBudgets.IncidentUses, MaxToolCost: cfg.AgentBudgets.IncidentCost, MaxTokens: cfg.AgentBudgets.IncidentTokens},
+		RequestMaxTokens: cfg.Chat.MaxTokens,
+		ModelMaxRetries:  cfg.Chat.MaxRetries,
 	})
 	if err = agents.LoadToolCosts(cfg.Reasoning.ToolCostFile); err != nil {
 		slog.Error("load Agent tool-cost policy", "error", err)
@@ -160,6 +162,7 @@ func main() {
 	}
 	var neuralReranker rerankerclient.Service = hotReranker
 	go hotReranker.Run(ctx)
+	historical.Reranker = neuralReranker
 	topologyPatterns := store.NewPostgresTopologyPatternStore(pg)
 	causalPatterns := store.NewPostgresCausalKnowledgeStore(pg)
 	discoveredCandidates := store.NewPostgresCausalCandidateStore(pg)
@@ -172,7 +175,7 @@ func main() {
 		os.Exit(1)
 	}
 	learner := service.CausalLearner{Store: pg, ConfidenceThreshold: cfg.Reasoning.CausalAutoActivateConfidence, Namespaces: cfg.Reasoning.CausalLearningNamespaces, EmbeddingVersion: cfg.Embedding.Model, Embedder: learnerEmbedder, Vectors: learnerVectors, TopologyPatterns: topologyPatterns, CausalPatterns: causalPatterns, Discovery: discoveryEngine, IncidentHistory: pg}
-	manager := &service.IncidentManager{Store: pg, Supervisor: supervisor, Executor: executor, Hub: service.NewHub(), ModelSnapshotter: chat, Checkpoints: checkpointStore, AllowedNamespaces: cfg.AllowedNamespaces, CorrelationFallback: correlator, Learner: learner}
+	manager := &service.IncidentManager{Store: pg, Supervisor: supervisor, Executor: executor, Hub: service.NewHub(), ModelSnapshotter: chat, Checkpoints: checkpointStore, AllowedNamespaces: cfg.AllowedNamespaces, CorrelationFallback: correlator, Learner: learner, WorkflowTimeout: incidentWorkflowTimeout(cfg.Chat.Timeout, cfg.Chat.MaxRetries)}
 	supervisor.SetEventSink(manager.ObserveWorkflowEvent)
 	if err = manager.ReconcileLegacyWorkflows(ctx); err != nil {
 		slog.Error("reconcile legacy workflows", "error", err)
@@ -198,4 +201,18 @@ func main() {
 	shutdownCtx, done := context.WithTimeout(context.Background(), 10*time.Second)
 	defer done()
 	_ = server.Shutdown(shutdownCtx)
+}
+
+func incidentWorkflowTimeout(requestTimeout time.Duration, maxRetries int) time.Duration {
+	if requestTimeout <= 0 {
+		requestTimeout = 60 * time.Second
+	}
+	if maxRetries < 3 {
+		maxRetries = 3
+	}
+	timeout := requestTimeout*time.Duration(maxRetries+1) + time.Minute
+	if timeout < 3*time.Minute {
+		return 3 * time.Minute
+	}
+	return timeout
 }

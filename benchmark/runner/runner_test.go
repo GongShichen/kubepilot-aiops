@@ -53,6 +53,39 @@ func (*timeoutClient) Get(context.Context, string) (*domain.Incident, error) {
 }
 func (*timeoutClient) Approve(context.Context, *domain.Incident) error { return nil }
 
+type restartClient struct {
+	calls int
+}
+
+func (c *restartClient) Create(context.Context, scenarios.Scenario) (*domain.Incident, error) {
+	c.calls++
+	return &domain.Incident{ID: "incident-restart", Status: domain.StatusNeedsAttention, DiagnosisError: "transient request failure after retries"}, nil
+}
+func (c *restartClient) Get(context.Context, string) (*domain.Incident, error) {
+	if c.calls == 1 {
+		return &domain.Incident{ID: "incident-restart", Status: domain.StatusNeedsAttention, DiagnosisError: "transient request failure after retries"}, nil
+	}
+	return &domain.Incident{ID: "incident-restart", Status: domain.StatusNeedsAttention, RootCauseCategory: "cpu", RootCauseVariant: "busy_loop", RootCauseService: "payment-service", RootCauseResource: "payment-service", RootCauseEvidenceIDs: []string{"e1"}, Evidence: []domain.Evidence{{ID: "e1", Kind: "cpu"}}}, nil
+}
+func (*restartClient) Approve(context.Context, *domain.Incident) error { return nil }
+
+func TestRunnerRestartsCaseAfterRequestRetriesExhausted(t *testing.T) {
+	reg := injector.NewRegistry()
+	reg.Register("service_fault", &injector.DryRun{})
+	client := &restartClient{}
+	s := scenarios.Scenario{ID: "restart", Category: "cpu", Variant: "busy_loop", Service: "payment-service", Target: "payment-service", Namespace: "kubepilot-benchmark", Injector: "service_fault", Timeouts: scenarios.Timeouts{FaultVisible: time.Millisecond, Diagnosis: time.Second, Recovery: time.Second}, GroundTruth: scenarios.GroundTruth{RootCauseCategory: "cpu", Service: "payment-service", Resource: "payment-service", RequiredEvidence: []string{"cpu"}}}
+	results := (&Runner{Registry: reg, Client: client, PollInterval: time.Millisecond, MaxCaseRestarts: 1}).Run(context.Background(), []scenarios.Scenario{s})
+	if len(results) != 1 {
+		t.Fatalf("results=%d, want one final case result", len(results))
+	}
+	if results[0].CaseRestarts != 1 {
+		t.Fatalf("case restarts=%d, want 1", results[0].CaseRestarts)
+	}
+	if client.calls != 2 {
+		t.Fatalf("incident creates=%d, want restarted case", client.calls)
+	}
+}
+
 func TestRunnerCleanupUsesFreshContextAfterCaseTimeout(t *testing.T) {
 	reg := injector.NewRegistry()
 	probe := &cleanupContextInjector{}

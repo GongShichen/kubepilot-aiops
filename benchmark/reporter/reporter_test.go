@@ -2,6 +2,8 @@ package reporter
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scorer"
@@ -75,5 +77,18 @@ func TestAgentMetricsAreAggregated(t *testing.T) {
 	}
 	if summary.TotalSafetyRejections != 2 || summary.SelfCorrectionSuccessRate != 1 || summary.HypothesisConvergenceRate != .5 || summary.MeanHypothesisCount != 1.5 || summary.MeanEvidenceEfficiency != .25 {
 		t.Fatalf("unexpected metrics: %+v", summary)
+	}
+}
+
+func TestWriteDirDoesNotUseRunIDAsDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "diagnosis", "standard", "20260805T143012.418Z")
+	if _, err := WriteDir(dir, Manifest{RunID: "01opaque", Profile: "standard"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "summary.json")); err != nil {
+		t.Fatalf("summary not written to selected directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "01opaque")); !os.IsNotExist(err) {
+		t.Fatalf("opaque run ID unexpectedly used as directory")
 	}
 }

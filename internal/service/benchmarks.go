@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	artifactlayout "github.com/kubepilot-aiops/kubepilot/benchmark/artifactlayout"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -38,12 +39,12 @@ func NewBenchmarkManager(binary, agentURL, token, webhookToken, kubeconfig, arti
 }
 func (m *BenchmarkManager) Start(profile string, autoApprove bool) (*BenchmarkRun, error) {
 	switch profile {
-	case "smoke", "ci", "standard", "robustness", "correlation", "retrieval", "full":
+	case "smoke", "ci", "standard", "robustness", "correlation", "log-retrieval", "incident-retrieval", "full":
 	default:
 		return nil, fmt.Errorf("unsupported profile %q", profile)
 	}
 	id, now := ulid.Make().String(), time.Now().UTC()
-	run := &BenchmarkRun{ID: id, Profile: profile, Status: "queued", ArtifactRoot: filepath.Join(m.ArtifactRoot, id), CreatedAt: now, UpdatedAt: now}
+	run := &BenchmarkRun{ID: id, Profile: profile, Status: "queued", ArtifactRoot: artifactlayout.RunDirectory(m.ArtifactRoot, artifactSuite(profile), artifactProfile(profile), now), CreatedAt: now, UpdatedAt: now}
 	m.mu.Lock()
 	m.runs[id] = run
 	m.mu.Unlock()
@@ -62,21 +63,28 @@ func (m *BenchmarkManager) execute(id string, autoApprove bool) {
 	var commands [][]string
 	switch run.Profile {
 	case "smoke", "ci", "standard", "robustness":
-		args := []string{"run", "--profile", run.Profile, "--run-id", run.ID, "--agent-url", m.AgentURL, "--token", m.Token, "--kubeconfig", m.Kubeconfig, "--artifacts", m.ArtifactRoot}
+		args := []string{"run", "--profile", run.Profile, "--run-id", run.ID, "--agent-url", m.AgentURL, "--token", m.Token, "--kubeconfig", m.Kubeconfig, "--artifacts", m.ArtifactRoot, "--artifact-dir", run.ArtifactRoot}
 		if autoApprove {
 			args = append(args, "--auto-approve")
 		}
 		commands = [][]string{args}
 	case "correlation":
 		commands = [][]string{{"correlation", "--agent-url", m.AgentURL, "--webhook-token", m.WebhookToken, "--output", filepath.Join(run.ArtifactRoot, "correlation-summary.json")}}
-	case "retrieval":
-		commands = [][]string{{"retrieval", "--corpus", filepath.Join(run.ArtifactRoot, "retrieval-500k.jsonl"), "--output", run.ArtifactRoot, "--count", "500000"}}
+	case "log-retrieval":
+		commands = [][]string{{"log-retrieval", "--corpus", filepath.Join(run.ArtifactRoot, "log-retrieval-500k.jsonl"), "--output", run.ArtifactRoot, "--count", "500000"}}
+	case "incident-retrieval":
+		commands = [][]string{{"incident-retrieval", "--output", run.ArtifactRoot}}
 	case "full":
-		standard := []string{"run", "--profile", "standard", "--run-id", run.ID, "--agent-url", m.AgentURL, "--token", m.Token, "--kubeconfig", m.Kubeconfig, "--artifacts", m.ArtifactRoot}
+		diagnosisDir := filepath.Join(run.ArtifactRoot, "diagnosis")
+		correlationDir := filepath.Join(run.ArtifactRoot, "correlation")
+		logDir := filepath.Join(run.ArtifactRoot, "log-retrieval")
+		incidentDir := filepath.Join(run.ArtifactRoot, "incident-retrieval")
+		knowledgeDir := filepath.Join(run.ArtifactRoot, "knowledge-evolution")
+		standard := []string{"run", "--profile", "standard", "--run-id", run.ID, "--agent-url", m.AgentURL, "--token", m.Token, "--kubeconfig", m.Kubeconfig, "--artifacts", m.ArtifactRoot, "--artifact-dir", diagnosisDir}
 		if autoApprove {
 			standard = append(standard, "--auto-approve")
 		}
-		commands = [][]string{standard, {"correlation", "--agent-url", m.AgentURL, "--webhook-token", m.WebhookToken, "--output", filepath.Join(run.ArtifactRoot, "correlation-summary.json")}, {"retrieval", "--corpus", filepath.Join(run.ArtifactRoot, "retrieval-500k.jsonl"), "--output", filepath.Join(run.ArtifactRoot, "retrieval"), "--count", "500000"}}
+		commands = [][]string{standard, {"correlation", "--agent-url", m.AgentURL, "--webhook-token", m.WebhookToken, "--output", filepath.Join(correlationDir, "correlation-summary.json")}, {"log-retrieval", "--corpus", filepath.Join(logDir, "log-retrieval-500k.jsonl"), "--output", logDir, "--count", "500000"}, {"incident-retrieval", "--output", incidentDir}, {"intelligence", "--output", filepath.Join(knowledgeDir, "summary.json")}}
 	}
 	var err error
 	for _, args := range commands {
@@ -97,6 +105,32 @@ func (m *BenchmarkManager) execute(id string, autoApprove bool) {
 		run.Status = "completed"
 	}
 	run.UpdatedAt = time.Now().UTC()
+}
+
+func artifactSuite(profile string) string {
+	switch profile {
+	case "smoke", "ci", "standard", "robustness":
+		return "diagnosis"
+	case "correlation":
+		return "correlation"
+	case "log-retrieval":
+		return "log-retrieval"
+	case "incident-retrieval":
+		return "incident-retrieval"
+	case "full":
+		return "autonomous"
+	default:
+		return profile
+	}
+}
+
+func artifactProfile(profile string) string {
+	switch profile {
+	case "correlation", "log-retrieval", "incident-retrieval":
+		return "full"
+	default:
+		return profile
+	}
 }
 func (m *BenchmarkManager) runCommand(ctx context.Context, id string, args []string) error {
 	cmd := exec.CommandContext(ctx, m.Binary, args...)
@@ -162,9 +196,27 @@ func (m *BenchmarkManager) Results(id string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(run.ArtifactRoot, "summary.json")
-	if _, statErr := os.Stat(path); statErr != nil {
-		path = filepath.Join(run.ArtifactRoot, "correlation-summary.json")
+	paths := []string{
+		filepath.Join(run.ArtifactRoot, "summary.json"),
+		filepath.Join(run.ArtifactRoot, "diagnosis", "summary.json"),
+		filepath.Join(run.ArtifactRoot, "correlation", "correlation-summary.json"),
+		filepath.Join(run.ArtifactRoot, "knowledge-evolution", "summary.json"),
+		filepath.Join(run.ArtifactRoot, "correlation-summary.json"),
+		filepath.Join(run.ArtifactRoot, "log_retrieval_report.json"),
+		filepath.Join(run.ArtifactRoot, "incident_retrieval_report.json"),
+		filepath.Join(run.ArtifactRoot, "benchmark_report.json"),
+		filepath.Join(run.ArtifactRoot, "log-retrieval", "log_retrieval_report.json"),
+		filepath.Join(run.ArtifactRoot, "incident-retrieval", "incident_retrieval_report.json"),
+	}
+	var path string
+	for _, candidate := range paths {
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			path = candidate
+			break
+		}
+	}
+	if path == "" {
+		return nil, os.ErrNotExist
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -182,19 +234,27 @@ func (m *BenchmarkManager) Artifacts(id string) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(run.ArtifactRoot)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]map[string]any, 0, len(entries))
-	for _, entry := range entries {
+	out := make([]map[string]any, 0)
+	err = filepath.WalkDir(run.ArtifactRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
 		if entry.IsDir() {
-			continue
+			return nil
 		}
 		info, infoErr := entry.Info()
-		if infoErr == nil {
-			out = append(out, map[string]any{"name": entry.Name(), "size": info.Size()})
+		if infoErr != nil {
+			return infoErr
 		}
+		rel, relErr := filepath.Rel(run.ArtifactRoot, path)
+		if relErr != nil {
+			return relErr
+		}
+		out = append(out, map[string]any{"name": filepath.ToSlash(rel), "size": info.Size()})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }

@@ -1,0 +1,61 @@
+# Reproducibility contract for KubePilot Autonomous SRE Benchmark.
+# Runtime values are resolved into each run artifact; no secret is stored here.
+version: autonomous-sre
+dataset_version: incident-dataset
+code_commit: "${GIT_COMMIT}"
+model:
+  protocol: "${CHAT_PROTOCOL}"
+  name: "${CHAT_MODEL}"
+  config_hash: "${MODEL_CONFIG_HASH}"
+embedding_model: "${EMBEDDING_MODEL}"
+reranker:
+  protocol: "${RERANKER_PROTOCOL}"
+  name: "${RERANKER_MODEL}"
+  config_hash: "${RERANKER_CONFIG_HASH}"
+skill_hash: "${SKILL_SNAPSHOT_HASH}"
+retrieval_config:
+  log_dataset: log-retrieval
+  incident_dataset: incident-retrieval
+  semantic_top_k: 50
+  lexical_top_k: 50
+  topology_rerank_top_k: 20
+  causal_rerank_top_k: 20
+  final_top_k: 5
+  neural_reranker: true
+budget_config:
+  supervisor_max_iterations: 10
+  diagnosis_max_iterations: 12
+  recovery_max_iterations: 10
+  incident_max_tool_uses: 30
+  incident_max_tool_cost: 72
+  incident_max_tokens: 58000
+datasets:
+  log_retrieval:
+    path: benchmark/datasets/logs.yaml
+    size: 500000
+    ground_truth: template_ids
+  incident_retrieval:
+    path: benchmark/datasets/incidents/structured.yaml
+    size: 500
+    category_counts: {memory: 100, database: 100, network: 100, deployment: 100, cpu: 100}
+    ground_truth: related_incidents
+  diagnosis:
+    path: benchmark/incidents.yaml
+    size: 100
+    ground_truth: evaluator_only
+  agent_behavior:
+    path: benchmark/incidents.yaml
+    size: 100
+    ground_truth: evaluator_only
+  recovery:
+    path: benchmark/incidents.yaml
+    size: 50
+    ground_truth: evaluator_only
+  evolution:
+    path: benchmark/datasets/resolved_incidents/resolved.yaml
+    size: 100
+    ground_truth: evaluator_only
+  autonomous_sre:
+    path: benchmark/incidents.yaml
+    size: 50
+    ground_truth: evaluator_only

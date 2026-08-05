@@ -7,15 +7,15 @@ import (
 	"time"
 )
 
-func TestV2ManifestLoadsAndHashes(t *testing.T) {
-	m, h, err := Load("v2.yaml")
+func TestAutonomousManifestLoadsAndHashes(t *testing.T) {
+	m, h, err := Load("../manifests/autonomous.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m.Version == "" || h == "" {
 		t.Fatalf("invalid manifest: %+v %q", m, h)
 	}
-	if _, err = os.Stat(filepath.Join(".", "v2.yaml")); err != nil {
+	if _, err = os.Stat(filepath.Join(".", "autonomous.yaml")); err != nil {
 		t.Fatal(err)
 	}
 }

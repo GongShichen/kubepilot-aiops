@@ -89,6 +89,94 @@ func TestEinoStreamingRetriesBoundedTransientResponse(t *testing.T) {
 	}
 }
 
+func TestEinoStreamingBodyIsNotCutOffByHeaderTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("test server does not support flushing")
+		}
+		_, _ = io.WriteString(w, `data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"probe","arguments":"{\"ok\":\""}}]}}]}`+"\n\n")
+		flusher.Flush()
+		time.Sleep(60 * time.Millisecond)
+		_, _ = io.WriteString(w, `data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ok\"}"}}]},"finish_reason":"tool_calls"}]}`+"\n\ndata: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+	chat, err := NewEinoChatModel(context.Background(), config.ChatConfig{Protocol: "openai-compatible", BaseURL: server.URL, APIPath: "/chat", APIKey: "secret", Model: "test", Timeout: 20 * time.Millisecond, MaxTokens: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEinoToolStream(t, chat)
+}
+
+func TestEinoStreamingChunksResetIdleTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("test server does not support flushing")
+		}
+		chunks := []string{
+			`data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"probe","arguments":"{\"ok\":\""}}]}}]}`,
+			`data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"pa"}}]}}]}`,
+			`data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ss"}}]}}]}`,
+			`data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]},"finish_reason":"tool_calls"}]}`,
+		}
+		for index, chunk := range chunks {
+			_, _ = io.WriteString(w, chunk+"\n\n")
+			flusher.Flush()
+			if index < len(chunks)-1 {
+				time.Sleep(12 * time.Millisecond)
+			}
+		}
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+	chat, err := NewEinoChatModel(context.Background(), config.ChatConfig{Protocol: "openai-compatible", BaseURL: server.URL, APIPath: "/chat", APIKey: "secret", Model: "test", Timeout: 20 * time.Millisecond, MaxRetries: 1, MaxTokens: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEinoToolStream(t, chat)
+}
+
+func TestEinoStreamingIdleTimeoutCancelsStalledResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("test server does not support flushing")
+		}
+		_, _ = io.WriteString(w, `data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n`)
+		flusher.Flush()
+		time.Sleep(80 * time.Millisecond)
+	}))
+	defer server.Close()
+	chat, err := NewEinoChatModel(context.Background(), config.ChatConfig{Protocol: "openai-compatible", BaseURL: server.URL, APIPath: "/chat", APIKey: "secret", Model: "test", Timeout: 20 * time.Millisecond, MaxRetries: 1, MaxTokens: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := chat.Stream(context.Background(), []*schema.Message{schema.UserMessage("wait")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	for {
+		_, recvErr := reader.Recv()
+		if recvErr == nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(recvErr.Error()), "context deadline exceeded") {
+			return
+		}
+		if errors.Is(recvErr, io.EOF) {
+			t.Fatal("stream ended before the idle timeout")
+		}
+		t.Fatalf("unexpected stream error: %v", recvErr)
+	}
+}
+
 func assertEinoToolStream(t *testing.T, chat einomodel.BaseChatModel) {
 	t.Helper()
 	reader, err := chat.Stream(context.Background(), []*schema.Message{schema.UserMessage("call probe")}, einomodel.WithTools([]*schema.ToolInfo{{Name: "probe", Desc: "probe capability"}}))

@@ -9,10 +9,17 @@ import (
 )
 
 // Evaluator is the common contract for benchmark evaluators. Implementations
-// must be deterministic for the same result and must not mutate it.
+// must be deterministic for the same input/output pair and must not mutate
+// either value. Expected labels stay in the evaluator process.
 type Evaluator interface {
+	Evaluate(input, output any) Result
+}
+
+// IncidentEvaluator is the legacy typed contract retained for callers that
+// score one IncidentResult at a time.
+type IncidentEvaluator interface {
 	Name() string
-	Evaluate(IncidentResult) Score
+	EvaluateIncident(IncidentResult) Score
 }
 
 // IncidentResult is the evaluator-side result envelope. Input is the

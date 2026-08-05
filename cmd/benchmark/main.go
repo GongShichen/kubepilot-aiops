@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -16,12 +15,12 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	artifactlayout "github.com/kubepilot-aiops/kubepilot/benchmark/artifactlayout"
 	causalbenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/causal"
 	causaldiscoverybenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/causaldiscovery"
 	causalevolution "github.com/kubepilot-aiops/kubepilot/benchmark/causalevolution"
@@ -32,7 +31,6 @@ import (
 	benchmarkmanifests "github.com/kubepilot-aiops/kubepilot/benchmark/manifests"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/reporter"
 	benchmarkreports "github.com/kubepilot-aiops/kubepilot/benchmark/reports"
-	"github.com/kubepilot-aiops/kubepilot/benchmark/retrievalbench"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/runner"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scorer"
@@ -43,7 +41,6 @@ import (
 	llm "github.com/kubepilot-aiops/kubepilot/internal/model"
 	rerankerclient "github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
-	"github.com/kubepilot-aiops/kubepilot/tools"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -55,8 +52,6 @@ func main() {
 	switch os.Args[1] {
 	case "validate":
 		validate(os.Args[2:])
-	case "validate-v2":
-		validateV2(os.Args[2:])
 	case "environment":
 		environment(os.Args[2:])
 	case "failure-report":
@@ -67,8 +62,18 @@ func main() {
 		generateLogs(os.Args[2:])
 	case "correlation":
 		runCorrelation(os.Args[2:])
-	case "retrieval":
-		runRetrieval(os.Args[2:])
+	case "log-retrieval":
+		runLogRetrieval(os.Args[2:])
+	case "incident-retrieval":
+		runIncidentRetrieval(os.Args[2:])
+	case "agent-report":
+		runAgentReport(os.Args[2:])
+	case "recovery-report":
+		runRecoveryReport(os.Args[2:])
+	case "autonomous-report":
+		runAutonomousReport(os.Args[2:])
+	case "suite-report":
+		runSuiteReport(os.Args[2:])
 	case "intelligence":
 		runIntelligence(os.Args[2:])
 	case "seed-history":
@@ -83,13 +88,16 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "kubepilot-benchmark <validate|validate-v2|environment|failure-report|run|resume|report|correlation|retrieval|intelligence|seed-history|generate-logs>")
+	fmt.Fprintln(os.Stderr, "kubepilot-benchmark <validate|environment|failure-report|run|resume|report|correlation|log-retrieval|incident-retrieval|agent-report|recovery-report|autonomous-report|suite-report|intelligence|seed-history|generate-logs>")
 }
 
 func runIntelligence(args []string) {
 	fs := flag.NewFlagSet("intelligence", flag.ExitOnError)
-	output := fs.String("output", "artifacts/benchmark/intelligence/summary.json", "summary path")
+	output := fs.String("output", "", "summary path; defaults to a timestamped knowledge-evolution directory")
 	_ = fs.Parse(args)
+	if *output == "" {
+		*output = filepath.Join(artifactlayout.RunDirectory("artifacts/benchmark", "knowledge-evolution", "full", time.Now().UTC()), "summary.json")
+	}
 	topologyScore := topologybenchmark.Evaluate(topologybenchmark.DefaultCases())
 	causalScore := causalbenchmark.Evaluate(nil, causalbenchmark.DefaultCases())
 	topologyEvolutionScore := topologyevolution.Evaluate(topologyevolution.DefaultCases())
@@ -111,18 +119,9 @@ func validate(args []string) {
 	fmt.Printf("valid: %d scenarios, catalog_sha256=%s\n", len(items), hash)
 }
 
-func validateV2(args []string) {
-	fs := flag.NewFlagSet("validate-v2", flag.ExitOnError)
-	path := fs.String("manifest", "benchmark/manifests/v2.yaml", "benchmark reproducibility manifest")
-	_ = fs.Parse(args)
-	manifest, hash, err := benchmarkmanifests.Load(*path)
-	fatal(err)
-	fmt.Printf("valid: autonomous incident manifest=%s dataset=%s sha256=%s\n", manifest.Version, manifest.DatasetVersion, hash)
-}
-
 func environment(args []string) {
 	fs := flag.NewFlagSet("environment", flag.ExitOnError)
-	manifestPath := fs.String("manifest", "benchmark/manifests/v2.yaml", "benchmark manifest")
+	manifestPath := fs.String("manifest", "benchmark/manifests/autonomous.yaml", "benchmark manifest")
 	output := fs.String("output", "benchmark/reports/runtime_manifest.json", "redacted runtime manifest")
 	_ = fs.Parse(args)
 	base, _, err := benchmarkmanifests.Load(*manifestPath)
@@ -151,6 +150,7 @@ func run(args []string) {
 	token := fs.String("token", os.Getenv("API_TOKEN"), "agent token")
 	kubeconfig := fs.String("kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path")
 	artifactRoot := fs.String("artifacts", "artifacts/benchmark", "artifact root")
+	artifactDir := fs.String("artifact-dir", "", "logical output directory; defaults to artifacts/<suite>/<profile>/<timestamp>")
 	dryRun := fs.Bool("dry-run-injector", false, "validate runner without changing Kubernetes")
 	autoApprove := fs.Bool("auto-approve", false, "approve only ground-truth-safe proposals")
 	caseID := fs.String("case-id", "", "run exactly one scenario ID (diagnostic use)")
@@ -164,6 +164,12 @@ func run(args []string) {
 	if !domain.ValidDiagnosisMethod(*diagnosisMethod) || *diagnosisMethod == "" {
 		fatal(fmt.Errorf("unsupported diagnosis method %q", *diagnosisMethod))
 	}
+	if *artifactDir == "" && *resumeRun && *runID != "" {
+		*artifactDir = findRunDirectory(*artifactRoot, *runID)
+	}
+	if *artifactDir == "" {
+		*artifactDir = artifactlayout.RunDirectory(*artifactRoot, "diagnosis", *profile, time.Now().UTC())
+	}
 	if *compareMethods {
 		if *profile != "smoke" && *profile != "ci" && *profile != "standard" {
 			fatal(fmt.Errorf("--compare-methods supports smoke, ci, or standard profiles"))
@@ -171,34 +177,32 @@ func run(args []string) {
 		if *runID == "" {
 			*runID = ulid.Make().String()
 		}
+		comparisonDir := artifactlayout.RunDirectory(*artifactRoot, "diagnosis", *profile, time.Now().UTC())
 		methods := []string{domain.DiagnosisMethodLLMOnly, domain.DiagnosisMethodVectorRAG, domain.DiagnosisMethodKubePilot}
 		for _, method := range methods {
-			run([]string{"--profile", *profile, "--run-id", *runID + "-" + method, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--auto-approve=" + strconv.FormatBool(*autoApprove), "--dry-run-injector=" + strconv.FormatBool(*dryRun), "--diagnosis-method", method})
+			run([]string{"--profile", *profile, "--run-id", *runID + "-" + method, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--artifact-dir", filepath.Join(comparisonDir, method), "--auto-approve=" + strconv.FormatBool(*autoApprove), "--dry-run-injector=" + strconv.FormatBool(*dryRun), "--diagnosis-method", method})
 			if runCtx.Err() != nil {
 				fmt.Fprintln(os.Stderr, "benchmark interrupted after cleaning the active case")
 				return
 			}
 		}
-		fatal(writeDiagnosisComparison(*artifactRoot, *runID, *profile, methods))
-		fmt.Printf("diagnosis comparison artifacts=%s\n", filepath.Join(*artifactRoot, *runID))
+		fatal(writeDiagnosisComparison(comparisonDir, *profile, *runID, methods))
+		fmt.Printf("diagnosis comparison artifacts=%s\n", comparisonDir)
 		return
 	}
 	if *profile == "correlation" {
-		runCorrelation([]string{"--output", filepath.Join(*artifactRoot, "correlation-summary.json")})
-		return
-	}
-	if *profile == "retrieval" {
-		runRetrieval([]string{"--corpus", filepath.Join(*artifactRoot, "retrieval-500k.jsonl"), "--output", filepath.Join(*artifactRoot, "retrieval")})
+		correlationDir := artifactlayout.RunDirectory(*artifactRoot, "correlation", "full", time.Now().UTC())
+		runCorrelation([]string{"--output", filepath.Join(correlationDir, "correlation-summary.json")})
 		return
 	}
 	if *profile == "full" {
 		if *runID == "" {
 			*runID = ulid.Make().String()
 		}
-		standardArgs := []string{"--profile", "standard", "--run-id", *runID, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--auto-approve=" + strconv.FormatBool(*autoApprove)}
+		fullDir := artifactlayout.RunDirectory(*artifactRoot, "autonomous", "full", time.Now().UTC())
+		standardArgs := []string{"--profile", "standard", "--run-id", *runID, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--artifact-dir", filepath.Join(fullDir, "diagnosis"), "--auto-approve=" + strconv.FormatBool(*autoApprove)}
 		run(standardArgs)
-		runCorrelation([]string{"--output", filepath.Join(*artifactRoot, *runID, "correlation-summary.json")})
-		runRetrieval([]string{"--corpus", filepath.Join(*artifactRoot, *runID, "retrieval-500k.jsonl"), "--output", filepath.Join(*artifactRoot, *runID, "retrieval")})
+		runCorrelation([]string{"--output", filepath.Join(fullDir, "correlation", "correlation-summary.json")})
 		return
 	}
 	_, items, hash, err := scenarios.Load(*catalog)
@@ -242,7 +246,7 @@ func run(args []string) {
 	if *runID == "" {
 		*runID = ulid.Make().String()
 	}
-	checkpoint := filepath.Join(*artifactRoot, *runID, "checkpoint.jsonl")
+	checkpoint := filepath.Join(*artifactDir, "checkpoint.jsonl")
 	chatEndpoint := strings.TrimRight(os.Getenv("CHAT_BASE_URL"), "/") + "/" + strings.TrimLeft(env("CHAT_API_PATH", "/chat/completions"), "/")
 	endpointHash := sha256.Sum256([]byte(chatEndpoint))
 	historyHash, _ := fileSHA256("benchmark/history.yaml")
@@ -261,7 +265,7 @@ func run(args []string) {
 	var previous []reporter.CaseResult
 	if *resumeRun {
 		var existing reporter.Manifest
-		fatal(readJSON(filepath.Join(*artifactRoot, *runID, "manifest.json"), &existing))
+		fatal(readJSON(filepath.Join(*artifactDir, "manifest.json"), &existing))
 		fatal(validateResumeManifest(existing, manifest))
 		manifest.StartedAt = existing.StartedAt
 		loaded, loadErr := readCaseResults(checkpoint)
@@ -288,15 +292,15 @@ func run(args []string) {
 		} else if !os.IsNotExist(statErr) {
 			fatal(statErr)
 		}
-		fatal(reporter.WriteManifest(*artifactRoot, manifest))
+		fatal(reporter.WriteManifestDir(*artifactDir, manifest))
 	}
 	client := runner.NewHTTPClient(*agentURL, *token)
 	client.DiagnosisMethod = *diagnosisMethod
-	r := &runner.Runner{Registry: reg, Client: client, AutoApprove: *autoApprove, PollInterval: time.Second, DiagnosisMethod: *diagnosisMethod, OnResult: func(result reporter.CaseResult) { fatal(appendCheckpoint(checkpoint, result)) }}
+	r := &runner.Runner{Registry: reg, Client: client, AutoApprove: *autoApprove, PollInterval: time.Second, MaxCaseRestarts: 1, DiagnosisTimeout: benchmarkDiagnosisTimeout(), CaseTimeout: benchmarkCaseTimeout(), DiagnosisMethod: *diagnosisMethod, OnResult: func(result reporter.CaseResult) { fatal(appendCheckpoint(checkpoint, result)) }}
 	results := append(previous, r.Run(runCtx, items)...)
-	summary, err := reporter.Write(*artifactRoot, manifest, results)
+	summary, err := reporter.WriteDir(*artifactDir, manifest, results)
 	fatal(err)
-	fmt.Printf("run=%s total=%d passed=%d root_cause_accuracy=%.2f%% artifacts=%s\n", manifest.RunID, summary.Total, summary.Passed, summary.RootCauseAccuracy*100, filepath.Join(*artifactRoot, manifest.RunID))
+	fmt.Printf("run=%s total=%d passed=%d root_cause_accuracy=%.2f%% artifacts=%s\n", manifest.RunID, summary.Total, summary.Passed, summary.RootCauseAccuracy*100, *artifactDir)
 	if failedCase, ok := cleanupFailure(results); ok {
 		fatal(fmt.Errorf("benchmark stopped after cleanup failure in case %s", failedCase))
 	}
@@ -315,7 +319,7 @@ func diagnosisModelConfigHash() string {
 	configuration := map[string]string{
 		"protocol": env("CHAT_PROTOCOL", "openai-compatible"), "endpoint": strings.TrimRight(os.Getenv("CHAT_BASE_URL"), "/") + "/" + strings.TrimLeft(env("CHAT_API_PATH", "/chat/completions"), "/"),
 		"model": os.Getenv("CHAT_MODEL"), "timeout": env("CHAT_TIMEOUT", "60s"), "max_tokens": env("CHAT_MAX_TOKENS", "4096"),
-		"temperature": env("CHAT_TEMPERATURE", "0"), "reasoning_effort": os.Getenv("CHAT_REASONING_EFFORT"), "max_retries": env("CHAT_MAX_RETRIES", "1"),
+		"temperature": env("CHAT_TEMPERATURE", "0"), "reasoning_effort": os.Getenv("CHAT_REASONING_EFFORT"), "max_retries": env("CHAT_MAX_RETRIES", "3"),
 	}
 	encoded, _ := json.Marshal(configuration)
 	hash := sha256.Sum256(encoded)
@@ -343,7 +347,7 @@ func diagnosisBudgetConfigHash() string {
 	configuration := map[string]string{}
 	for key, fallback := range map[string]string{
 		"SUPERVISOR_MAX_ITERATIONS": "10", "SUPERVISOR_MAX_TOOL_USES": "8", "SUPERVISOR_MAX_TOOL_COST": "24", "SUPERVISOR_MAX_TOKENS": "12000", "SUPERVISOR_MAX_CORRECTIONS": "3",
-		"DIAGNOSIS_MAX_ITERATIONS": "12", "DIAGNOSIS_MAX_TOOL_USES": "15", "DIAGNOSIS_MAX_TOOL_COST": "32", "DIAGNOSIS_MAX_TOKENS": "30000", "DIAGNOSIS_MAX_CORRECTIONS": "3",
+		"DIAGNOSIS_MAX_ITERATIONS": "12", "DIAGNOSIS_MAX_TOOL_USES": "24", "DIAGNOSIS_MAX_TOOL_COST": "48", "DIAGNOSIS_MAX_TOKENS": "30000", "DIAGNOSIS_MAX_CORRECTIONS": "3",
 		"RECOVERY_MAX_ITERATIONS": "10", "RECOVERY_MAX_TOOL_USES": "10", "RECOVERY_MAX_TOOL_COST": "16", "RECOVERY_MAX_TOKENS": "16000", "RECOVERY_MAX_CORRECTIONS": "2",
 		"INCIDENT_MAX_AGENT_TOOL_USES": "30", "INCIDENT_MAX_AGENT_TOOL_COST": "72", "INCIDENT_MAX_TOKENS": "58000",
 	} {
@@ -385,7 +389,7 @@ func validateResumeManifest(existing, current reporter.Manifest) error {
 	return nil
 }
 
-func writeDiagnosisComparison(root, runID, profile string, methods []string) error {
+func writeDiagnosisComparison(root, profile, runID string, methods []string) error {
 	type row struct {
 		Method  string           `json:"method"`
 		Summary reporter.Summary `json:"summary"`
@@ -393,20 +397,19 @@ func writeDiagnosisComparison(root, runID, profile string, methods []string) err
 	rows := make([]row, 0, len(methods))
 	for _, method := range methods {
 		var summary reporter.Summary
-		if err := readJSON(filepath.Join(root, runID+"-"+method, "summary.json"), &summary); err != nil {
+		if err := readJSON(filepath.Join(root, method, "summary.json"), &summary); err != nil {
 			return err
 		}
 		rows = append(rows, row{Method: method, Summary: summary})
 	}
-	dir := filepath.Join(root, runID)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := os.MkdirAll(root, 0o750); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(map[string]any{"run_id": runID, "profile": profile, "methods": rows}, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err = os.WriteFile(filepath.Join(dir, "diagnosis-comparison.json"), b, 0o640); err != nil {
+	if err = os.WriteFile(filepath.Join(root, "diagnosis-comparison.json"), b, 0o640); err != nil {
 		return err
 	}
 	var report strings.Builder
@@ -417,7 +420,7 @@ func writeDiagnosisComparison(root, runID, profile string, methods []string) err
 		fmt.Fprintf(&report, "| %s | %.2f%% | %.2f%% | %.2f%% | %.2f%% | %.2f%% | %.2f%% | %.4f | %.4f |\n", item.Method, s.RootCauseAccuracy*100, s.RootCauseLocalizationAccuracy*100, s.CategoryAccuracy*100, s.VariantAccuracy*100, s.EvidencePrecision*100, s.EvidenceRecall*100, s.ConfidenceBrierScore, s.ConfidenceECE)
 	}
 	report.WriteString("\nLocalization requires exact category, root-cause variant, service, and resource matching. Strict RCA additionally requires at least 50% required-evidence recall.\n")
-	return os.WriteFile(filepath.Join(dir, "report.md"), []byte(report.String()), 0o640)
+	return os.WriteFile(filepath.Join(root, "report.md"), []byte(report.String()), 0o640)
 }
 func robustness(all []scenarios.Scenario) []scenarios.Scenario {
 	counts := map[string]int{}
@@ -487,10 +490,13 @@ func sourceTreeSHA256(root string) (string, error) {
 }
 func generateLogs(args []string) {
 	fs := flag.NewFlagSet("generate-logs", flag.ExitOnError)
-	output := fs.String("output", "artifacts/benchmark/retrieval-500k.jsonl", "output JSONL")
+	output := fs.String("output", "", "output JSONL; defaults to a timestamped log-retrieval dataset directory")
 	count := fs.Int("count", 500000, "record count")
 	seed := fs.Uint64("seed", 20260803, "seed")
 	_ = fs.Parse(args)
+	if *output == "" {
+		*output = filepath.Join(artifactlayout.RunDirectory("artifacts/benchmark", "log-retrieval", "dataset", time.Now().UTC()), "logs.jsonl")
+	}
 	fatal(os.MkdirAll(filepath.Dir(*output), 0o750))
 	fatal(datasets.GenerateLogs(*output, *count, *seed))
 	fmt.Printf("generated %d records at %s\n", *count, *output)
@@ -498,13 +504,16 @@ func generateLogs(args []string) {
 
 func runCorrelation(args []string) {
 	fs := flag.NewFlagSet("correlation", flag.ExitOnError)
-	output := fs.String("output", "artifacts/benchmark/correlation-summary.json", "summary path")
+	output := fs.String("output", "", "summary path; defaults to a timestamped correlation directory")
 	groups := fs.Int("groups", 100, "ground-truth groups")
 	seed := fs.Uint64("seed", 20260803, "seed")
 	agentURL := fs.String("agent-url", "", "optional live Agent URL")
 	webhookToken := fs.String("webhook-token", os.Getenv("ALERTMANAGER_WEBHOOK_TOKEN"), "Alertmanager webhook token")
 	runSalt := fs.String("run-salt", ulid.Make().String(), "unique live-correlation run identifier")
 	_ = fs.Parse(args)
+	if *output == "" {
+		*output = filepath.Join(artifactlayout.RunDirectory("artifacts/benchmark", "correlation", "full", time.Now().UTC()), "correlation-summary.json")
+	}
 	items := correlation.Generate(*groups, 2, 8, *seed)
 	actual := correlation.Correlate(items)
 	if *agentURL != "" {
@@ -548,152 +557,6 @@ func liveCorrelation(ctx context.Context, base, token, runSalt string, items []c
 	return out, nil
 }
 
-func runRetrieval(args []string) {
-	fs := flag.NewFlagSet("retrieval", flag.ExitOnError)
-	corpus := fs.String("corpus", "artifacts/benchmark/retrieval-500k.jsonl", "fixed-seed corpus")
-	output := fs.String("output", "artifacts/benchmark/retrieval", "artifact directory")
-	count := fs.Int("count", 500000, "corpus size")
-	seed := fs.Uint64("seed", 20260803, "seed")
-	datasetRun := fs.String("run-id", ulid.Make().String(), "retrieval dataset isolation ID")
-	lokiURL := fs.String("loki-url", env("LOKI_URL", "http://localhost:3100"), "Loki URL")
-	drainURL := fs.String("drain3-url", env("DRAIN3_WS_URL", "ws://localhost:8081/ws/v1/parse"), "Drain3 WebSocket URL")
-	milvusURL := fs.String("milvus-url", env("MILVUS_ADDRESS", "localhost:19530"), "Milvus address")
-	dimensions := fs.Int("dimensions", envInt("EMBEDDING_DIMENSIONS", 1024), "embedding dimensions")
-	embeddingBatchSize := fs.Int("embedding-batch-size", envInt("EMBEDDING_BATCH_SIZE", 10), "maximum texts per embedding request")
-	embeddingConcurrency := fs.Int("embedding-concurrency", envInt("EMBEDDING_CONCURRENCY", 1), "maximum concurrent embedding requests")
-	embeddingRequestInterval := fs.Duration("embedding-request-interval", envDuration("EMBEDDING_REQUEST_INTERVAL", time.Second), "minimum interval between embedding requests")
-	_ = fs.Parse(args)
-	embedCfg := config.EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: env("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: *dimensions, BatchSize: *embeddingBatchSize, Concurrency: *embeddingConcurrency, Timeout: 30 * time.Second, RequestInterval: *embeddingRequestInterval}
-	if embedCfg.BaseURL == "" || embedCfg.APIKey == "" || embedCfg.Model == "" {
-		fatal(fmt.Errorf("EMBEDDING_BASE_URL, EMBEDDING_API_KEY and EMBEDDING_MODEL are required for retrieval benchmark"))
-	}
-	startedAt := time.Now().UTC()
-	collection := retrievalCollectionName(embedCfg.Model, *dimensions, *datasetRun)
-	parser := retrieval.NewWSParser(*drainURL, os.Getenv("DRAIN3_TOKEN"))
-	defer parser.Close()
-	rerankerCfg := config.RerankerConfig{
-		Enabled:          strings.EqualFold(env("RERANKER_ENABLED", "false"), "true"),
-		Protocol:         env("RERANKER_PROTOCOL", "openai-compatible"),
-		BaseURL:          os.Getenv("RERANKER_BASE_URL"),
-		APIPath:          env("RERANKER_API_PATH", "/reranks"),
-		APIKey:           os.Getenv("RERANKER_API_KEY"),
-		Model:            os.Getenv("RERANKER_MODEL"),
-		Timeout:          envDuration("RERANKER_TIMEOUT", 30*time.Second),
-		MaxRetries:       envInt("RERANKER_MAX_RETRIES", 1),
-		MaxDocumentBytes: envInt("RERANKER_MAX_DOCUMENT_BYTES", 8192),
-		MaxPayloadBytes:  envInt("RERANKER_MAX_PAYLOAD_BYTES", 1048576),
-	}
-	if err := config.ValidateReranker(rerankerCfg); err != nil {
-		fatal(err)
-	}
-	var neuralReranker rerankerclient.Service
-	if rerankerCfg.Enabled {
-		neuralReranker = rerankerclient.New(rerankerCfg)
-	}
-	summary, err := retrievalbench.Run(context.Background(), retrievalbench.Config{
-		Corpus: *corpus, OutputDir: *output, DatasetRun: *datasetRun, Count: *count,
-		Seed: *seed, EmbeddingBatchSize: *embeddingBatchSize,
-		Loki: tools.NewLoki(*lokiURL), Parser: parser, Embedder: llm.NewEmbedder(embedCfg),
-		Milvus:            retrieval.NewMilvusStore(*milvusURL, collection, *dimensions),
-		CausalPatternFile: env("CAUSAL_PATTERN_FILE", "knowledge/causal_patterns.yaml"),
-		RankingPolicyFile: env("RANKING_POLICY_FILE", "knowledge/ranking_policy.yaml"),
-		Reranker:          neuralReranker,
-		Progress: func(stage string, current, total int) {
-			fmt.Printf("stage=%s progress=%d/%d\n", stage, current, total)
-		},
-	})
-	fatal(err)
-	corpusHash, err := fileSHA256(*corpus)
-	fatal(err)
-	rankingPolicyHash, err := fileSHA256(env("RANKING_POLICY_FILE", "knowledge/ranking_policy.yaml"))
-	fatal(err)
-	endpointHash := sha256.Sum256([]byte(embedCfg.BaseURL))
-	manifest := map[string]any{
-		"profile": "retrieval", "run_id": *datasetRun, "git_commit": gitCommit(), "seed": *seed,
-		"records": summary.Records, "queries": summary.Queries,
-		"ground_truth_templates": summary.GroundTruthTemplates, "drain3_clusters": summary.Drain3Clusters,
-		"embedding_model": embedCfg.Model, "embedding_dimensions": *dimensions,
-		"embedding_batch_size": *embeddingBatchSize, "embedding_request_interval": embeddingRequestInterval.String(),
-		"embedding_concurrency":   *embeddingConcurrency,
-		"embedding_endpoint_hash": hex.EncodeToString(endpointHash[:]), "milvus_collection": collection,
-		"corpus_sha256": corpusHash, "ranking_policy_hash": rankingPolicyHash, "started_at": startedAt, "finished_at": time.Now().UTC(),
-	}
-	if neuralReranker != nil {
-		manifest["reranker_model"] = rerankerCfg.Model
-		manifest["reranker_config_hash"] = neuralReranker.ConfigHash()
-	}
-	b, err := json.MarshalIndent(manifest, "", "  ")
-	fatal(err)
-	fatal(os.WriteFile(filepath.Join(*output, "manifest.json"), b, 0o640))
-	fatal(writeRetrievalReport(*output, *datasetRun, summary))
-	fmt.Printf("records=%d ground_truth_templates=%d drain3_clusters=%d queries=%d drain3_compression=%.2f%% output=%s\n", summary.Records, summary.GroundTruthTemplates, summary.Drain3Clusters, summary.Queries, summary.Drain3CompressionRate*100, *output)
-}
-
-func writeRetrievalReport(output, runID string, summary retrievalbench.Summary) error {
-	latency, err := os.Create(filepath.Join(output, "latency-percentiles.csv"))
-	if err != nil {
-		return err
-	}
-	w := csv.NewWriter(latency)
-	_ = w.Write([]string{"strategy", "p50_ms", "p95_ms", "p99_ms", "backend_p50_ms", "backend_p95_ms", "backend_p99_ms", "average_candidates", "candidate_reduction"})
-	for _, metric := range summary.Metrics {
-		_ = w.Write([]string{
-			metric.Strategy, fmt.Sprintf("%.3f", metric.P50MS), fmt.Sprintf("%.3f", metric.P95MS), fmt.Sprintf("%.3f", metric.P99MS),
-			fmt.Sprintf("%.3f", metric.BackendP50MS), fmt.Sprintf("%.3f", metric.BackendP95MS), fmt.Sprintf("%.3f", metric.BackendP99MS),
-			fmt.Sprintf("%.3f", metric.AverageCandidates), fmt.Sprintf("%.6f", metric.CandidateReduction),
-		})
-		stages := make([]string, 0, len(metric.StageLatency))
-		for stage := range metric.StageLatency {
-			stages = append(stages, stage)
-		}
-		sort.Strings(stages)
-		for _, stage := range stages {
-			values := metric.StageLatency[stage]
-			_ = w.Write([]string{
-				metric.Strategy + ":" + stage,
-				fmt.Sprintf("%.3f", values.P50MS), fmt.Sprintf("%.3f", values.P95MS), fmt.Sprintf("%.3f", values.P99MS),
-				"", "", "", "", "",
-			})
-		}
-	}
-	w.Flush()
-	closeErr := latency.Close()
-	if err = w.Error(); err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	var report strings.Builder
-	fmt.Fprintf(&report, "# KubePilot Retrieval Benchmark\n\n- Run: `%s`\n- Records: %d\n- Ground-truth templates: %d\n- Drain3 clusters: %d\n- Drain3 compression: %.2f%%\n- Drain3 cluster purity: %.2f%%\n- Queries: %d\n- Embedding calls: %d\n\n", runID, summary.Records, summary.GroundTruthTemplates, summary.Drain3Clusters, summary.Drain3CompressionRate*100, summary.Drain3ClusterPurity*100, summary.Queries, summary.EmbeddingCalls)
-	report.WriteString("| Strategy | Recall@1 | Recall@5 | Recall@10 | MRR | NDCG | P50 ms | P95 ms | P99 ms | Candidate reduction |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
-	for _, metric := range summary.Metrics {
-		fmt.Fprintf(&report, "| %s | %.2f%% | %.2f%% | %.2f%% | %.4f | %.4f | %.3f | %.3f | %.3f | %.2f%% |\n", metric.Strategy, metric.Recall1*100, metric.Recall5*100, metric.Recall10*100, metric.MRR, metric.NDCG, metric.P50MS, metric.P95MS, metric.P99MS, metric.CandidateReduction*100)
-	}
-	for _, metric := range summary.Metrics {
-		if len(metric.StageLatency) == 0 {
-			continue
-		}
-		report.WriteString("\n### " + metric.Strategy + " stage latency\n\n| Stage | P50 ms | P95 ms | P99 ms |\n|---|---:|---:|---:|\n")
-		stages := make([]string, 0, len(metric.StageLatency))
-		for stage := range metric.StageLatency {
-			stages = append(stages, stage)
-		}
-		sort.Strings(stages)
-		for _, stage := range stages {
-			values := metric.StageLatency[stage]
-			fmt.Fprintf(&report, "| %s | %.3f | %.3f | %.3f |\n", stage, values.P50MS, values.P95MS, values.P99MS)
-		}
-	}
-	report.WriteString("\nAll values are measured from this run. API keys and complete endpoint URLs are not recorded.\n")
-	return os.WriteFile(filepath.Join(output, "report.md"), []byte(report.String()), 0o640)
-}
-
-func retrievalCollectionName(model string, dimensions int, runID string) string {
-	hash := sha256.Sum256([]byte(model + "\x00" + runID))
-	return fmt.Sprintf("kubepilot_benchmark_logs_%d_%s", dimensions, hex.EncodeToString(hash[:6]))
-}
-
 func seedHistory(args []string) {
 	fs := flag.NewFlagSet("seed-history", flag.ExitOnError)
 	dataset := fs.String("dataset", "benchmark/history.yaml", "held-out historical incident dataset")
@@ -703,14 +566,17 @@ func seedHistory(args []string) {
 	batchSize := fs.Int("embedding-batch-size", envInt("EMBEDDING_BATCH_SIZE", 10), "maximum texts per embedding request")
 	requestInterval := fs.Duration("embedding-request-interval", envDuration("EMBEDDING_REQUEST_INTERVAL", time.Second), "minimum interval between embedding requests")
 	concurrency := fs.Int("embedding-concurrency", envInt("EMBEDDING_CONCURRENCY", 1), "maximum concurrent embedding requests")
-	output := fs.String("output", "artifacts/benchmark/history-seed.json", "seed manifest")
+	output := fs.String("output", "", "seed manifest; defaults to a timestamped history dataset directory")
 	_ = fs.Parse(args)
+	if *output == "" {
+		*output = filepath.Join(artifactlayout.RunDirectory("artifacts/benchmark", "history-seed", "full", time.Now().UTC()), "manifest.json")
+	}
 	_, items, datasetHash, err := history.Load(*dataset)
 	fatal(err)
 	embedCfg := config.EmbeddingConfig{
 		BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: env("EMBEDDING_API_PATH", "/embeddings"),
 		APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"),
-		Dimensions: *dimensions, BatchSize: *batchSize, Concurrency: *concurrency, Timeout: 30 * time.Second, RequestInterval: *requestInterval,
+		Dimensions: *dimensions, BatchSize: *batchSize, Concurrency: *concurrency, Timeout: 30 * time.Second, RequestInterval: *requestInterval, MaxRetries: envInt("EMBEDDING_MAX_RETRIES", 3),
 	}
 	if embedCfg.BaseURL == "" || embedCfg.APIKey == "" || embedCfg.Model == "" {
 		fatal(fmt.Errorf("embedding configuration is required to seed history"))
@@ -770,6 +636,7 @@ func resume(args []string) {
 	fs := flag.NewFlagSet("resume", flag.ExitOnError)
 	runID := fs.String("run-id", "", "run ID")
 	root := fs.String("artifacts", "artifacts/benchmark", "artifact root")
+	artifactDir := fs.String("artifact-dir", "", "logical diagnosis artifact directory")
 	agentURL := fs.String("agent-url", "http://localhost:8080", "agent URL")
 	token := fs.String("token", os.Getenv("API_TOKEN"), "agent token")
 	kubeconfig := fs.String("kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig")
@@ -778,29 +645,42 @@ func resume(args []string) {
 	if *runID == "" {
 		fatal(fmt.Errorf("--run-id is required"))
 	}
+	if *artifactDir == "" {
+		*artifactDir = findRunDirectory(*root, *runID)
+		if *artifactDir == "" {
+			*artifactDir = filepath.Join(*root, *runID) // legacy layout
+		}
+	}
 	var manifest reporter.Manifest
-	fatal(readJSON(filepath.Join(*root, *runID, "manifest.json"), &manifest))
+	fatal(readJSON(filepath.Join(*artifactDir, "manifest.json"), &manifest))
 	method := manifest.DiagnosisMethod
 	if method == "" {
 		method = domain.DiagnosisMethodKubePilot
 	}
-	run([]string{"--profile", manifest.Profile, "--run-id", *runID, "--artifacts", *root, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--resume=true", "--auto-approve=" + strconv.FormatBool(*auto), "--diagnosis-method", method})
+	run([]string{"--profile", manifest.Profile, "--run-id", *runID, "--artifacts", *root, "--artifact-dir", *artifactDir, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--resume=true", "--auto-approve=" + strconv.FormatBool(*auto), "--diagnosis-method", method})
 }
 
 func report(args []string) {
 	fs := flag.NewFlagSet("report", flag.ExitOnError)
 	runID := fs.String("run-id", "", "run ID")
 	root := fs.String("artifacts", "artifacts/benchmark", "artifact root")
+	artifactDir := fs.String("artifact-dir", "", "logical diagnosis artifact directory")
 	_ = fs.Parse(args)
 	if *runID == "" {
 		fatal(fmt.Errorf("--run-id is required"))
 	}
-	dir := filepath.Join(*root, *runID)
+	dir := *artifactDir
+	if dir == "" {
+		dir = findRunDirectory(*root, *runID)
+		if dir == "" {
+			dir = filepath.Join(*root, *runID) // legacy layout
+		}
+	}
 	var manifest reporter.Manifest
 	fatal(readJSON(filepath.Join(dir, "manifest.json"), &manifest))
 	items, err := readCaseResults(filepath.Join(dir, "cases.jsonl"))
 	fatal(err)
-	_, err = reporter.Write(*root, manifest, items)
+	_, err = reporter.WriteDir(dir, manifest, items)
 	fatal(err)
 	fmt.Println(filepath.Join(dir, "report.md"))
 }
@@ -844,6 +724,27 @@ func readJSON(path string, out any) error {
 	return json.Unmarshal(b, out)
 }
 
+func findRunDirectory(root, runID string) string {
+	if strings.TrimSpace(runID) == "" {
+		return ""
+	}
+	var found string
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Base(path) != "manifest.json" {
+			return nil
+		}
+		var manifest reporter.Manifest
+		if err := readJSON(path, &manifest); err == nil && manifest.RunID == runID {
+			found = filepath.Dir(path)
+		}
+		return nil
+	})
+	return found
+}
+
 func env(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -856,6 +757,29 @@ func envInt(key string, fallback int) int {
 		return value
 	}
 	return fallback
+}
+
+func benchmarkDiagnosisTimeout() time.Duration {
+	requestTimeout, err := time.ParseDuration(env("CHAT_TIMEOUT", "120s"))
+	if err != nil || requestTimeout <= 0 {
+		requestTimeout = 120 * time.Second
+	}
+	retries := envInt("CHAT_MAX_RETRIES", 3)
+	if retries < 3 {
+		retries = 3
+	}
+	// Leave enough room for the initial request and every configured retry.
+	// The lower bound also covers normal multi-tool Agent turns without making
+	// successful cases wait longer than their actual completion time.
+	window := requestTimeout * time.Duration(retries+1)
+	if window < 10*time.Minute {
+		window = 10 * time.Minute
+	}
+	return window + time.Minute
+}
+
+func benchmarkCaseTimeout() time.Duration {
+	return benchmarkDiagnosisTimeout() + 5*time.Minute
 }
 func envDuration(key string, fallback time.Duration) time.Duration {
 	value, err := time.ParseDuration(os.Getenv(key))

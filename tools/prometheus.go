@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/kubepilot-aiops/kubepilot/internal/httpx"
 )
 
 type PrometheusClient struct {
@@ -15,7 +17,7 @@ type PrometheusClient struct {
 }
 
 func NewPrometheus(base string) *PrometheusClient {
-	return &PrometheusClient{base: base, http: &http.Client{Timeout: 15 * time.Second}}
+	return &PrometheusClient{base: base, http: httpx.NewClient(15 * time.Second)}
 }
 
 type PromResult struct {

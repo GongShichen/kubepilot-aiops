@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/compose"
 	"github.com/kubepilot-aiops/kubepilot/agent"
 	workflowgraph "github.com/kubepilot-aiops/kubepilot/graph"
@@ -32,7 +34,11 @@ type IncidentManager struct {
 		Correlate(context.Context, domain.Alert, string, string, string, []domain.Incident) (string, error)
 	}
 	CorrelationFallbackTimeout time.Duration
-	Learner                    interface {
+	// WorkflowTimeout bounds one Incident runtime, including the model's
+	// request retry window. Zero preserves the historical three-minute default
+	// for embedders that do not provide runtime configuration.
+	WorkflowTimeout time.Duration
+	Learner         interface {
 		Learn(context.Context, *domain.Incident) error
 	}
 }
@@ -280,7 +286,7 @@ func (m *IncidentManager) Retry(ctx context.Context, id string) (*domain.Inciden
 	return in, nil
 }
 func (m *IncidentManager) diagnose(id string) {
-	workflowCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	workflowCtx, cancel := context.WithTimeout(context.Background(), m.workflowTimeout())
 	defer cancel()
 	if m.ModelSnapshotter != nil {
 		workflowCtx = m.ModelSnapshotter.WithSnapshot(workflowCtx)
@@ -308,7 +314,7 @@ func (m *IncidentManager) diagnose(id string) {
 			return
 		}
 		_ = domain.Transition(in, domain.StatusNeedsAttention)
-		in.DiagnosisError = workflowgraph.RedactError(err.Error())
+		in.DiagnosisError = redactWorkflowError(err)
 		in.UpdatedAt = time.Now().UTC()
 		_ = m.Store.Update(persistCtx, in)
 		m.audit(persistCtx, id, "diagnosis_failed", in.DiagnosisError, nil)
@@ -364,7 +370,7 @@ func (m *IncidentManager) Approve(ctx context.Context, id, proposalID, decision,
 }
 
 func (m *IncidentManager) resumeWorkflow(id string, approved bool, idempotencyKey, operator string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), m.workflowTimeout())
 	defer cancel()
 	in, err := m.Store.Get(ctx, id)
 	if err != nil {
@@ -406,7 +412,7 @@ func (m *IncidentManager) resumeWorkflow(id string, approved bool, idempotencyKe
 	defer persistCancel()
 	if runErr != nil {
 		_ = domain.Transition(in, domain.StatusNeedsAttention)
-		in.DiagnosisError = workflowgraph.RedactError(runErr.Error())
+		in.DiagnosisError = redactWorkflowError(runErr)
 		in.UpdatedAt = time.Now().UTC()
 		_ = m.Store.Update(persistCtx, in)
 		m.audit(persistCtx, id, "workflow_resume_failed", in.DiagnosisError, nil)
@@ -422,6 +428,41 @@ func (m *IncidentManager) resumeWorkflow(id string, approved bool, idempotencyKe
 	}
 	m.audit(persistCtx, id, "workflow_completed", "Eino workflow completed after approval", map[string]any{"status": state.Incident.Status})
 	m.publish(state.Incident)
+}
+
+func (m *IncidentManager) workflowTimeout() time.Duration {
+	if m.WorkflowTimeout > 0 {
+		return m.WorkflowTimeout
+	}
+	return 3 * time.Minute
+}
+
+func redactWorkflowError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := workflowgraph.RedactError(err.Error())
+	if isTransientWorkflowError(err) {
+		return "transient request failure after retries: " + message
+	}
+	return message
+}
+
+func isTransientWorkflowError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exhausted *adk.RetryExhaustedError
+	if errors.As(err, &exhausted) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"context deadline exceeded", "failed to receive stream chunk", "connection reset", "broken pipe", "unexpected eof", "request failed after"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *IncidentManager) ReconcileLegacyWorkflows(ctx context.Context) error {

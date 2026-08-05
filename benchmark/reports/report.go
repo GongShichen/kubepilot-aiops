@@ -56,10 +56,19 @@ func Write(dir string, report Report) error {
 }
 
 func WriteFailure(path, phase, category, reason, impact string, now time.Time) error {
-	if path == "" { return fmt.Errorf("failure report path is required") }
-	if now.IsZero() { now = time.Now().UTC() }
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil { return err }
+	if path == "" {
+		return fmt.Errorf("failure report path is required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
 	value := FailureReport{Status: "FAILED", Phase: phase, Category: category, Reason: reason, Impact: impact, Timestamp: now.UTC()}
-	b, err := json.MarshalIndent(value, "", "  "); if err != nil { return err }
+	b, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
 	return os.WriteFile(path, b, 0o640)
 }

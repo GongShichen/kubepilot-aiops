@@ -20,12 +20,20 @@ type IncidentClient interface {
 	Approve(context.Context, *domain.Incident) error
 }
 type Runner struct {
-	Registry        *injector.Registry
-	Client          IncidentClient
-	AutoApprove     bool
-	PollInterval    time.Duration
-	OnResult        func(reporter.CaseResult)
-	DiagnosisMethod string
+	Registry     *injector.Registry
+	Client       IncidentClient
+	AutoApprove  bool
+	PollInterval time.Duration
+	// MaxCaseRestarts bounds environment restarts after all request retries
+	// have been exhausted. A restart always begins with a fresh injector
+	// baseline and a new Incident; it never replays a Kubernetes mutation.
+	MaxCaseRestarts int
+	// DiagnosisTimeout lets the runner wait for the server-side request retry
+	// window. A zero value keeps the scenario timeout.
+	DiagnosisTimeout time.Duration
+	CaseTimeout      time.Duration
+	OnResult         func(reporter.CaseResult)
+	DiagnosisMethod  string
 }
 
 const cleanupTimeout = 2 * time.Minute
@@ -36,9 +44,19 @@ func (r *Runner) Run(ctx context.Context, items []scenarios.Scenario) []reporter
 		if ctx.Err() != nil {
 			break
 		}
-		caseCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		result := r.runOne(caseCtx, s)
-		cancel()
+		var result reporter.CaseResult
+		restarts := 0
+		maxCaseRestarts := r.maxCaseRestarts()
+		for {
+			caseCtx, cancel := context.WithTimeout(ctx, r.caseTimeout())
+			result = r.runOne(caseCtx, s)
+			cancel()
+			if restarts >= maxCaseRestarts || !shouldRestartCase(result) || ctx.Err() != nil {
+				break
+			}
+			restarts++
+		}
+		result.CaseRestarts = restarts
 		// A process-level interruption is not a completed benchmark case. The
 		// deferred baseline restore has already run, so omit the partial result
 		// and let a supervised resume execute the same case from the beginning.
@@ -54,6 +72,54 @@ func (r *Runner) Run(ctx context.Context, items []scenarios.Scenario) []reporter
 		}
 	}
 	return out
+}
+
+func (r *Runner) maxCaseRestarts() int {
+	if r.MaxCaseRestarts < 0 {
+		return 0
+	}
+	if r.MaxCaseRestarts == 0 {
+		return 1
+	}
+	return r.MaxCaseRestarts
+}
+
+func (r *Runner) caseTimeout() time.Duration {
+	if r.CaseTimeout > 0 {
+		return r.CaseTimeout
+	}
+	return 5 * time.Minute
+}
+
+func (r *Runner) diagnosisTimeout(s scenarios.Scenario) time.Duration {
+	if r.DiagnosisTimeout > s.Timeouts.Diagnosis {
+		return r.DiagnosisTimeout
+	}
+	return s.Timeouts.Diagnosis
+}
+
+func shouldRestartCase(result reporter.CaseResult) bool {
+	if result.Status == "cleanup_failed" || result.Error == "" || result.RecoveryExecuted || result.ApprovalGranted {
+		return false
+	}
+	message := strings.ToLower(result.Error)
+	// These markers represent request/stream failures after their own bounded
+	// retries. Logical diagnosis rejection is deliberately not restarted. Once
+	// an approval or mutation has happened, the case must never be replayed.
+	for _, marker := range []string{
+		"transient request failure after retries",
+		"request failed after ",
+		"failed to receive stream chunk",
+		"context deadline exceeded",
+		"connection reset",
+		"broken pipe",
+		"unexpected eof",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter.CaseResult) {
 	started := time.Now()
@@ -105,7 +171,7 @@ func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter
 		return res
 	}
 	res.IncidentID = in.ID
-	diagnosisCtx, diagnosisCancel := context.WithTimeout(ctx, s.Timeouts.Diagnosis)
+	diagnosisCtx, diagnosisCancel := context.WithTimeout(ctx, r.diagnosisTimeout(s))
 	defer diagnosisCancel()
 	in, err = r.waitDiagnosis(diagnosisCtx, in.ID)
 	if err != nil {
@@ -113,6 +179,10 @@ func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter
 		return res
 	}
 	res.Score = scorer.Incident(s, in)
+	res.RecoveryProposed = in.Proposal != nil
+	res.ApprovalRequested = in.Status == domain.StatusAwaitingApproval
+	res.SafetyBlocked = res.RecoveryProposed && !res.Score.DecisionCorrect
+	res.DryRunSuccess = in.DryRun != nil && in.DryRun.Success
 	res.RootCauseCategory = in.RootCauseCategory
 	res.RootCauseVariant = in.RootCauseVariant
 	res.Service = in.RootCauseService
@@ -123,18 +193,22 @@ func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter
 		res.Error = "diagnosis workflow: " + in.DiagnosisError
 	}
 	if r.AutoApprove && res.Score.DecisionCorrect && in.Status == domain.StatusAwaitingApproval {
+		res.ApprovalGranted = true
 		if err = r.Client.Approve(ctx, in); err != nil {
 			res.Error = "approve: " + err.Error()
 			return res
 		}
 		recoveryCtx, recoveryCancel := context.WithTimeout(ctx, s.Timeouts.Recovery)
 		defer recoveryCancel()
+		recoveryStarted := time.Now()
 		in, err = r.waitFinal(recoveryCtx, in.ID)
 		if err != nil {
 			res.Error = "recovery: " + err.Error()
 			return res
 		}
-		_ = in
+		res.RecoveryExecuted = true
+		res.VerificationOK = in.Status == domain.StatusResolved
+		res.RecoveryDurationMS = time.Since(recoveryStarted).Seconds() * 1000
 	}
 	if err = restoreAndVerify(h, s); err != nil {
 		res.Status = "cleanup_failed"

@@ -2,6 +2,7 @@ package topologyevolution
 
 import (
 	"context"
+	"strconv"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/topology"
 	knowledge "github.com/kubepilot-aiops/kubepilot/internal/topology/knowledge"
@@ -13,18 +14,20 @@ type Case struct {
 }
 
 type Metrics struct {
-	Cases            int     `json:"cases"`
-	PatternPrecision float64 `json:"pattern_precision"`
-	PatternRecall    float64 `json:"pattern_recall"`
-	PatternsLearned  int     `json:"patterns_learned"`
+	Cases             int     `json:"cases"`
+	ResolvedIncidents int     `json:"resolved_incidents"`
+	PatternPrecision  float64 `json:"pattern_precision"`
+	PatternRecall     float64 `json:"pattern_recall"`
+	PatternsLearned   int     `json:"patterns_learned"`
 }
 
 func DefaultCases() []Case {
-	return []Case{{Graphs: []topology.IncidentGraph{
-		{IncidentID: "payment", Nodes: []topology.GraphNode{{ID: "payment-service", Type: "service"}, {ID: "mysql-01", Type: "database"}}, Edges: []topology.GraphEdge{{Source: "payment-service", Target: "mysql-01", Relation: "depends_on"}}},
-		{IncidentID: "order", Nodes: []topology.GraphNode{{ID: "order-service", Type: "service"}, {ID: "mysql-02", Type: "database"}}, Edges: []topology.GraphEdge{{Source: "order-service", Target: "mysql-02", Relation: "depends_on"}}},
-		{IncidentID: "checkout", Nodes: []topology.GraphNode{{ID: "checkout-service", Type: "service"}, {ID: "mysql-03", Type: "database"}}, Edges: []topology.GraphEdge{{Source: "checkout-service", Target: "mysql-03", Relation: "depends_on"}}},
-	}}}
+	graphs := make([]topology.IncidentGraph, 0, 100)
+	for i := 0; i < 100; i++ {
+		service := []string{"payment-service", "order-service", "checkout-service"}[i%3]
+		graphs = append(graphs, topology.IncidentGraph{IncidentID: service + "-" + strconv.Itoa(i), Nodes: []topology.GraphNode{{ID: service, Type: "service"}, {ID: "mysql-" + strconv.Itoa(i), Type: "database"}}, Edges: []topology.GraphEdge{{Source: service, Target: "mysql-" + strconv.Itoa(i), Relation: "depends_on"}}})
+	}
+	return []Case{{Graphs: graphs}}
 }
 
 func Evaluate(cases []Case) Metrics {
@@ -33,6 +36,7 @@ func Evaluate(cases []Case) Metrics {
 		return metrics
 	}
 	for _, item := range cases {
+		metrics.ResolvedIncidents += len(item.Graphs)
 		store := knowledge.NewMemoryStore()
 		for _, graph := range item.Graphs {
 			p := knowledge.Normalize(graph)

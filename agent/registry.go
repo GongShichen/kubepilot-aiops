@@ -26,11 +26,13 @@ const (
 
 // AgentRegistry is the single registration point for KubePilot's three ADK agents.
 type AgentRegistry struct {
-	chat          model.BaseChatModel
-	skills        map[string]agentSkill
-	limits        map[string]domain.AgentBudget
-	incidentLimit domain.AgentBudget
-	toolCosts     map[string]int
+	chat             model.BaseChatModel
+	skills           map[string]agentSkill
+	limits           map[string]domain.AgentBudget
+	incidentLimit    domain.AgentBudget
+	toolCosts        map[string]int
+	requestMaxTokens int
+	modelMaxRetries  int
 }
 
 func (r *AgentRegistry) Names() []string {
@@ -76,7 +78,7 @@ func (r *AgentRegistry) CorrelateWithCandidateTool(ctx context.Context, alert do
 	runtime := &constrainedRuntime{state: state, budgets: budgets, done: map[string]bool{}}
 	ctx = withConstrainedRuntime(ctx, runtime)
 	middleware := newConstrainedAgentMiddleware(SupervisorAgentName, r.skills[SupervisorAgentName], "submit_correlation_decision")
-	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: SupervisorAgentName, Description: "Use operational metadata to correlate one alert.", Instruction: "Act as the bounded Supervisor. For this pre-intake task, decide correlation only from tool-returned operational metadata and finish with the correlation decision capability.", Model: r.chat, MaxIterations: r.limits[SupervisorAgentName].MaxIterations, ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{candidateTool, decisionTool}, ExecuteSequentially: true}, ReturnDirectly: map[string]bool{"submit_correlation_decision": true}}, Handlers: []adk.ChatModelAgentMiddleware{middleware}})
+	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: SupervisorAgentName, Description: "Use operational metadata to correlate one alert.", Instruction: "Act as the bounded Supervisor. For this pre-intake task, decide correlation only from tool-returned operational metadata and finish with the correlation decision capability.", Model: r.chat, MaxIterations: r.limits[SupervisorAgentName].MaxIterations, ModelRetryConfig: r.modelRetryConfig(), ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{candidateTool, decisionTool}, ExecuteSequentially: true}, ReturnDirectly: map[string]bool{"submit_correlation_decision": true}}, Handlers: []adk.ChatModelAgentMiddleware{middleware}})
 	if err != nil {
 		return "", err
 	}
@@ -84,7 +86,10 @@ func (r *AgentRegistry) CorrelateWithCandidateTool(ctx context.Context, alert do
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agentInstance, EnableStreaming: true})
 	modelCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	options := []adk.AgentRunOption{adk.WithChatModelOptions([]model.Option{model.WithMaxTokens(r.limits[SupervisorAgentName].MaxTokens)})}
+	options := make([]adk.AgentRunOption, 0, 1)
+	if r.requestMaxTokens > 0 {
+		options = append(options, adk.WithChatModelOptions([]model.Option{model.WithMaxTokens(r.requestMaxTokens)}))
+	}
 	if handlers, ok := ctx.Value(agentCallbacksKey{}).([]callbacks.Handler); ok && len(handlers) > 0 {
 		options = append(options, adk.WithCallbacks(handlers...))
 	}

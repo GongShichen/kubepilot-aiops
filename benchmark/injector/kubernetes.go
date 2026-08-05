@@ -209,6 +209,16 @@ func (k *Kubernetes) Inject(ctx context.Context, s scenarios.Scenario) error {
 	defer k.mu.Unlock()
 	key := k.key(s)
 	if s.Injector == "service_fault" || s.Injector == "traffic" {
+		// Service Proxy is routed through Endpoints, not directly to a
+		// Deployment. A Deployment can report Ready while EndpointSlice
+		// propagation is still in flight, which makes the proxy return
+		// "no endpoints available" and consumes the fault-visibility timeout.
+		readyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := k.waitServiceProxyEndpoint(readyCtx, s.Namespace, s.Service)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("service proxy endpoint for %s is not ready: %w", s.Service, err)
+		}
 		k.restarts[key], _ = k.currentRestarts(ctx, s.Namespace, s.Service)
 		if err := k.controlFault(ctx, s.Namespace, s.Service, s.Variant); err != nil {
 			return err
@@ -288,6 +298,51 @@ func (k *Kubernetes) Inject(ctx context.Context, s scenarios.Scenario) error {
 		}
 		return k.createLoad(ctx, s)
 	}
+}
+
+func (k *Kubernetes) waitServiceProxyEndpoint(ctx context.Context, namespace, service string) error {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		current, serviceErr := k.client.CoreV1().Services(namespace).Get(ctx, service, metav1.GetOptions{})
+		if serviceErr == nil {
+			endpoints, endpointErr := k.client.CoreV1().Endpoints(namespace).Get(ctx, service, metav1.GetOptions{})
+			if endpointErr == nil && hasReadyServiceEndpoint(current, endpoints) {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func hasReadyServiceEndpoint(service *corev1.Service, endpoints *corev1.Endpoints) bool {
+	if service == nil || endpoints == nil {
+		return false
+	}
+	portNames := map[string]bool{}
+	for _, port := range service.Spec.Ports {
+		if port.Name != "" {
+			portNames[port.Name] = true
+		}
+	}
+	for _, subset := range endpoints.Subsets {
+		if len(subset.Addresses) == 0 {
+			continue
+		}
+		if len(portNames) == 0 {
+			return len(subset.Ports) > 0
+		}
+		for _, port := range subset.Ports {
+			if portNames[port.Name] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // applyLowResourceLimit keeps requests valid while intentionally constraining
@@ -451,10 +506,15 @@ func (k *Kubernetes) getFaultStatus(ctx context.Context, namespace, service stri
 	if err != nil {
 		return faultStatus{}, err
 	}
-	raw, err := k.client.CoreV1().RESTClient().Get().Namespace(namespace).
-		Resource("services").SubResource("proxy").Name("http:"+service+":http").
-		Suffix("benchmark", "v1", "fault").
-		SetHeader("X-KubePilot-Benchmark-Token", string(secret.Data["benchmark-control-token"])).DoRaw(ctx)
+	var raw []byte
+	err = retryServiceProxy(ctx, func() error {
+		var requestErr error
+		raw, requestErr = k.client.CoreV1().RESTClient().Get().Namespace(namespace).
+			Resource("services").SubResource("proxy").Name("http:"+service+":http").
+			Suffix("benchmark", "v1", "fault").
+			SetHeader("X-KubePilot-Benchmark-Token", string(secret.Data["benchmark-control-token"])).DoRaw(ctx)
+		return requestErr
+	})
 	if err != nil {
 		return faultStatus{}, err
 	}

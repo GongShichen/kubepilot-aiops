@@ -1,0 +1,116 @@
+version: incident-retrieval
+incidents:
+  - incident_id: incident-memory-001
+    service: gateway-service
+    namespace: kubepilot-demo
+    symptoms: [latency_increase, error_rate_increase]
+    metrics: [memory_working_set_growth]
+    logs: [oom_killed]
+    traces: [downstream_timeout]
+    kubernetes_events: [container_oomkilled, pod_restart]
+    topology_graph:
+      nodes: [{id: gateway-service, type: service}, {id: mysql, type: database}]
+      edges: [{source: gateway-service, target: mysql, type: depends_on, weight: 1}]
+    causal_features: [memory_growth, oom_killed, pod_restart]
+    root_cause: memory_leak
+    related_incidents: [incident-memory-002]
+    ground_truth:
+      root_cause: memory_leak
+      causal_path: [memory_growth, oom_killed, pod_restart]
+      recovery_action: restart_pod
+      evidence_ids: [memory_working_set_growth, oom_killed]
+  - incident_id: incident-memory-002
+    service: order-service
+    namespace: kubepilot-demo
+    symptoms: [error_rate_increase]
+    metrics: [memory_working_set_growth]
+    logs: [oom_killed]
+    traces: [request_failure]
+    kubernetes_events: [container_oomkilled, pod_restart]
+    topology_graph:
+      nodes: [{id: order-service, type: service}, {id: mysql, type: database}]
+      edges: [{source: order-service, target: mysql, type: depends_on, weight: 1}]
+    causal_features: [memory_growth, oom_killed, pod_restart]
+    root_cause: memory_leak
+    related_incidents: [incident-memory-001]
+    ground_truth:
+      root_cause: memory_leak
+      causal_path: [memory_growth, oom_killed, pod_restart]
+      recovery_action: restart_pod
+      evidence_ids: [memory_working_set_growth, oom_killed]
+  - incident_id: incident-cpu-001
+    service: payment-service
+    namespace: kubepilot-benchmark
+    symptoms: [cpu_saturation, latency_increase]
+    metrics: [cpu_throttling]
+    logs: [worker_pool_exhausted]
+    traces: [slow_handler]
+    kubernetes_events: [container_throttled]
+    topology_graph:
+      nodes: [{id: payment-service, type: service}, {id: redis, type: cache}]
+      edges: [{source: payment-service, target: redis, type: depends_on, weight: 1}]
+    causal_features: [cpu_saturation, throttling, latency]
+    root_cause: cpu_overload
+    related_incidents: []
+    ground_truth:
+      root_cause: cpu_overload
+      causal_path: [cpu_saturation, throttling, latency]
+      recovery_action: scale_deployment
+      evidence_ids: [cpu_throttling, worker_pool_exhausted]
+  - incident_id: incident-database-001
+    service: order-service
+    namespace: kubepilot-demo
+    symptoms: [error_rate_increase, latency_increase]
+    metrics: [database_latency]
+    logs: [connection_pool_exhausted]
+    traces: [mysql_slow_query]
+    kubernetes_events: [endpoint_unready]
+    topology_graph:
+      nodes: [{id: order-service, type: service}, {id: mysql, type: database}]
+      edges: [{source: order-service, target: mysql, type: depends_on, weight: 1}]
+    causal_features: [slow_query, pool_exhaustion, 5xx]
+    root_cause: database_latency
+    related_incidents: []
+    ground_truth:
+      root_cause: database_latency
+      causal_path: [slow_query, pool_exhaustion, 5xx]
+      recovery_action: restart_pod
+      evidence_ids: [database_latency, connection_pool_exhausted]
+  - incident_id: incident-network-001
+    service: gateway-service
+    namespace: observability
+    symptoms: [request_failure, latency_increase]
+    metrics: [network_error_rate]
+    logs: [upstream_timeout]
+    traces: [upstream_reset]
+    kubernetes_events: [endpoint_unready]
+    topology_graph:
+      nodes: [{id: gateway-service, type: service}, {id: payment-service, type: service}]
+      edges: [{source: gateway-service, target: payment-service, type: calls, weight: 1}]
+    causal_features: [packet_loss, timeout, 5xx]
+    root_cause: network_timeout
+    related_incidents: []
+    ground_truth:
+      root_cause: network_timeout
+      causal_path: [packet_loss, timeout, 5xx]
+      recovery_action: restart_pod
+      evidence_ids: [network_error_rate, upstream_timeout]
+  - incident_id: incident-deployment-001
+    service: payment-service
+    namespace: kubepilot-benchmark
+    symptoms: [pod_unavailable, error_rate_increase]
+    metrics: [deployment_unavailable_replicas]
+    logs: [readiness_probe_failed]
+    traces: [request_failure]
+    kubernetes_events: [failed_rollout]
+    topology_graph:
+      nodes: [{id: payment-service, type: service}, {id: redis, type: cache}]
+      edges: [{source: payment-service, target: redis, type: depends_on, weight: 1}]
+    causal_features: [bad_revision, readiness_failure, unavailable_pod]
+    root_cause: bad_deployment_revision
+    related_incidents: []
+    ground_truth:
+      root_cause: bad_deployment_revision
+      causal_path: [bad_revision, readiness_failure, unavailable_pod]
+      recovery_action: rollback_deployment
+      evidence_ids: [deployment_unavailable_replicas, readiness_probe_failed]

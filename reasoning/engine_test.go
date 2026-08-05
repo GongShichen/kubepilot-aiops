@@ -8,7 +8,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
 
-func TestWeightedRRFStableAndDeduplicated(t *testing.T) {
+func TestCandidateGenerationUsesSemanticAndLexicalOnly(t *testing.T) {
 	e := New(DefaultConfig())
 	c := func(id string) domain.RetrievalCandidate { return domain.RetrievalCandidate{IncidentID: id} }
 	semanticB := c("b")
@@ -17,14 +17,20 @@ func TestWeightedRRFStableAndDeduplicated(t *testing.T) {
 	lexicalB.Resource = "deployment/order"
 	lexicalB.Features.CausalNodeIDs = []string{"connection_failure"}
 	a := e.Fuse(CandidateLists{Semantic: []domain.RetrievalCandidate{c("a"), semanticB}, Lexical: []domain.RetrievalCandidate{lexicalB, c("a")}, Topology: []domain.RetrievalCandidate{c("b")}})
-	if len(a) != 2 || a[0].IncidentID != "b" {
+	if len(a) != 2 || a[0].IncidentID != "a" {
 		t.Fatalf("unexpected fused ranking: %#v", a)
 	}
-	if a[0].SourceRanks["semantic"] != 2 || a[0].SourceRanks["lexical"] != 1 {
+	if a[0].SourceRanks["semantic"] != 1 || a[0].SourceRanks["lexical"] != 2 {
 		t.Fatalf("rank breakdown missing: %#v", a[0])
 	}
-	if a[0].Resource != "deployment/order" || len(a[0].Features.CausalNodeIDs) != 1 {
-		t.Fatalf("multi-retriever features were not deterministically merged: %#v", a[0])
+	var merged domain.RetrievalCandidate
+	for _, candidate := range a {
+		if candidate.IncidentID == "b" {
+			merged = candidate
+		}
+	}
+	if merged.Resource != "deployment/order" || len(merged.Features.CausalNodeIDs) != 1 {
+		t.Fatalf("multi-retriever features were not deterministically merged: %#v", merged)
 	}
 }
 

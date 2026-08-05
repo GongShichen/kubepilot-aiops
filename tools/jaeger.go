@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/kubepilot-aiops/kubepilot/internal/httpx"
 )
 
 type JaegerClient struct {
@@ -16,7 +18,7 @@ type JaegerClient struct {
 }
 
 func NewJaeger(base string) *JaegerClient {
-	return &JaegerClient{base: base, http: &http.Client{Timeout: 20 * time.Second}}
+	return &JaegerClient{base: base, http: httpx.NewClient(20 * time.Second)}
 }
 
 type TraceSummary struct {

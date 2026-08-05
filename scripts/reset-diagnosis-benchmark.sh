@@ -30,7 +30,9 @@ done
 DELETE FROM incidents WHERE namespace = 'kubepilot-benchmark';
 SQL
 
-"${compose[@]}" up -d prometheus alertmanager loki jaeger drain3 kubepilot-agent >/dev/null
+# Rebuild the Agent image before every fresh benchmark baseline. Restarting an
+# old image after source changes silently runs stale budget/model/runtime code.
+"${compose[@]}" up -d --build prometheus alertmanager loki jaeger drain3 kubepilot-agent >/dev/null
 for attempt in $(seq 1 60); do
   if curl -fsS http://localhost:8080/readyz >/dev/null \
     && curl -fsS http://localhost:3100/ready >/dev/null \

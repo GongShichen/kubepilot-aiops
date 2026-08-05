@@ -107,7 +107,11 @@ func (e *Embedder) embedBatch(ctx context.Context, input []string) ([][]float32,
 	}{e.cfg.Model, input, e.cfg.Dimensions}
 	b, _ := json.Marshal(body)
 	var lastErr error
-	for attempt := 0; attempt < 6; attempt++ {
+	maxRetries := e.cfg.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if err := e.waitForRequestSlot(ctx); err != nil {
 			return nil, err
 		}
@@ -123,7 +127,7 @@ func (e *Embedder) embedBatch(ctx context.Context, input []string) ([][]float32,
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if attempt == 5 {
+			if attempt == maxRetries {
 				return nil, lastErr
 			}
 			if err = waitEmbeddingRetry(ctx, min(500*time.Millisecond*(1<<attempt), 8*time.Second)); err != nil {
@@ -140,7 +144,7 @@ func (e *Embedder) embedBatch(ctx context.Context, input []string) ([][]float32,
 		retryAfter := retryAfterDuration(resp.Header.Get("Retry-After"))
 		lastErr = decodeError(resp)
 		resp.Body.Close()
-		if !retryable || attempt == 5 {
+		if !retryable || attempt == maxRetries {
 			return nil, lastErr
 		}
 		backoff := min(500*time.Millisecond*(1<<attempt), 8*time.Second)

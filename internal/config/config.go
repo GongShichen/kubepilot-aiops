@@ -107,6 +107,7 @@ type EmbeddingConfig struct {
 	Concurrency     int
 	Timeout         time.Duration
 	RequestInterval time.Duration
+	MaxRetries      int
 }
 
 func Load() (Config, error) {
@@ -138,7 +139,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	maxRetries, err := integer("CHAT_MAX_RETRIES", 1)
+	maxRetries, err := integer("CHAT_MAX_RETRIES", 3)
 	if err != nil {
 		return Config{}, err
 	}
@@ -151,6 +152,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	embeddingConcurrency, err := integer("EMBEDDING_CONCURRENCY", 1)
+	if err != nil {
+		return Config{}, err
+	}
+	embeddingRetries, err := integer("EMBEDDING_MAX_RETRIES", 3)
 	if err != nil {
 		return Config{}, err
 	}
@@ -194,7 +199,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	rerankerRetries, err := integer("RERANKER_MAX_RETRIES", 1)
+	rerankerRetries, err := integer("RERANKER_MAX_RETRIES", 3)
 	if err != nil {
 		return Config{}, err
 	}
@@ -218,7 +223,7 @@ func Load() (Config, error) {
 		DatabaseURL:   os.Getenv("DATABASE_URL"),
 		RedisURL:      os.Getenv("REDIS_URL"),
 		Chat:          ChatConfig{Protocol: get("CHAT_PROTOCOL", "openai-compatible"), BaseURL: os.Getenv("CHAT_BASE_URL"), APIPath: get("CHAT_API_PATH", "/chat/completions"), APIKey: os.Getenv("CHAT_API_KEY"), Model: os.Getenv("CHAT_MODEL"), Timeout: chatTimeout, MaxTokens: maxTokens, Temperature: temperature, ReasoningEffort: os.Getenv("CHAT_REASONING_EFFORT"), MaxRetries: maxRetries},
-		Embedding:     EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: get("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: dimensions, BatchSize: embeddingBatchSize, Concurrency: embeddingConcurrency, Timeout: embedTimeout, RequestInterval: embedRequestInterval},
+		Embedding:     EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: get("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: dimensions, BatchSize: embeddingBatchSize, Concurrency: embeddingConcurrency, Timeout: embedTimeout, RequestInterval: embedRequestInterval, MaxRetries: embeddingRetries},
 		PrometheusURL: get("PROMETHEUS_URL", "http://localhost:9090"), LokiURL: get("LOKI_URL", "http://localhost:3100"), JaegerURL: get("JAEGER_URL", "http://localhost:16686"), MilvusAddress: get("MILVUS_ADDRESS", "localhost:19530"), HistoryCollection: get("HISTORY_COLLECTION", "kubepilot_history"), LogIndexCollection: get("LOG_INDEX_COLLECTION", "kubepilot_log_templates"), LogIndexerInterval: logIndexerInterval, BusinessProbeURL: os.Getenv("BUSINESS_PROBE_URL"),
 		Drain3URL: get("DRAIN3_WS_URL", "ws://localhost:8081/ws/v1/parse"), Drain3Token: os.Getenv("DRAIN3_TOKEN"), Kubeconfig: os.Getenv("KUBECONFIG"), AllowedNamespaces: split(get("ALLOWED_NAMESPACES", "kubepilot-demo,kubepilot-benchmark")),
 		ConfigEnvFile: os.Getenv("CONFIG_ENV_FILE"), ConfigReloadEvery: configReloadEvery, ConfigRetryEvery: configRetryEvery,
@@ -311,7 +316,7 @@ func loadAgentBudgets() (AgentBudgetsConfig, error) {
 	if err != nil {
 		return AgentBudgetsConfig{}, err
 	}
-	diagnosis, err := load("DIAGNOSIS", AgentBudgetConfig{12, 15, 32, 30000, 3})
+	diagnosis, err := load("DIAGNOSIS", AgentBudgetConfig{12, 24, 48, 30000, 3})
 	if err != nil {
 		return AgentBudgetsConfig{}, err
 	}
@@ -372,6 +377,9 @@ func (c Config) ValidateEmbedding() error {
 	}
 	if c.Embedding.Concurrency <= 0 || c.Embedding.Concurrency > 64 {
 		return errors.New("EMBEDDING_CONCURRENCY must be between 1 and 64")
+	}
+	if c.Embedding.MaxRetries < 0 || c.Embedding.MaxRetries > 3 {
+		return errors.New("EMBEDDING_MAX_RETRIES must be between 0 and 3")
 	}
 	return nil
 }

@@ -11,15 +11,23 @@ import (
 )
 
 type Manifest struct {
-	Version         string         `yaml:"version" json:"version"`
-	CodeCommit      string         `yaml:"code_commit" json:"code_commit"`
-	Model           Model          `yaml:"model" json:"model"`
-	EmbeddingModel  string         `yaml:"embedding_model" json:"embedding_model"`
-	Reranker        Reranker       `yaml:"reranker" json:"reranker"`
-	SkillHash       string         `yaml:"skill_hash" json:"skill_hash"`
-	RetrievalConfig map[string]any `yaml:"retrieval_config" json:"retrieval_config"`
-	BudgetConfig    map[string]any `yaml:"budget_config" json:"budget_config"`
-	DatasetVersion  string         `yaml:"dataset_version" json:"dataset_version"`
+	Version         string                 `yaml:"version" json:"version"`
+	CodeCommit      string                 `yaml:"code_commit" json:"code_commit"`
+	Model           Model                  `yaml:"model" json:"model"`
+	EmbeddingModel  string                 `yaml:"embedding_model" json:"embedding_model"`
+	Reranker        Reranker               `yaml:"reranker" json:"reranker"`
+	SkillHash       string                 `yaml:"skill_hash" json:"skill_hash"`
+	RetrievalConfig map[string]any         `yaml:"retrieval_config" json:"retrieval_config"`
+	BudgetConfig    map[string]any         `yaml:"budget_config" json:"budget_config"`
+	DatasetVersion  string                 `yaml:"dataset_version" json:"dataset_version"`
+	Datasets        map[string]DatasetSpec `yaml:"datasets" json:"datasets,omitempty"`
+}
+
+type DatasetSpec struct {
+	Path           string         `yaml:"path" json:"path"`
+	Size           int            `yaml:"size" json:"size"`
+	CategoryCounts map[string]int `yaml:"category_counts,omitempty" json:"category_counts,omitempty"`
+	GroundTruth    string         `yaml:"ground_truth" json:"ground_truth"`
 }
 type Model struct {
 	Protocol   string `yaml:"protocol" json:"protocol"`

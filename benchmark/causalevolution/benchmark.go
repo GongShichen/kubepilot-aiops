@@ -17,18 +17,20 @@ type Case struct {
 }
 type Metrics struct {
 	Cases                 int     `json:"cases"`
+	ResolvedIncidents     int     `json:"resolved_incidents"`
 	CausalAccuracy        float64 `json:"causal_accuracy"`
 	PathCoverage          float64 `json:"path_coverage"`
 	ConfidenceCalibration float64 `json:"confidence_calibration"`
 }
 
 func DefaultCases() []Case {
-	return []Case{{Incidents: evolutionIncidents(10), ExpectedCause: "memory leak", ExpectedPath: []string{"memory_leak", "memory_growth", "oom_killed", "pod_restart"}}}
+	return []Case{{Incidents: evolutionIncidents(100), ExpectedCause: "memory leak", ExpectedPath: []string{"memory_leak", "memory_growth", "oom_killed", "pod_restart"}}}
 }
 
 func Evaluate(cases []Case) Metrics {
 	out := Metrics{Cases: len(cases)}
 	for _, item := range cases {
+		out.ResolvedIncidents += len(item.Incidents)
 		store := knowledge.NewMemoryStore()
 		v := validator.New(store)
 		for _, in := range item.Incidents {

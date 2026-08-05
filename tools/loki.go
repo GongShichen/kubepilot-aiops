@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/kubepilot-aiops/kubepilot/internal/httpx"
 )
 
 type LokiClient struct {
@@ -38,7 +40,7 @@ func (c *LokiClient) Push(ctx context.Context, streams []map[string]any) error {
 }
 
 func NewLoki(base string) *LokiClient {
-	return &LokiClient{base: base, http: &http.Client{Timeout: 20 * time.Second}}
+	return &LokiClient{base: base, http: httpx.NewClient(20 * time.Second)}
 }
 
 type LokiEntry struct {
