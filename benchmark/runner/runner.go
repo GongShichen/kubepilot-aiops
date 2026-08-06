@@ -33,15 +33,18 @@ type Runner struct {
 	// have been exhausted. A restart always begins with a fresh injector
 	// baseline and a new Incident; it never replays a Kubernetes mutation.
 	MaxCaseRestarts int
-	// DiagnosisTimeout lets the runner wait for the server-side request retry
-	// window. A zero value keeps the scenario timeout.
+	// DiagnosisTimeout optionally bounds a whole diagnosis. Production
+	// benchmarks leave it unset: Agent turns already have individual model and
+	// tool deadlines, so a case must not inherit an aggregate wall-clock cap.
 	DiagnosisTimeout time.Duration
-	CaseTimeout      time.Duration
-	OnResult         func(reporter.CaseResult)
-	DiagnosisMethod  string
-	CausalMode       string
-	WorkerID         string
-	Gate             *ConcurrencyGate
+	// CaseTimeout optionally bounds the entire case. It is intentionally unset
+	// for production runs for the same reason as DiagnosisTimeout.
+	CaseTimeout     time.Duration
+	OnResult        func(reporter.CaseResult)
+	DiagnosisMethod string
+	CausalMode      string
+	WorkerID        string
+	Gate            *ConcurrencyGate
 }
 
 const cleanupTimeout = 2 * time.Minute
@@ -56,7 +59,7 @@ func (r *Runner) Run(ctx context.Context, items []scenarios.Scenario) []reporter
 		restarts := 0
 		maxCaseRestarts := r.maxCaseRestarts()
 		for {
-			caseCtx, cancel := context.WithTimeout(ctx, r.caseTimeout())
+			caseCtx, cancel := optionalTimeoutContext(ctx, r.CaseTimeout)
 			result = r.runOne(caseCtx, s)
 			cancel()
 			if restarts >= maxCaseRestarts || !shouldRestartCase(result) || ctx.Err() != nil {
@@ -92,18 +95,11 @@ func (r *Runner) maxCaseRestarts() int {
 	return r.MaxCaseRestarts
 }
 
-func (r *Runner) caseTimeout() time.Duration {
-	if r.CaseTimeout > 0 {
-		return r.CaseTimeout
+func optionalTimeoutContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(parent, timeout)
 	}
-	return 5 * time.Minute
-}
-
-func (r *Runner) diagnosisTimeout(s scenarios.Scenario) time.Duration {
-	if r.DiagnosisTimeout > s.Timeouts.Diagnosis {
-		return r.DiagnosisTimeout
-	}
-	return s.Timeouts.Diagnosis
+	return context.WithCancel(parent)
 }
 
 func shouldRestartCase(result reporter.CaseResult) bool {
@@ -188,7 +184,7 @@ func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter
 		return res
 	}
 	res.IncidentID = in.ID
-	diagnosisCtx, diagnosisCancel := context.WithTimeout(ctx, r.diagnosisTimeout(s))
+	diagnosisCtx, diagnosisCancel := optionalTimeoutContext(ctx, r.DiagnosisTimeout)
 	defer diagnosisCancel()
 	in, err = r.waitDiagnosis(diagnosisCtx, in.ID)
 	if err != nil {

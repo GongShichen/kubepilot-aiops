@@ -365,7 +365,7 @@ func run(args []string) {
 			reg.Register(name, inj)
 		}
 		workerID := fmt.Sprintf("worker-%02d", workerIndex+1)
-		workerRunner := &runner.Runner{Registry: reg, Client: client, AutoApprove: *autoApprove, PollInterval: time.Second, MaxCaseRestarts: 1, DiagnosisTimeout: benchmarkDiagnosisTimeout(), CaseTimeout: benchmarkCaseTimeout(), DiagnosisMethod: *diagnosisMethod, CausalMode: *causalMode, WorkerID: workerID, Gate: gate, OnResult: recorder.Record}
+		workerRunner := &runner.Runner{Registry: reg, Client: client, AutoApprove: *autoApprove, PollInterval: time.Second, MaxCaseRestarts: 1, DiagnosisMethod: *diagnosisMethod, CausalMode: *causalMode, WorkerID: workerID, Gate: gate, OnResult: recorder.Record}
 		parallelWorkers[workerIndex] = runner.ParallelWorker{ID: workerID, Namespace: namespace, Runner: workerRunner}
 	}
 	current, runErr := (runner.ParallelRunner{Workers: parallelWorkers}).Run(executionCtx, items)
@@ -1287,28 +1287,6 @@ func envInt(key string, fallback int) int {
 	return fallback
 }
 
-func benchmarkDiagnosisTimeout() time.Duration {
-	requestTimeout, err := time.ParseDuration(env("CHAT_TIMEOUT", "120s"))
-	if err != nil || requestTimeout <= 0 {
-		requestTimeout = 120 * time.Second
-	}
-	retries := envInt("CHAT_MAX_RETRIES", 3)
-	if retries < 3 {
-		retries = 3
-	}
-	// Leave enough room for the initial request and every configured retry.
-	// The lower bound also covers normal multi-tool Agent turns without making
-	// successful cases wait longer than their actual completion time.
-	window := requestTimeout * time.Duration(retries+1)
-	if window < 10*time.Minute {
-		window = 10 * time.Minute
-	}
-	return window + time.Minute
-}
-
-func benchmarkCaseTimeout() time.Duration {
-	return benchmarkDiagnosisTimeout() + 5*time.Minute
-}
 func envDuration(key string, fallback time.Duration) time.Duration {
 	value, err := time.ParseDuration(os.Getenv(key))
 	if err == nil && value >= 0 {

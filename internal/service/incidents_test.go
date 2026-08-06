@@ -17,6 +17,14 @@ func (blockingCorrelationFallback) Correlate(ctx context.Context, _ domain.Alert
 	return "", ctx.Err()
 }
 
+func TestWorkflowContextHasNoWallClockDeadline(t *testing.T) {
+	ctx, cancel := newWorkflowContext()
+	defer cancel()
+	if deadline, ok := ctx.Deadline(); ok {
+		t.Fatalf("workflow deadline must be unset, got %s", deadline)
+	}
+}
+
 func TestApproveRejectsLegacyWorkflowWithoutEinoCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()

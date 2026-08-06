@@ -19,6 +19,14 @@ func (f *fakeClient) Create(context.Context, scenarios.Scenario) (*domain.Incide
 func (f *fakeClient) Get(context.Context, string) (*domain.Incident, error) { return f.in, nil }
 func (f *fakeClient) Approve(context.Context, *domain.Incident) error       { return nil }
 
+func TestOptionalTimeoutContextLeavesZeroTimeoutUnbounded(t *testing.T) {
+	ctx, cancel := optionalTimeoutContext(context.Background(), 0)
+	defer cancel()
+	if deadline, ok := ctx.Deadline(); ok {
+		t.Fatalf("zero timeout must not impose a deadline, got %s", deadline)
+	}
+}
+
 type recoveryClient struct{ in *domain.Incident }
 
 func (c *recoveryClient) Create(context.Context, scenarios.Scenario) (*domain.Incident, error) {

@@ -34,11 +34,7 @@ type IncidentManager struct {
 		Correlate(context.Context, domain.Alert, string, string, string, []domain.Incident) (string, error)
 	}
 	CorrelationFallbackTimeout time.Duration
-	// WorkflowTimeout bounds one Incident runtime, including the model's
-	// request retry window. Zero preserves the historical three-minute default
-	// for embedders that do not provide runtime configuration.
-	WorkflowTimeout time.Duration
-	Learner         interface {
+	Learner                    interface {
 		Learn(context.Context, *domain.Incident) error
 	}
 }
@@ -291,7 +287,10 @@ func (m *IncidentManager) Retry(ctx context.Context, id string) (*domain.Inciden
 	return in, nil
 }
 func (m *IncidentManager) diagnose(id string) {
-	workflowCtx, cancel := context.WithTimeout(context.Background(), m.workflowTimeout())
+	// An incident may legitimately require multiple bounded Agent turns and
+	// approval-driven recovery. Model requests and capabilities have their own
+	// timeouts, so the orchestration itself must not impose a wall-clock cap.
+	workflowCtx, cancel := newWorkflowContext()
 	defer cancel()
 	if m.ModelSnapshotter != nil {
 		workflowCtx = m.ModelSnapshotter.WithSnapshot(workflowCtx)
@@ -375,7 +374,7 @@ func (m *IncidentManager) Approve(ctx context.Context, id, proposalID, decision,
 }
 
 func (m *IncidentManager) resumeWorkflow(id string, approved bool, idempotencyKey, operator string) {
-	ctx, cancel := context.WithTimeout(context.Background(), m.workflowTimeout())
+	ctx, cancel := newWorkflowContext()
 	defer cancel()
 	in, err := m.Store.Get(ctx, id)
 	if err != nil {
@@ -435,11 +434,8 @@ func (m *IncidentManager) resumeWorkflow(id string, approved bool, idempotencyKe
 	m.publish(state.Incident)
 }
 
-func (m *IncidentManager) workflowTimeout() time.Duration {
-	if m.WorkflowTimeout > 0 {
-		return m.WorkflowTimeout
-	}
-	return 3 * time.Minute
+func newWorkflowContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
 }
 
 func redactWorkflowError(err error) string {

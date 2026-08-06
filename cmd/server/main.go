@@ -179,7 +179,7 @@ func main() {
 		slog.Error("compile Eino graph", "error", err)
 		os.Exit(1)
 	}
-	manager := &service.IncidentManager{Store: pg, Supervisor: supervisor, Executor: executor, Hub: service.NewHub(), ModelSnapshotter: chat, Checkpoints: checkpointStore, AllowedNamespaces: cfg.AllowedNamespaces, CorrelationFallback: correlator, Learner: learner, WorkflowTimeout: incidentWorkflowTimeout(cfg.Chat.Timeout, cfg.Chat.MaxRetries)}
+	manager := &service.IncidentManager{Store: pg, Supervisor: supervisor, Executor: executor, Hub: service.NewHub(), ModelSnapshotter: chat, Checkpoints: checkpointStore, AllowedNamespaces: cfg.AllowedNamespaces, CorrelationFallback: correlator, Learner: learner}
 	supervisor.SetEventSink(manager.ObserveWorkflowEvent)
 	if err = manager.ReconcileLegacyWorkflows(ctx); err != nil {
 		slog.Error("reconcile legacy workflows", "error", err)
@@ -265,18 +265,4 @@ func endpointReadiness(ctx context.Context, endpoint string) string {
 		return "not_ready"
 	}
 	return "ready"
-}
-
-func incidentWorkflowTimeout(requestTimeout time.Duration, maxRetries int) time.Duration {
-	if requestTimeout <= 0 {
-		requestTimeout = 60 * time.Second
-	}
-	if maxRetries < 3 {
-		maxRetries = 3
-	}
-	timeout := requestTimeout*time.Duration(maxRetries+1) + time.Minute
-	if timeout < 3*time.Minute {
-		return 3 * time.Minute
-	}
-	return timeout
 }
