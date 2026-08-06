@@ -430,7 +430,52 @@ func (r *AgentRegistry) generateRole(ctx context.Context, agentName, instruction
 		return nil, fmt.Errorf("skill for %s is not registered", agentName)
 	}
 	system := skill.Content + "\n\nRuntime instruction: " + instruction + "\nKeep the complete generated response concise and finish the required JSON well within the configured output-token limit."
-	return r.chat.Generate(ctx, []*schema.Message{schema.SystemMessage(system), schema.UserMessage(payload)}, r.structuredModelOptions()...)
+	messages := []*schema.Message{schema.SystemMessage(system), schema.UserMessage(payload)}
+	response, err := r.chat.Generate(ctx, messages, r.structuredModelOptions()...)
+	if err != nil || validStructuredResponse(response) {
+		return response, err
+	}
+	// Some reasoning-capable providers can finish a streamed response with only
+	// hidden reasoning content. Retry that protocol failure once as a fresh,
+	// explicitly-visible JSON response. The retry preserves the configured
+	// per-response output limit and aggregates both attempts into usage telemetry.
+	retrySystem := system + "\n\nRetry requirement: the prior response did not contain a valid visible JSON object. Return the requested JSON object immediately, with no prose or hidden analysis."
+	retryMessages := []*schema.Message{schema.SystemMessage(retrySystem), schema.UserMessage(payload)}
+	retry, retryErr := r.chat.Generate(ctx, retryMessages, r.structuredModelOptions()...)
+	if retryErr != nil {
+		return response, fmt.Errorf("retry visible JSON response: %w", retryErr)
+	}
+	mergeResponseUsage(retry, response)
+	return retry, nil
+}
+
+func validStructuredResponse(message *schema.Message) bool {
+	if message == nil {
+		return false
+	}
+	object, err := modelJSONObject(message.Content)
+	return err == nil && json.Valid([]byte(object))
+}
+
+func mergeResponseUsage(final, previous *schema.Message) {
+	if final == nil || previous == nil || previous.ResponseMeta == nil || previous.ResponseMeta.Usage == nil {
+		return
+	}
+	if final.ResponseMeta == nil {
+		final.ResponseMeta = &schema.ResponseMeta{}
+	}
+	if final.ResponseMeta.Usage == nil {
+		usage := *previous.ResponseMeta.Usage
+		final.ResponseMeta.Usage = &usage
+		return
+	}
+	current := final.ResponseMeta.Usage
+	prior := previous.ResponseMeta.Usage
+	current.PromptTokens += prior.PromptTokens
+	current.PromptTokenDetails.CachedTokens += prior.PromptTokenDetails.CachedTokens
+	current.CompletionTokens += prior.CompletionTokens
+	current.CompletionTokensDetails.ReasoningTokens += prior.CompletionTokensDetails.ReasoningTokens
+	current.TotalTokens += prior.TotalTokens
 }
 
 func (r *AgentRegistry) structuredModelOptions() []model.Option {

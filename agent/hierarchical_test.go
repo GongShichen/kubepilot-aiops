@@ -20,6 +20,24 @@ type hierarchicalDiagnosisModel struct {
 	alternativeSawPrimary bool
 }
 
+type visibleJSONRetryModel struct{ calls int }
+
+func (m *visibleJSONRetryModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.calls++
+	if m.calls == 1 {
+		return &schema.Message{Role: schema.Assistant, ReasoningContent: "hidden provider reasoning", ResponseMeta: &schema.ResponseMeta{Usage: &schema.TokenUsage{PromptTokens: 11, CompletionTokens: 8192, TotalTokens: 8203, CompletionTokensDetails: schema.CompletionTokensDetails{ReasoningTokens: 8192}}}}, nil
+	}
+	return &schema.Message{Role: schema.Assistant, Content: `{}`, ResponseMeta: &schema.ResponseMeta{Usage: &schema.TokenUsage{PromptTokens: 13, CompletionTokens: 5, TotalTokens: 18}}}, nil
+}
+
+func (m *visibleJSONRetryModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
 func (m *hierarchicalDiagnosisModel) Generate(_ context.Context, messages []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	system, user := messages[0].Content, messages[len(messages)-1].Content
 	response := ""
@@ -87,6 +105,22 @@ func TestEvidenceWorkersRecordPartialInfrastructureFailure(t *testing.T) {
 	findings, evidence, usage, infrastructure := registry.runEvidenceWorkers(context.Background(), &domain.Incident{ID: "incident"}, plan, []string{"metric", "topology"}, map[string]Collector{}, nil)
 	if len(findings) != 0 || len(evidence) != 0 || len(usage) != 0 || len(infrastructure) != 2 {
 		t.Fatalf("partial worker failure was not isolated: findings=%+v evidence=%+v usage=%+v infrastructure=%+v", findings, evidence, usage, infrastructure)
+	}
+}
+
+func TestGenerateRoleRetriesMissingVisibleJSONAndAccountsBothAttempts(t *testing.T) {
+	chat := &visibleJSONRetryModel{}
+	registry := &AgentRegistry{chat: chat, skills: map[string]agentSkill{PlannerAgentName: {Content: "planner skill"}}}
+	message, err := registry.generateRole(context.Background(), PlannerAgentName, "Return a JSON object.", `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.calls != 2 || message == nil || message.Content != `{}` {
+		t.Fatalf("visible JSON retry did not complete: calls=%d message=%+v", chat.calls, message)
+	}
+	usage := registry.modelUsage("incident", PlannerAgentName, message, time.Second)
+	if usage.InputTokens != 24 || usage.OutputTokens != 8197 || usage.ReasoningTokens != 8192 {
+		t.Fatalf("retry usage was not aggregated: %+v", usage)
 	}
 }
 

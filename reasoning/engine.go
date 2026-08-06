@@ -313,13 +313,20 @@ func preserveRequiredSources(items []domain.Evidence, maxItems int) []domain.Evi
 	}
 	chosen := map[string]bool{}
 	signatures := map[string]bool{}
+	metricFamilies := map[string]bool{}
 	out := make([]domain.Evidence, 0, min(maxItems, len(items)))
 	appendBest := func(reason string, match func(domain.Evidence) bool) {
+		if len(out) >= maxItems {
+			return
+		}
 		for _, item := range items {
 			signature := evidenceSignature(item)
 			if !chosen[item.ID] && !signatures[signature] && match(item) {
 				chosen[item.ID] = true
 				signatures[signature] = true
+				if family := metricEvidenceFamily(item); family != "" {
+					metricFamilies[family] = true
+				}
 				item.RankingReasons = append(item.RankingReasons, reason)
 				out = append(out, item)
 				return
@@ -327,9 +334,37 @@ func preserveRequiredSources(items []domain.Evidence, maxItems int) []domain.Evi
 		}
 	}
 	appendBest("required_kubernetes_source", func(v domain.Evidence) bool { return strings.EqualFold(v.Source, "kubernetes") })
-	appendBest("required_telemetry_source", func(v domain.Evidence) bool {
-		return sourceIn(v.Source, "metric", "prometheus", "log", "loki", "trace", "jaeger")
-	})
+	// A single high-scoring telemetry modality must not crowd out the other
+	// independent observations. Each available modality is therefore represented
+	// before relevance ranking fills the remaining context budget.
+	for _, modality := range []string{"metric", "log", "trace"} {
+		modality := modality
+		appendBest("required_"+modality+"_source", func(v domain.Evidence) bool {
+			return evidenceModality(v) == modality
+		})
+	}
+	// Prometheus-style collections commonly contain a point-in-time and a
+	// current-window view of the same signal. Keep one of each signal family
+	// before admitting duplicate views so load, latency, error, resource and
+	// availability observations remain independently inspectable.
+	for _, item := range items {
+		if len(out) >= maxItems {
+			break
+		}
+		family := metricEvidenceFamily(item)
+		if family == "" || metricFamilies[family] {
+			continue
+		}
+		signature := evidenceSignature(item)
+		if chosen[item.ID] || signatures[signature] {
+			continue
+		}
+		chosen[item.ID] = true
+		signatures[signature] = true
+		metricFamilies[family] = true
+		item.RankingReasons = append(item.RankingReasons, "retained_metric_signal_family")
+		out = append(out, item)
+	}
 	for _, item := range items {
 		if len(out) >= maxItems {
 			break
@@ -348,6 +383,35 @@ func preserveRequiredSources(items []domain.Evidence, maxItems int) []domain.Evi
 		return out[i].RelevanceScore > out[j].RelevanceScore
 	})
 	return out
+}
+
+func evidenceModality(item domain.Evidence) string {
+	switch strings.ToLower(strings.TrimSpace(item.Source)) {
+	case "metric", "prometheus":
+		return "metric"
+	case "log", "loki":
+		return "log"
+	case "trace", "jaeger":
+		return "trace"
+	case "kubernetes":
+		return "topology"
+	default:
+		return ""
+	}
+}
+
+func metricEvidenceFamily(item domain.Evidence) string {
+	if evidenceModality(item) != "metric" {
+		return ""
+	}
+	kind := strings.ToLower(strings.TrimSpace(firstNonEmpty(item.Kind, item.Type)))
+	if kind == "" {
+		return ""
+	}
+	for _, suffix := range []string{"_current", "_trend"} {
+		kind = strings.TrimSuffix(kind, suffix)
+	}
+	return kind
 }
 
 func evidenceSignature(item domain.Evidence) string {

@@ -98,6 +98,33 @@ func TestEvidenceRankingUsesObservedMetricResultAndCollapsesDynamicTemplates(t *
 	}
 }
 
+func TestEvidenceRankingPreservesIndependentTelemetryAndMetricFamilies(t *testing.T) {
+	items := []domain.Evidence{
+		{ID: "topology", Source: "kubernetes", RelevanceScore: .99, Summary: "workload topology"},
+		{ID: "cpu", Source: "prometheus", Kind: "cpu", RelevanceScore: .98, Summary: "cpu observation"},
+		{ID: "cpu-current", Source: "prometheus", Kind: "cpu_current", RelevanceScore: .97, Summary: "current cpu observation"},
+		{ID: "memory", Source: "prometheus", Kind: "memory", RelevanceScore: .96, Summary: "memory observation"},
+		{ID: "errors", Source: "prometheus", Kind: "error_rate", RelevanceScore: .95, Summary: "error observation"},
+		{ID: "throughput", Source: "prometheus", Kind: "throughput", RelevanceScore: .94, Summary: "throughput observation"},
+		{ID: "latency", Source: "prometheus", Kind: "latency", RelevanceScore: .93, Summary: "latency observation"},
+		{ID: "logs", Source: "loki", RelevanceScore: .70, Summary: "request failure log"},
+		{ID: "trace", Source: "jaeger", RelevanceScore: .60, Summary: "trace dependency observation"},
+	}
+	got := preserveRequiredSources(items, 8)
+	byID := map[string]domain.Evidence{}
+	for _, item := range got {
+		byID[item.ID] = item
+	}
+	for _, id := range []string{"topology", "logs", "trace", "throughput"} {
+		if _, ok := byID[id]; !ok {
+			t.Fatalf("independent observation %q was omitted: %#v", id, got)
+		}
+	}
+	if _, ok := byID["cpu-current"]; ok {
+		t.Fatalf("duplicate current-window metric displaced another signal family: %#v", got)
+	}
+}
+
 func TestHypothesisUnknownEvidenceRejected(t *testing.T) {
 	e := New(DefaultConfig())
 	_, err := e.VerifyHypotheses([]domain.HypothesisDraft{{ID: "h", PriorProbability: .9, SupportingEvidenceIDs: []string{"missing"}, ExpectedCausalPath: []string{"cause"}}}, []domain.Evidence{{ID: "real"}}, nil, nil)
