@@ -48,9 +48,9 @@ SQL
 # old image after source changes silently runs stale budget/model/runtime code.
 "${compose[@]}" up -d --build prometheus alertmanager loki jaeger drain3 kubepilot-agent >/dev/null
 for attempt in $(seq 1 60); do
-  if curl -fsS http://localhost:8080/readyz >/dev/null \
-    && curl -fsS http://localhost:3100/ready >/dev/null \
-    && curl -fsS http://localhost:9090/-/ready >/dev/null; then
+	if curl -fsS http://localhost:8080/readyz >/dev/null \
+		&& curl -fsS http://localhost:3100/ready >/dev/null \
+		&& curl -fsS http://localhost:9090/-/ready >/dev/null; then
     break
   fi
   if [[ "$attempt" -eq 60 ]]; then
@@ -58,7 +58,15 @@ for attempt in $(seq 1 60); do
     exit 1
   fi
   sleep 2
-done
+	done
+
+# The benchmark driver runs on the host, unlike the Agent container. Verify
+# the host-published Milvus endpoint here so history seeding cannot start
+# against the Docker-internal service name before the dependency is reachable.
+if ! nc -z -w 2 127.0.0.1 19530 >/dev/null 2>&1; then
+	echo "Milvus is not reachable from the benchmark driver at 127.0.0.1:19530" >&2
+	exit 1
+fi
 
 kubectl rollout status deployment/gateway-service -n kubepilot-benchmark --timeout=120s >/dev/null
 kubectl rollout status deployment/order-service -n kubepilot-benchmark --timeout=120s >/dev/null
