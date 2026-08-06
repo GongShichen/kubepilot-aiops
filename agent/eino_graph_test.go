@@ -254,7 +254,7 @@ func TestEinoGraphInterruptAndResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if names := registry.Names(); len(names) != 3 || names[0] != SupervisorAgentName || names[1] != DiagnosisAgentName || names[2] != RecoveryAgentName {
+	if names := registry.Names(); len(names) != 10 || names[0] != SupervisorAgentName || names[1] != PlannerAgentName || names[6] != DiagnosisAgentName || names[8] != CriticAgentName || names[9] != RecoveryAgentName {
 		t.Fatalf("unexpected ADK agents: %v", names)
 	}
 	checkpoints := &memoryEinoCheckpoint{data: map[string][]byte{}}
@@ -276,6 +276,14 @@ func TestEinoGraphInterruptAndResume(t *testing.T) {
 	if incident.Status != domain.StatusAwaitingApproval || incident.DryRun == nil || incident.Proposal == nil {
 		t.Fatalf("incident did not reach approval: %#v", incident)
 	}
+	if incident.Investigation == nil || len(incident.Investigation.ModelUsage) == 0 {
+		t.Fatal("constrained ReAct model usage was not captured")
+	}
+	for _, usage := range incident.Investigation.ModelUsage {
+		if usage.InputTokens <= 0 || usage.OutputTokens <= 0 || usage.DurationMS < 0 {
+			t.Fatalf("incomplete per-Agent model usage: %+v", usage)
+		}
+	}
 	resume := &ApprovalResumeData{Approved: true, Context: domain.ExecutionContext{NamespaceAllowlist: []string{"kubepilot-demo"}, IncidentID: incident.ID, ProposalID: incident.Proposal.ID, ApprovalID: "approval-1", IdempotencyKey: "key-1", Operator: "test", TargetUID: "uid-1", ResourceVersion: "rv-1", MutationSpecHash: "mutation-1", ApprovedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Minute)}}
 	state, err := supervisor.Resume(ctx, incident.ID, interrupt.InterruptContexts[0].ID, resume)
 	if err != nil {
@@ -283,6 +291,9 @@ func TestEinoGraphInterruptAndResume(t *testing.T) {
 	}
 	if state.Incident.Status != domain.StatusResolved || !executor.executed {
 		t.Fatalf("status=%s executed=%v", state.Incident.Status, executor.executed)
+	}
+	if state.Incident.RecoveryExecution == nil || state.Incident.RecoveryExecution.Attempts != 1 || state.Incident.RecoveryExecution.ConfirmedMutations != 1 || state.Incident.RecoveryExecution.Namespace != incident.Namespace || state.Incident.RecoveryExecution.Outcome != "succeeded" {
+		t.Fatalf("deterministic recovery audit was not recorded: %+v", state.Incident.RecoveryExecution)
 	}
 	if _, exists, _ := checkpoints.Get(ctx, "incident:"+incident.ID); exists {
 		t.Fatal("completed workflow checkpoint was not deleted")

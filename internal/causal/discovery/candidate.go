@@ -8,22 +8,30 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
 
 // NodeType describes the observable role of a node in an incident causal graph.
 // The vocabulary is intentionally small and stable so mined patterns can be
 // compared across services and deployments.
-type NodeType string
+type NodeType = string
 
 const (
-	NodeCause           NodeType = "cause"
-	NodeSymptom         NodeType = "symptom"
-	NodeMetric          NodeType = "metric"
-	NodeLogPattern      NodeType = "log_pattern"
-	NodeTracePattern    NodeType = "trace_pattern"
-	NodeKubernetesEvent NodeType = "kubernetes_event"
-	NodeAction          NodeType = "action"
-	NodeRecoveryResult  NodeType = "recovery_result"
+	NodeCause       NodeType = "cause"
+	NodeMechanism   NodeType = "mechanism"
+	NodeSymptom     NodeType = "symptom"
+	NodeObservation NodeType = "observation"
+	NodeAction      NodeType = "action"
+	NodeOutcome     NodeType = "outcome"
+
+	// Source-specific evidence names are compatibility aliases only. Persisted
+	// node types use the canonical observation vocabulary.
+	NodeMetric          = NodeObservation
+	NodeLogPattern      = NodeObservation
+	NodeTracePattern    = NodeObservation
+	NodeKubernetesEvent = NodeObservation
+	NodeRecoveryResult  = NodeOutcome
 )
 
 const (
@@ -37,20 +45,8 @@ const (
 	CandidateRejected   = StatusRejected
 )
 
-type CausalNode struct {
-	ID                string   `json:"id"`
-	Type              NodeType `json:"type"`
-	Name              string   `json:"name"`
-	Confidence        float64  `json:"confidence,omitempty"`
-	SourceEvidenceIDs []string `json:"source_evidence_ids,omitempty"`
-}
-
-type CausalEdge struct {
-	Source     string  `json:"source"`
-	Target     string  `json:"target"`
-	Relation   string  `json:"relation"`
-	Confidence float64 `json:"confidence"`
-}
+type CausalNode = domain.CausalNode
+type CausalEdge = domain.CausalEdge
 
 type IncidentCausalGraph struct {
 	IncidentID string       `json:"incident_id"`

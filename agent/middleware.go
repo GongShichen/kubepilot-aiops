@@ -146,10 +146,18 @@ type constrainedAgentMiddleware struct {
 	terminalTools map[string]bool
 	toolFilter    func(*WorkflowState, string) bool
 	allToolInfos  []*schema.ToolInfo
+	modelMu       sync.Mutex
+	modelStarted  time.Time
+	usageRecorder func(*schema.Message, time.Duration)
 }
 
 func (m *constrainedAgentMiddleware) withToolFilter(filter func(*WorkflowState, string) bool) *constrainedAgentMiddleware {
 	m.toolFilter = filter
+	return m
+}
+
+func (m *constrainedAgentMiddleware) withUsageRecorder(recorder func(*schema.Message, time.Duration)) *constrainedAgentMiddleware {
+	m.usageRecorder = recorder
 	return m
 }
 
@@ -177,6 +185,9 @@ func (m *constrainedAgentMiddleware) BeforeModelRewriteState(ctx context.Context
 	if err = runtime.budgets.AddIteration(m.agent); err != nil {
 		return ctx, state, err
 	}
+	m.modelMu.Lock()
+	m.modelStarted = time.Now()
+	m.modelMu.Unlock()
 	updateAgentBudgetMessage(state, m.agent, runtime.budgets.RemainingTools(m.agent))
 	if m.allToolInfos == nil {
 		m.allToolInfos = append([]*schema.ToolInfo(nil), state.ToolInfos...)
@@ -231,6 +242,17 @@ func (m *constrainedAgentMiddleware) AfterModelRewriteState(ctx context.Context,
 		return ctx, state, err
 	}
 	last := state.Messages[len(state.Messages)-1]
+	m.modelMu.Lock()
+	started := m.modelStarted
+	m.modelStarted = time.Time{}
+	m.modelMu.Unlock()
+	if last != nil && m.usageRecorder != nil {
+		duration := time.Duration(0)
+		if !started.IsZero() {
+			duration = time.Since(started)
+		}
+		m.usageRecorder(last, duration)
+	}
 	if last != nil {
 		tokens := modelTokensForBudget(last)
 		if err = runtime.budgets.AddTokens(m.agent, tokens); err != nil {

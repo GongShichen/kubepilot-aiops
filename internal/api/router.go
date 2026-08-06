@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,13 +32,15 @@ type Server struct {
 	RerankerHealth         func() map[string]any
 	RerankerProbe          func(*gin.Context) error
 	Knowledge              store.KnowledgeStore
+	Readiness              func(context.Context) map[string]string
+	BenchmarkReadiness     func(context.Context) map[string]string
 }
 
 func (s *Server) Router() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery(), gin.Logger())
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
-	r.GET("/readyz", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ready"}) })
+	r.GET("/readyz", s.ready)
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	r.POST("/api/v1/alerts/alertmanager", s.webhookAuth(), s.alertmanager)
 	api := r.Group("/api/v1", s.auth())
@@ -47,6 +51,7 @@ func (s *Server) Router() *gin.Engine {
 	api.GET("/incidents/:id/evidence", s.evidence)
 	api.GET("/incidents/:id/hypotheses", s.hypotheses)
 	api.GET("/incidents/:id/agent-runs", s.agentRuns)
+	api.GET("/incidents/:id/investigation", s.investigation)
 	api.GET("/incidents/:id/events", s.events)
 	api.GET("/incidents/:id/stream", s.stream)
 	api.POST("/incidents/:id/approval", s.approval)
@@ -83,14 +88,17 @@ func (s *Server) Router() *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+	api.GET("/runtime/readiness", s.runtimeReadiness)
 	api.GET("/knowledge/causal-patterns", s.causalPatterns)
 	api.GET("/knowledge/causal-patterns/:id", s.causalPattern)
 	api.POST("/knowledge/causal-patterns/:id/status", s.causalPatternStatus)
+	api.POST("/knowledge/causal-patterns/:id/rollback", s.causalPatternRollback)
 	api.POST("/benchmarks/runs", s.benchmarkStart)
 	api.GET("/benchmarks/runs", s.benchmarkList)
 	api.GET("/benchmarks/runs/:id", s.benchmarkGet)
 	api.GET("/benchmarks/runs/:id/stream", s.benchmarkStream)
 	api.POST("/benchmarks/runs/:id/cancel", s.benchmarkCancel)
+	api.POST("/benchmarks/runs/:id/resume", s.benchmarkResume)
 	api.GET("/benchmarks/runs/:id/results", s.benchmarkResults)
 	api.GET("/benchmarks/runs/:id/artifacts", s.benchmarkArtifacts)
 	r.GET("/", func(c *gin.Context) {
@@ -104,13 +112,62 @@ func (s *Server) Router() *gin.Engine {
 	return r
 }
 
+func (s *Server) ready(c *gin.Context) {
+	components := map[string]string{"api": "ready"}
+	if s.Readiness != nil {
+		components = s.Readiness(c)
+	}
+	ready := true
+	for _, status := range components {
+		if status != "ready" {
+			ready = false
+			break
+		}
+	}
+	code := http.StatusOK
+	status := "ready"
+	if !ready {
+		code = http.StatusServiceUnavailable
+		status = "not_ready"
+	}
+	c.JSON(code, gin.H{"status": status, "components": components})
+}
+
+func (s *Server) runtimeReadiness(c *gin.Context) {
+	components := map[string]string{"api": "ready"}
+	if s.Readiness != nil {
+		components = s.Readiness(c)
+	}
+	if s.ModelHealth != nil {
+		health := s.ModelHealth()
+		if configured, ok := health["configured"].(bool); ok && configured {
+			components["model"] = "ready"
+		} else {
+			components["model"] = "not_ready"
+		}
+	}
+	if s.BenchmarkReadiness != nil {
+		for component, status := range s.BenchmarkReadiness(c) {
+			components[component] = status
+		}
+	}
+	code := http.StatusOK
+	for _, status := range components {
+		if status != "ready" && status != "disabled" {
+			code = http.StatusServiceUnavailable
+			break
+		}
+	}
+	c.JSON(code, gin.H{"components": components})
+}
+
 func (s *Server) causalPatterns(c *gin.Context) {
 	if s.Knowledge == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge store unavailable"})
 		return
 	}
 	status := c.Query("status")
-	if status != "" && status != "active" && status != "disabled" && status != "candidate" {
+	if status != "" && status != "active" && status != "disabled" && status != "candidate" && status != "validating" && status != "rejected" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status filter"})
 		return
 	}
@@ -137,8 +194,8 @@ func (s *Server) causalPatternStatus(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if in.Status != "active" && in.Status != "disabled" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be active or disabled"})
+	if in.Status != "active" && in.Status != "disabled" && in.Status != "validating" && in.Status != "rejected" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be active, validating, rejected, or disabled"})
 		return
 	}
 	operator := strings.TrimSpace(c.GetHeader("X-Operator"))
@@ -146,6 +203,26 @@ func (s *Server) causalPatternStatus(c *gin.Context) {
 		operator = "api-user"
 	}
 	item, err := s.Knowledge.SetCausalPatternStatus(c, c.Param("id"), in.Status, operator)
+	respond(c, item, err)
+}
+func (s *Server) causalPatternRollback(c *gin.Context) {
+	if s.Knowledge == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge store unavailable"})
+		return
+	}
+	var in struct {
+		Revision int `json:"revision"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil || in.Revision <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "a positive revision is required"})
+		return
+	}
+	operator := strings.TrimSpace(c.GetHeader("X-Operator"))
+	if operator == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "X-Operator is required"})
+		return
+	}
+	item, err := s.Knowledge.RollbackCausalPattern(c, c.Param("id"), in.Revision, operator)
 	respond(c, item, err)
 }
 func (s *Server) retry(c *gin.Context) {
@@ -176,7 +253,74 @@ func (s *Server) agentRuns(c *gin.Context) {
 		decisions = incident.DiagnosisLedger.AgentDecisions
 		feedback = incident.DiagnosisLedger.SafetyFeedback
 	}
-	c.JSON(http.StatusOK, gin.H{"workflow": "eino-constrained-react", "skill_snapshot_hash": incident.SkillSnapshotHash, "ranking_policy_hash": incident.RankingPolicyHash, "reranker_config_hash": incident.RerankerConfigHash, "budget": incident.AgentBudget, "decisions": decisions, "safety_feedback": feedback})
+	architecture := "constrained-react"
+	var modelUsage []domain.ModelUsageEvent
+	var memoryReads []domain.MemoryAccessEvent
+	if incident.Investigation != nil {
+		architecture = incident.Investigation.Architecture
+		modelUsage = incident.Investigation.ModelUsage
+		memoryReads = incident.Investigation.MemoryReads
+	}
+	type agentRunSummary struct {
+		Agent              string  `json:"agent"`
+		ParentAgent        string  `json:"parent_agent,omitempty"`
+		ModelCalls         int     `json:"model_calls"`
+		InputTokens        int     `json:"input_tokens"`
+		OutputTokens       int     `json:"output_tokens"`
+		ReasoningTokens    int     `json:"reasoning_tokens"`
+		DurationMS         float64 `json:"duration_ms"`
+		EstimatedCost      float64 `json:"estimated_cost"`
+		Iterations         int     `json:"iterations"`
+		ToolUses           int     `json:"tool_uses"`
+		ToolComplexityCost int     `json:"tool_complexity_cost"`
+		Corrections        int     `json:"corrections"`
+	}
+	byAgent := map[string]*agentRunSummary{}
+	for _, usage := range modelUsage {
+		item := byAgent[usage.Agent]
+		if item == nil {
+			item = &agentRunSummary{Agent: usage.Agent, ParentAgent: usage.ParentAgent}
+			byAgent[usage.Agent] = item
+		}
+		item.ModelCalls++
+		item.InputTokens += usage.InputTokens
+		item.OutputTokens += usage.OutputTokens
+		item.ReasoningTokens += usage.ReasoningTokens
+		item.DurationMS += usage.DurationMS
+		item.EstimatedCost += usage.EstimatedCost
+	}
+	if incident.AgentBudget != nil {
+		for agentName, usage := range incident.AgentBudget.Usage {
+			item := byAgent[agentName]
+			if item == nil {
+				item = &agentRunSummary{Agent: agentName}
+				byAgent[agentName] = item
+			}
+			item.Iterations = usage.Iterations
+			item.ToolUses = usage.ToolUses
+			item.ToolComplexityCost = usage.ToolCost
+			item.Corrections = usage.Corrections
+		}
+	}
+	agents := make([]agentRunSummary, 0, len(byAgent))
+	for _, item := range byAgent {
+		agents = append(agents, *item)
+	}
+	sort.SliceStable(agents, func(i, j int) bool { return agents[i].Agent < agents[j].Agent })
+	c.JSON(http.StatusOK, gin.H{"workflow": domain.WorkflowRuntimeName, "strategy": incident.DiagnosisMethod, "architecture": architecture, "skill_snapshot_hash": incident.SkillSnapshotHash, "ranking_policy_hash": incident.RankingPolicyHash, "reranker_config_hash": incident.RerankerConfigHash, "agents": agents, "budget": incident.AgentBudget, "model_usage": modelUsage, "memory_reads": memoryReads, "decisions": decisions, "safety_feedback": feedback})
+}
+
+func (s *Server) investigation(c *gin.Context) {
+	incident, err := s.Manager.Get(c, c.Param("id"))
+	if err != nil {
+		respond(c, nil, err)
+		return
+	}
+	if incident.Investigation == nil {
+		c.JSON(http.StatusOK, gin.H{"strategy": incident.DiagnosisMethod, "status": "not_available"})
+		return
+	}
+	c.JSON(http.StatusOK, incident.Investigation)
 }
 func confidenceHistory(items []domain.VerifiedHypothesis) []domain.HypothesisConfidenceRecord {
 	var out []domain.HypothesisConfidenceRecord
@@ -200,14 +344,22 @@ func (s *Server) benchmarkStart(c *gin.Context) {
 		return
 	}
 	var in struct {
-		Profile     string `json:"profile"`
-		AutoApprove bool   `json:"auto_approve"`
+		Profile      string   `json:"profile"`
+		Strategies   []string `json:"strategies"`
+		DatasetSplit string   `json:"dataset_split"`
+		Seeds        []int64  `json:"seeds"`
+		Repetitions  int      `json:"repetitions"`
+		ModelProfile string   `json:"model_profile"`
+		AutoApprove  bool     `json:"auto_approve"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	run, err := s.Benchmarks.Start(in.Profile, in.AutoApprove)
+	if len(in.Strategies) == 0 && (in.Profile == "smoke" || in.Profile == "ci" || in.Profile == "standard" || in.Profile == "robustness" || in.Profile == "full") {
+		in.Strategies = []string{domain.DiagnosisMethodDirect, domain.DiagnosisMethodRAG, domain.DiagnosisMethodReAct, domain.DiagnosisMethodKubePilot}
+	}
+	run, err := s.Benchmarks.StartRequest(service.BenchmarkRequest{Profile: in.Profile, Strategies: in.Strategies, DatasetSplit: in.DatasetSplit, Seeds: in.Seeds, Repetitions: in.Repetitions, ModelProfile: in.ModelProfile, AutoApprove: in.AutoApprove})
 	respond(c, run, err)
 }
 func (s *Server) benchmarkList(c *gin.Context) {
@@ -232,6 +384,14 @@ func (s *Server) benchmarkCancel(c *gin.Context) {
 	}
 	err := s.Benchmarks.Cancel(c.Param("id"))
 	respond(c, gin.H{"status": "cancelling"}, err)
+}
+func (s *Server) benchmarkResume(c *gin.Context) {
+	if s.Benchmarks == nil {
+		c.JSON(503, gin.H{"error": "benchmark manager unavailable"})
+		return
+	}
+	run, err := s.Benchmarks.Resume(c.Param("id"))
+	respond(c, run, err)
 }
 func (s *Server) benchmarkResults(c *gin.Context) {
 	v, err := s.Benchmarks.Results(c.Param("id"))

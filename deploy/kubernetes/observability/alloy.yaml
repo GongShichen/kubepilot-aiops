@@ -36,7 +36,7 @@ data:
       targets = discovery.kubernetes.pods.targets
       rule {
         source_labels = ["__meta_kubernetes_namespace"]
-        regex         = "kubepilot-(demo|benchmark)"
+        regex         = "kubepilot-(demo|benchmark(-worker-[0-9]+)?)"
         action        = "keep"
       }
       rule {

@@ -9,13 +9,13 @@ groups:
         annotations:
           summary: "{{ $labels.service }} HTTP 5xx rate is high"
       - alert: PodRestarting
-        expr: increase(kube_pod_container_status_restarts_total{namespace=~"kubepilot-demo|kubepilot-benchmark"}[5m]) > 0
+        expr: increase(kube_pod_container_status_restarts_total{namespace=~"kubepilot-demo|kubepilot-benchmark(-worker-[0-9]+)?"}[5m]) > 0
         labels:
           severity: warning
         annotations:
           summary: "Pod restart detected"
       - alert: DeploymentUnavailable
-        expr: kube_deployment_status_replicas_available{namespace=~"kubepilot-demo|kubepilot-benchmark"} < kube_deployment_spec_replicas
+        expr: kube_deployment_status_replicas_available{namespace=~"kubepilot-demo|kubepilot-benchmark(-worker-[0-9]+)?"} < kube_deployment_spec_replicas
         for: 30s
         labels:
           severity: critical

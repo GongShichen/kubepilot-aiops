@@ -58,3 +58,25 @@ func TestUnknownEvidenceReturnsRepairableToolObservation(t *testing.T) {
 		t.Fatalf("corrected hypothesis was not accepted: result=%+v err=%v", result, err)
 	}
 }
+
+func TestDuplicateSearchingHypothesisSubmissionIsIdempotent(t *testing.T) {
+	limits := map[string]domain.AgentBudget{DiagnosisAgentName: {MaxIterations: 4, MaxToolUses: 4, MaxTokens: 8192, MaxCorrections: 2}}
+	budget := safety.NewBudgetController(nil, limits, map[string]int{"submit_hypotheses": 1})
+	state := &WorkflowState{Incident: &domain.Incident{Evidence: []domain.Evidence{{ID: "evidence-1", Source: "kubernetes"}}}}
+	runtime := &constrainedRuntime{state: state, budgets: budget, done: map[string]bool{}}
+	runtime.hypotheses = safety.NewHypothesisTransitionService(&state.DiagnosisLedger, nil)
+	ctx := withConstrainedRuntime(context.Background(), runtime)
+	draft := domain.HypothesisDraft{ID: "h1", SupportingEvidenceIDs: []string{"evidence-1"}, ExpectedCausalPath: []string{"cause", "symptom"}}
+	for attempt := 0; attempt < 2; attempt++ {
+		result, err := recordHypotheses(ctx, HypothesisSubmission{ReasoningType: "hypothesis_verification", Hypotheses: []domain.HypothesisDraft{draft}})
+		if err != nil || !result.OK {
+			t.Fatalf("attempt %d: repeated in-progress hypothesis was rejected: result=%+v err=%v", attempt+1, result, err)
+		}
+	}
+	if status := runtime.hypotheses.Status("h1"); status != domain.HypothesisEvidenceSearching {
+		t.Fatalf("status=%s, want %s", status, domain.HypothesisEvidenceSearching)
+	}
+	if got := len(state.DiagnosisLedger.HypothesisTransitions); got != 2 {
+		t.Fatalf("duplicate submission added lifecycle transitions: %d", got)
+	}
+}

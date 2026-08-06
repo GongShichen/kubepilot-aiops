@@ -28,7 +28,84 @@ func NewPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
 	}
 	return &PostgresStore{pool: p}, nil
 }
-func (s *PostgresStore) Close() { s.pool.Close() }
+func (s *PostgresStore) Close()                         { s.pool.Close() }
+func (s *PostgresStore) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
+
+func (s *PostgresStore) RecordMemoryAccess(ctx context.Context, event domain.MemoryAccessEvent) error {
+	resultIDs, err := json.Marshal(event.ResultIDs)
+	if err != nil {
+		return err
+	}
+	results, err := json.Marshal(event.Results)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `INSERT INTO memory_access_events(incident_id,agent,memory_kind,cluster_scope,namespace_scope,query_hash,result_ids,results,policy_version,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, event.IncidentID, event.Agent, event.Kind, event.Scope.Cluster, event.Scope.Namespace, event.QueryHash, resultIDs, results, event.PolicyVersion, event.CreatedAt)
+	return err
+}
+
+func (s *PostgresStore) RecordModelUsage(ctx context.Context, event domain.ModelUsageEvent) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO model_usage_events(incident_id,agent,parent_agent,phase,input_tokens,output_tokens,reasoning_tokens,duration_ms,estimated_cost,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, event.IncidentID, event.Agent, event.ParentAgent, event.Phase, event.InputTokens, event.OutputTokens, event.ReasoningTokens, event.DurationMS, event.EstimatedCost, event.CreatedAt)
+	return err
+}
+
+func (s *PostgresStore) SaveBenchmarkRun(ctx context.Context, run domain.BenchmarkRun) error {
+	payload, err := json.Marshal(run)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `INSERT INTO benchmark_runs(id,profile,status,manifest,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO UPDATE SET profile=EXCLUDED.profile,status=EXCLUDED.status,manifest=EXCLUDED.manifest,updated_at=EXCLUDED.updated_at`, run.ID, run.Profile, run.Status, payload, run.CreatedAt, run.UpdatedAt)
+	return err
+}
+
+func (s *PostgresStore) SaveBenchmarkCaseResult(ctx context.Context, result domain.BenchmarkCaseResult) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO benchmark_case_results(run_id,strategy_id,case_id,seed,repetition,status,result) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(run_id,strategy_id,case_id,seed,repetition) DO UPDATE SET status=EXCLUDED.status,result=EXCLUDED.result`, result.RunID, result.StrategyID, result.CaseID, result.Seed, result.Repetition, result.Status, result.Result)
+	return err
+}
+
+func (s *PostgresStore) ListBenchmarkRuns(ctx context.Context) ([]domain.BenchmarkRun, error) {
+	rows, err := s.pool.Query(ctx, `SELECT manifest FROM benchmark_runs ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []domain.BenchmarkRun
+	for rows.Next() {
+		var payload []byte
+		var run domain.BenchmarkRun
+		if err = rows.Scan(&payload); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(payload, &run); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func (s *PostgresStore) InterruptActiveBenchmarkRuns(ctx context.Context, interruptedAt time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE benchmark_runs SET status='interrupted',manifest=jsonb_set(jsonb_set(manifest,'{status}',to_jsonb('interrupted'::text),true),'{updated_at}',to_jsonb($1::timestamptz),true),updated_at=$1 WHERE status IN ('queued','running')`, interruptedAt)
+	return err
+}
+
+func (s *PostgresStore) SavePolicyVersion(ctx context.Context, policy domain.PolicyVersion) error {
+	payload, err := json.Marshal(policy)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `INSERT INTO policy_versions(policy_id,status,policy,created_at,promoted_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(policy_id) DO UPDATE SET status=EXCLUDED.status,policy=EXCLUDED.policy,promoted_at=EXCLUDED.promoted_at`, policy.ID, policy.Status, payload, policy.CreatedAt, statusTime(!policy.PromotedAt.IsZero(), policy.PromotedAt))
+	return err
+}
+
+func (s *PostgresStore) SavePolicyEvaluation(ctx context.Context, evaluation domain.PolicyEvaluation) error {
+	metrics, err := json.Marshal(evaluation.Metrics)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `INSERT INTO policy_evaluations(policy_id,run_id,metrics,accepted,reason,created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(policy_id,run_id) DO UPDATE SET metrics=EXCLUDED.metrics,accepted=EXCLUDED.accepted,reason=EXCLUDED.reason,created_at=EXCLUDED.created_at`, evaluation.PolicyID, evaluation.RunID, metrics, evaluation.Accepted, evaluation.Reason, evaluation.CreatedAt)
+	return err
+}
 
 // DeleteIncidents removes explicitly identified incidents. It is intended for
 // administrative lifecycle cleanup; foreign-key cascades remove normalized
@@ -277,11 +354,41 @@ func syncIncidentRecords(ctx context.Context, tx pgx.Tx, in *domain.Incident) er
 			return err
 		}
 	}
+	if in.Investigation != nil {
+		plan, marshalErr := json.Marshal(in.Investigation.Plan)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		findings, marshalErr := json.Marshal(in.Investigation.Findings)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		debate, marshalErr := json.Marshal(in.Investigation.Debate)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		arbitration, marshalErr := json.Marshal(in.Investigation.Arbitration)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, insertErr := tx.Exec(ctx, `INSERT INTO incident_investigations(incident_id,architecture,plan,findings,debate,arbitration,started_at,completed_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(incident_id) DO UPDATE SET architecture=EXCLUDED.architecture,plan=EXCLUDED.plan,findings=EXCLUDED.findings,debate=EXCLUDED.debate,arbitration=EXCLUDED.arbitration,started_at=EXCLUDED.started_at,completed_at=EXCLUDED.completed_at,updated_at=NOW()`, in.ID, in.Investigation.Architecture, plan, findings, debate, arbitration, in.Investigation.StartedAt, statusTime(!in.Investigation.CompletedAt.IsZero(), in.Investigation.CompletedAt)); insertErr != nil {
+			return insertErr
+		}
+		for _, usage := range in.Investigation.ModelUsage {
+			if _, insertErr := tx.Exec(ctx, `INSERT INTO model_usage_events(incident_id,agent,parent_agent,phase,input_tokens,output_tokens,reasoning_tokens,duration_ms,estimated_cost,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(incident_id,agent,created_at) DO NOTHING`, usage.IncidentID, usage.Agent, usage.ParentAgent, usage.Phase, usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens, usage.DurationMS, usage.EstimatedCost, usage.CreatedAt); insertErr != nil {
+				return insertErr
+			}
+		}
+	}
 	budget, _ := json.Marshal(in.AgentBudget)
-	if _, err := tx.Exec(ctx, `INSERT INTO agent_workflows(incident_id,graph_version,checkpoint_id,interrupt_id,model_protocol,model_name,model_config_hash,skill_snapshot_hash,ranking_policy_hash,reranker_config_hash,budget_state,status,started_at,interrupted_at,resumed_at,completed_at,last_error)
-		VALUES($1,'eino-constrained-react',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-		ON CONFLICT(incident_id) DO UPDATE SET graph_version=EXCLUDED.graph_version,checkpoint_id=EXCLUDED.checkpoint_id,interrupt_id=EXCLUDED.interrupt_id,model_protocol=EXCLUDED.model_protocol,model_name=EXCLUDED.model_name,model_config_hash=EXCLUDED.model_config_hash,skill_snapshot_hash=EXCLUDED.skill_snapshot_hash,ranking_policy_hash=EXCLUDED.ranking_policy_hash,reranker_config_hash=EXCLUDED.reranker_config_hash,budget_state=EXCLUDED.budget_state,status=EXCLUDED.status,interrupted_at=COALESCE(agent_workflows.interrupted_at,EXCLUDED.interrupted_at),resumed_at=COALESCE(agent_workflows.resumed_at,EXCLUDED.resumed_at),completed_at=EXCLUDED.completed_at,last_error=EXCLUDED.last_error`,
-		in.ID, "incident:"+in.ID, nullString(in.WorkflowInterruptID), nullString(in.ModelProtocol), nullString(in.ModelName), nullString(in.ModelConfigHash), nullString(in.SkillSnapshotHash), nullString(in.RankingPolicyHash), nullString(in.RerankerConfigHash), budget, in.Status, in.CreatedAt, statusTime(in.Status == domain.StatusAwaitingApproval, in.UpdatedAt), statusTime(in.Status == domain.StatusRecovering || in.Status == domain.StatusVerifying || in.Status == domain.StatusResolved || in.Status == domain.StatusRecoveryFailed, in.UpdatedAt), statusTime(terminalWorkflow(in.Status), in.UpdatedAt), nullString(in.DiagnosisError)); err != nil {
+	architecture := "constrained-react"
+	if in.Investigation != nil && in.Investigation.Architecture != "" {
+		architecture = in.Investigation.Architecture
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO agent_workflows(incident_id,graph_version,strategy_id,architecture,checkpoint_id,interrupt_id,model_protocol,model_name,model_config_hash,skill_snapshot_hash,ranking_policy_hash,reranker_config_hash,budget_state,status,started_at,interrupted_at,resumed_at,completed_at,last_error)
+		VALUES($1,$19,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+		ON CONFLICT(incident_id) DO UPDATE SET graph_version=EXCLUDED.graph_version,strategy_id=EXCLUDED.strategy_id,architecture=EXCLUDED.architecture,checkpoint_id=EXCLUDED.checkpoint_id,interrupt_id=EXCLUDED.interrupt_id,model_protocol=EXCLUDED.model_protocol,model_name=EXCLUDED.model_name,model_config_hash=EXCLUDED.model_config_hash,skill_snapshot_hash=EXCLUDED.skill_snapshot_hash,ranking_policy_hash=EXCLUDED.ranking_policy_hash,reranker_config_hash=EXCLUDED.reranker_config_hash,budget_state=EXCLUDED.budget_state,status=EXCLUDED.status,interrupted_at=COALESCE(agent_workflows.interrupted_at,EXCLUDED.interrupted_at),resumed_at=COALESCE(agent_workflows.resumed_at,EXCLUDED.resumed_at),completed_at=EXCLUDED.completed_at,last_error=EXCLUDED.last_error`,
+		in.ID, in.DiagnosisMethod, architecture, "incident:"+in.ID, nullString(in.WorkflowInterruptID), nullString(in.ModelProtocol), nullString(in.ModelName), nullString(in.ModelConfigHash), nullString(in.SkillSnapshotHash), nullString(in.RankingPolicyHash), nullString(in.RerankerConfigHash), budget, in.Status, in.CreatedAt, statusTime(in.Status == domain.StatusAwaitingApproval, in.UpdatedAt), statusTime(in.Status == domain.StatusRecovering || in.Status == domain.StatusVerifying || in.Status == domain.StatusResolved || in.Status == domain.StatusRecoveryFailed, in.UpdatedAt), statusTime(terminalWorkflow(in.Status), in.UpdatedAt), nullString(in.DiagnosisError), domain.WorkflowRuntimeName); err != nil {
 		return err
 	}
 	return nil

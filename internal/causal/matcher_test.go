@@ -37,3 +37,22 @@ func TestScoreHypothesisUsesCausalCoverage(t *testing.T) {
 		t.Fatalf("causal coverage did not affect score: low=%+v high=%+v", low, high)
 	}
 }
+
+func TestDomainPatternAdapterAndTargetedExpansion(t *testing.T) {
+	converted := PatternFromDomain(domain.CausalPattern{ID: "payment-memory", Category: "memory", Cause: "payment leak", Confidence: .9, Nodes: []domain.CausalNode{{ID: " memory_growth "}, {ID: "OOM_KILLED"}, {ID: "memory_growth"}}})
+	if len(converted.Chain) != 2 || converted.Chain[0] != "memory_growth" || converted.Chain[1] != "oom_killed" {
+		t.Fatalf("canonical domain pattern=%+v", converted)
+	}
+	matcher := NewMatcher([]Pattern{converted})
+	match, ok := matcher.Expand("payment-memory", []domain.Evidence{{Source: "prometheus", Type: "memory_metric", Summary: "memory growth"}, {Source: "kubernetes", Summary: "pod OOM killed error", Content: map[string]any{"reason": "OOM_KILLED"}}})
+	if !ok || match.Coverage != 1 {
+		t.Fatalf("targeted expansion=%+v ok=%v", match, ok)
+	}
+	if _, ok = matcher.Expand("missing", nil); ok {
+		t.Fatal("unknown causal pattern expanded")
+	}
+	var unavailable *Matcher
+	if unavailable.Patterns() != nil || unavailable.MatchEvidence(nil) != nil {
+		t.Fatal("nil matcher returned causal knowledge")
+	}
+}

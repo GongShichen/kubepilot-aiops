@@ -467,7 +467,7 @@ func truncateUTF8(value string, maxBytes int) string {
 }
 
 func (e *Engine) BuildFeatures(incident *domain.Incident, evidence []domain.Evidence) domain.IncidentFeatures {
-	f := domain.IncidentFeatures{IncidentID: incident.ID, Namespace: incident.Namespace, Service: incident.Service, Resource: incident.Resource, WindowStart: incident.EvidenceStartAt, WindowEnd: time.Now().UTC(), Observed: map[string]float64{}}
+	f := domain.IncidentFeatures{IncidentID: incident.ID, Cluster: incident.Cluster, Namespace: incident.Namespace, Service: incident.Service, Resource: incident.Resource, WindowStart: incident.EvidenceStartAt, WindowEnd: time.Now().UTC(), Observed: map[string]float64{}}
 	terms, types, traces, templates, topology, causal := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, item := range evidence {
 		types[firstNonEmpty(item.Type, item.Kind)] = true
@@ -963,6 +963,20 @@ func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []do
 			verified.VerifiedEvidenceIDs = append(verified.VerifiedEvidenceIDs, id)
 			seenSource[item.Source] = true
 			verified.SupportingScore += item.RelevanceScore
+			if strings.EqualFold(item.Source, "kubernetes") {
+				// Topology confidence is primarily a property of the current
+				// incident. Historical candidates may strengthen it below, but a
+				// strategy without long-term memory must still receive credit for
+				// server-observed workload identity.
+				topologyScore := .5
+				if draft.Service != "" && item.Service == draft.Service {
+					topologyScore += .3
+				}
+				if draft.Resource != "" && item.Resource == draft.Resource {
+					topologyScore += .2
+				}
+				verified.TopologyRelevance = math.Max(verified.TopologyRelevance, clamp(topologyScore))
+			}
 		}
 		verified.SupportingScore = clamp(verified.SupportingScore / float64(len(draft.SupportingEvidenceIDs)))
 		for _, id := range draft.ContradictingEvidenceIDs {

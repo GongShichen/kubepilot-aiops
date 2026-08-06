@@ -7,7 +7,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	causaldiscovery "github.com/kubepilot-aiops/kubepilot/internal/causal/discovery"
 	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/internal/topology"
@@ -105,7 +107,7 @@ func (s *PostgresCausalKnowledgeStore) List(ctx context.Context, status string, 
 	if s == nil || s.owner == nil {
 		return nil, errors.New("causal knowledge store unavailable")
 	}
-	q := `SELECT pattern,status,confidence,source_incidents,created_at,updated_at FROM evolving_causal_patterns`
+	q := `SELECT id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns`
 	args := []any{}
 	if status != "" {
 		q += ` WHERE status=$1`
@@ -123,18 +125,23 @@ func (s *PostgresCausalKnowledgeStore) List(ctx context.Context, status string, 
 	defer rows.Close()
 	out := []causalknowledge.CausalPattern{}
 	for rows.Next() {
-		var raw, incidents []byte
+		var nodes, edges, supporting, contradicting, incidents []byte
 		var p causalknowledge.CausalPattern
-		var status string
-		var confidence float64
-		if err := rows.Scan(&raw, &status, &confidence, &incidents, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Category, &p.Cause, &nodes, &edges, &supporting, &contradicting, &incidents, &p.Cluster, &p.Namespace, &p.Source, &p.Confidence, &p.Status, &p.Version, &p.SupportCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal(raw, &p); err != nil {
+		if err := json.Unmarshal(nodes, &p.Nodes); err != nil {
 			return nil, err
 		}
-		p.Status = status
-		p.Confidence = confidence
+		if err := json.Unmarshal(edges, &p.Edges); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(supporting, &p.SupportingEvidence); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(contradicting, &p.ContradictingEvidence); err != nil {
+			return nil, err
+		}
 		if err := json.Unmarshal(incidents, &p.SourceIncidents); err != nil {
 			return nil, err
 		}
@@ -147,10 +154,71 @@ func (s *PostgresCausalKnowledgeStore) Merge(ctx context.Context, p causalknowle
 		return p, errors.New("causal knowledge store unavailable")
 	}
 	p = causalknowledge.Canonicalize(p)
-	raw, _ := json.Marshal(p)
-	incidents, _ := json.Marshal(p.SourceIncidents)
-	_, err := s.owner.pool.Exec(ctx, `INSERT INTO evolving_causal_patterns(pattern_id,pattern,status,confidence,source_incidents,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(pattern_id) DO UPDATE SET pattern=EXCLUDED.pattern,status=EXCLUDED.status,confidence=EXCLUDED.confidence,source_incidents=(SELECT jsonb_agg(DISTINCT value) FROM jsonb_array_elements(evolving_causal_patterns.source_incidents||EXCLUDED.source_incidents) value),updated_at=NOW()`, p.PatternID, raw, p.Status, p.Confidence, incidents, p.CreatedAt, p.UpdatedAt)
-	return p, err
+	tx, err := s.owner.pool.Begin(ctx)
+	if err != nil {
+		return p, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	// Serialize updates for one normalized identity. This also closes the race
+	// between the first two observations, when no row exists to lock yet.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, p.ID); err != nil {
+		return p, err
+	}
+	existing, findErr := scanPattern(tx.QueryRow(ctx, `SELECT id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns WHERE id=$1 FOR UPDATE`, p.ID))
+	if findErr == nil {
+		p = causalknowledge.Merge(*existing, p)
+	} else if !errors.Is(findErr, pgx.ErrNoRows) {
+		return p, findErr
+	}
+	if p.Source == "" {
+		p.Source = "learned"
+	}
+	if p.Version <= 0 {
+		p.Version = 1
+	}
+	now := time.Now().UTC()
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = now
+	}
+	if p.UpdatedAt.IsZero() {
+		p.UpdatedAt = now
+	}
+	p.SupportCount = len(p.SourceIncidents)
+	nodes, err := json.Marshal(p.Nodes)
+	if err != nil {
+		return p, err
+	}
+	edges, err := json.Marshal(p.Edges)
+	if err != nil {
+		return p, err
+	}
+	supporting, err := json.Marshal(p.SupportingEvidence)
+	if err != nil {
+		return p, err
+	}
+	contradicting, err := json.Marshal(p.ContradictingEvidence)
+	if err != nil {
+		return p, err
+	}
+	incidents, err := json.Marshal(p.SourceIncidents)
+	if err != nil {
+		return p, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO causal_patterns(id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT(id) DO UPDATE SET category=EXCLUDED.category,cause=EXCLUDED.cause,nodes=EXCLUDED.nodes,edges=EXCLUDED.edges,supporting_evidence=EXCLUDED.supporting_evidence,contradicting_evidence=EXCLUDED.contradicting_evidence,source_incidents=EXCLUDED.source_incidents,cluster_scope=EXCLUDED.cluster_scope,namespace_scope=EXCLUDED.namespace_scope,source=EXCLUDED.source,confidence=EXCLUDED.confidence,status=EXCLUDED.status,version=EXCLUDED.version,support_count=EXCLUDED.support_count,updated_at=EXCLUDED.updated_at`, p.ID, p.Category, p.Cause, nodes, edges, supporting, contradicting, incidents, p.Cluster, p.Namespace, p.Source, p.Confidence, p.Status, p.Version, p.SupportCount, p.CreatedAt, p.UpdatedAt)
+	if err != nil {
+		return p, err
+	}
+	revisionPayload, err := json.Marshal(p)
+	if err != nil {
+		return p, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO causal_pattern_revisions(pattern_id,revision,payload) VALUES($1,$2,$3)`, p.ID, p.Version, revisionPayload); err != nil {
+		return p, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return p, err
+	}
+	return p, nil
 }
 
 func topologyPatternScore(q topologyknowledge.ServiceTopologyPattern, p topologyknowledge.ServiceTopologyPattern) float64 {

@@ -11,11 +11,13 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/safety"
 	captools "github.com/kubepilot-aiops/kubepilot/tools"
@@ -27,14 +29,17 @@ type RuntimePolicy struct {
 	Diagnosis  domain.AgentBudget
 	Recovery   domain.AgentBudget
 	ToolCosts  map[string]int
-	// RequestMaxTokens limits one model response. It is intentionally
-	// separate from AgentBudget.MaxTokens, which is the cumulative generated
-	// token budget for an agent run.
+	// RequestMaxTokens limits one Agent model response. AgentBudget.MaxTokens
+	// independently enforces the same generated-output boundary after usage is
+	// reported; input and cumulative totals are telemetry only.
 	RequestMaxTokens int
 	// ModelMaxRetries is the number of retries Eino performs for every
 	// Generate/Stream request. A value of three means three retries after the
 	// initial request (four total attempts).
-	ModelMaxRetries int
+	ModelMaxRetries          int
+	InputPricePerMillion     float64
+	OutputPricePerMillion    float64
+	ReasoningPricePerMillion float64
 }
 
 func (r *AgentRegistry) LoadToolCosts(path string) error {
@@ -64,7 +69,9 @@ func (r *AgentRegistry) ConfigureRuntimePolicy(policy RuntimePolicy) {
 		r.limits[SupervisorAgentName] = policy.Supervisor
 	}
 	if policy.Diagnosis.MaxIterations > 0 {
-		r.limits[DiagnosisAgentName] = policy.Diagnosis
+		for _, name := range diagnosisAgentNames() {
+			r.limits[name] = policy.Diagnosis
+		}
 	}
 	if policy.Recovery.MaxIterations > 0 {
 		r.limits[RecoveryAgentName] = policy.Recovery
@@ -78,16 +85,33 @@ func (r *AgentRegistry) ConfigureRuntimePolicy(policy RuntimePolicy) {
 	if policy.ModelMaxRetries >= 0 {
 		r.modelMaxRetries = policy.ModelMaxRetries
 	}
+	r.inputPricePerMillion = policy.InputPricePerMillion
+	r.outputPricePerMillion = policy.OutputPricePerMillion
+	r.reasoningPricePerMillion = policy.ReasoningPricePerMillion
 }
 
 func (r *AgentRegistry) loadConstrainedDefaults() error {
 	r.limits = map[string]domain.AgentBudget{
-		SupervisorAgentName: {MaxIterations: 10, MaxToolUses: 50, MaxTokens: 12000, MaxCorrections: 3},
-		DiagnosisAgentName:  {MaxIterations: 12, MaxToolUses: 50, MaxTokens: 30000, MaxCorrections: 3},
-		RecoveryAgentName:   {MaxIterations: 10, MaxToolUses: 50, MaxTokens: 16000, MaxCorrections: 2},
+		SupervisorAgentName: {MaxIterations: 10, MaxToolUses: 50, MaxTokens: 8192, MaxCorrections: 3},
+		RecoveryAgentName:   {MaxIterations: 10, MaxToolUses: 50, MaxTokens: 8192, MaxCorrections: 2},
+	}
+	diagnosisBudget := domain.AgentBudget{MaxIterations: 18, MaxToolUses: 50, MaxTokens: 8192, MaxCorrections: 3}
+	for _, name := range diagnosisAgentNames() {
+		r.limits[name] = diagnosisBudget
 	}
 	r.modelMaxRetries = 3
-	for _, spec := range []struct{ name, path string }{{SupervisorAgentName, "internal/agent/skills/supervisor/SKILL.md"}, {DiagnosisAgentName, "internal/agent/skills/diagnosis/SKILL.md"}, {RecoveryAgentName, "internal/agent/skills/recovery/SKILL.md"}} {
+	for _, spec := range []struct{ name, path string }{
+		{SupervisorAgentName, "internal/agent/skills/supervisor/SKILL.md"},
+		{PlannerAgentName, "internal/agent/skills/planner/SKILL.md"},
+		{MetricWorkerName, "internal/agent/skills/metric-worker/SKILL.md"},
+		{LogWorkerName, "internal/agent/skills/log-worker/SKILL.md"},
+		{TraceWorkerName, "internal/agent/skills/trace-worker/SKILL.md"},
+		{TopologyWorkerName, "internal/agent/skills/topology-worker/SKILL.md"},
+		{DiagnosisAgentName, "internal/agent/skills/diagnosis/SKILL.md"},
+		{AlternativeAgentName, "internal/agent/skills/alternative/SKILL.md"},
+		{CriticAgentName, "internal/agent/skills/critic/SKILL.md"},
+		{RecoveryAgentName, "internal/agent/skills/recovery/SKILL.md"},
+	} {
 		skill, err := loadAgentSkill(resolveProjectFile(spec.path), spec.name)
 		if err != nil {
 			return fmt.Errorf("load %s skill: %w", spec.name, err)
@@ -98,6 +122,19 @@ func (r *AgentRegistry) loadConstrainedDefaults() error {
 		r.skills[spec.name] = skill
 	}
 	return r.LoadToolCosts("internal/agent/skills/tool_costs.yaml")
+}
+
+func diagnosisAgentNames() []string {
+	return []string{
+		PlannerAgentName,
+		MetricWorkerName,
+		LogWorkerName,
+		TraceWorkerName,
+		TopologyWorkerName,
+		DiagnosisAgentName,
+		AlternativeAgentName,
+		CriticAgentName,
+	}
 }
 
 func (r *AgentRegistry) SkillSnapshotHash() string {
@@ -113,7 +150,7 @@ func (r *AgentRegistry) SkillSnapshotHash() string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (r *AgentRegistry) RunConstrained(ctx context.Context, state *WorkflowState, deps constrainedToolDeps) error {
+func (r *AgentRegistry) runConstrainedAgents(ctx context.Context, state *WorkflowState, deps constrainedToolDeps) error {
 	if state == nil || state.Incident == nil {
 		return fmt.Errorf("workflow state and Incident are required")
 	}
@@ -123,6 +160,37 @@ func (r *AgentRegistry) RunConstrained(ctx context.Context, state *WorkflowState
 	runtime := &constrainedRuntime{state: state, budgets: budgets, done: map[string]bool{}, transition: deps.Transition}
 	runtime.hypotheses = safety.NewHypothesisTransitionService(&state.DiagnosisLedger, state.VerifiedHypotheses)
 	defer func() { state.Incident.AgentBudget = budgets.State() }()
+	var usageMu sync.Mutex
+	var modelUsage []domain.ModelUsageEvent
+	recordUsage := func(agentName string) func(*schema.Message, time.Duration) {
+		return func(message *schema.Message, duration time.Duration) {
+			usage := r.modelUsage(state.Incident.ID, agentName, message, duration)
+			if agentName == SupervisorAgentName {
+				usage.ParentAgent = ""
+			}
+			if agentName == DiagnosisAgentName {
+				usage.ParentAgent = SupervisorAgentName
+			}
+			if state.Incident.Status == domain.StatusProposing || state.Incident.Status == domain.StatusAwaitingApproval {
+				usage.Phase = "recovery"
+			}
+			usageMu.Lock()
+			modelUsage = append(modelUsage, usage)
+			usageMu.Unlock()
+		}
+	}
+	defer func() {
+		usageMu.Lock()
+		captured := append([]domain.ModelUsageEvent(nil), modelUsage...)
+		usageMu.Unlock()
+		if len(captured) == 0 {
+			return
+		}
+		if state.Incident.Investigation == nil {
+			state.Incident.Investigation = &domain.Investigation{Architecture: "constrained-react", StartedAt: time.Now().UTC()}
+		}
+		state.Incident.Investigation.ModelUsage = append(state.Incident.Investigation.ModelUsage, captured...)
+	}()
 	ctx = withConstrainedRuntime(ctx, runtime)
 	capabilityRegistry := captools.NewRegistry()
 	diagnosisCapabilities, err := buildConstrainedDiagnosisCapabilities(deps)
@@ -145,12 +213,12 @@ func (r *AgentRegistry) RunConstrained(ctx context.Context, state *WorkflowState
 		return err
 	}
 
-	diagnosisMiddleware := newConstrainedAgentMiddleware(DiagnosisAgentName, r.skills[DiagnosisAgentName], "submit_diagnosis", "escalate_diagnosis")
+	diagnosisMiddleware := newConstrainedAgentMiddleware(DiagnosisAgentName, r.skills[DiagnosisAgentName], "submit_diagnosis", "escalate_diagnosis").withUsageRecorder(recordUsage(DiagnosisAgentName))
 	diagnosisAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: DiagnosisAgentName, Description: "Investigate one Incident through evidence-driven hypothesis verification.", Instruction: "Operate as a bounded specialist. Use only the injected Skill and server-owned tool observations; finish with a structured terminal capability.", Model: r.chat, MaxIterations: r.limits[DiagnosisAgentName].MaxIterations, ModelRetryConfig: r.modelRetryConfig(), ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: diagnosisToolsConfig, EmitInternalEvents: true}, Handlers: []adk.ChatModelAgentMiddleware{diagnosisMiddleware}})
 	if err != nil {
 		return err
 	}
-	recoveryMiddleware := newConstrainedAgentMiddleware(RecoveryAgentName, r.skills[RecoveryAgentName], "accept_recovery_proposal", "escalate_recovery")
+	recoveryMiddleware := newConstrainedAgentMiddleware(RecoveryAgentName, r.skills[RecoveryAgentName], "accept_recovery_proposal", "escalate_recovery").withUsageRecorder(recordUsage(RecoveryAgentName))
 	recoveryAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: RecoveryAgentName, Description: "Prepare and dry-run one constrained recovery proposal without mutation authority.", Instruction: "Operate only inside the proposal boundary defined by the injected Skill.", Model: r.chat, MaxIterations: r.limits[RecoveryAgentName].MaxIterations, ModelRetryConfig: r.modelRetryConfig(), ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: recoveryToolsConfig, EmitInternalEvents: true}, Handlers: []adk.ChatModelAgentMiddleware{recoveryMiddleware}})
 	if err != nil {
 		return err
@@ -191,7 +259,7 @@ func (r *AgentRegistry) RunConstrained(ctx context.Context, state *WorkflowState
 			return name == DiagnosisAgentName || name == "escalate_incident"
 		}
 	}
-	supervisorMiddleware := newConstrainedAgentMiddleware(SupervisorAgentName, r.skills[SupervisorAgentName], "submit_supervisor_outcome", "escalate_incident").withToolFilter(supervisorFilter)
+	supervisorMiddleware := newConstrainedAgentMiddleware(SupervisorAgentName, r.skills[SupervisorAgentName], "submit_supervisor_outcome", "escalate_incident").withToolFilter(supervisorFilter).withUsageRecorder(recordUsage(SupervisorAgentName))
 	supervisorAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: SupervisorAgentName, Description: "Coordinate diagnosis and recovery specialists for one Kubernetes Incident.", Instruction: "Act as the bounded incident commander defined by the injected Skill. Specialist decisions must be delegated through AgentTools.", Model: r.chat, MaxIterations: r.limits[SupervisorAgentName].MaxIterations, ModelRetryConfig: r.modelRetryConfig(), ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: supervisorToolsConfig, EmitInternalEvents: true}, Handlers: []adk.ChatModelAgentMiddleware{supervisorMiddleware}})
 	if err != nil {
 		return err

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -15,16 +16,20 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	causalbenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/causal"
 	causaldiscoverybenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/causaldiscovery"
 	causalevolution "github.com/kubepilot-aiops/kubepilot/benchmark/causalevolution"
+	benchmarkcomparison "github.com/kubepilot-aiops/kubepilot/benchmark/comparison"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/correlation"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/datasets"
+	benchmarkenvironment "github.com/kubepilot-aiops/kubepilot/benchmark/environment"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/history"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/injector"
 	benchmarkmanifests "github.com/kubepilot-aiops/kubepilot/benchmark/manifests"
@@ -82,13 +87,15 @@ func main() {
 		resume(os.Args[2:])
 	case "report":
 		report(os.Args[2:])
+	case "causal-ablation-report":
+		runCausalAblationReport(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
 	}
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "kubepilot-benchmark <validate|environment|failure-report|run|resume|report|correlation|log-retrieval|incident-retrieval|agent-report|recovery-report|autonomous-report|suite-report|intelligence|seed-history|generate-logs>")
+	fmt.Fprintln(os.Stderr, "kubepilot-benchmark <validate|environment|failure-report|run|resume|report|causal-ablation-report|correlation|log-retrieval|incident-retrieval|agent-report|recovery-report|autonomous-report|suite-report|intelligence|seed-history|generate-logs>")
 }
 
 func runIntelligence(args []string) {
@@ -121,7 +128,7 @@ func validate(args []string) {
 
 func environment(args []string) {
 	fs := flag.NewFlagSet("environment", flag.ExitOnError)
-	manifestPath := fs.String("manifest", "benchmark/manifests/autonomous.yaml", "benchmark manifest")
+	manifestPath := fs.String("manifest", "benchmark/manifests/default.yaml", "benchmark manifest")
 	output := fs.String("output", "benchmark/reports/runtime_manifest.json", "redacted runtime manifest")
 	_ = fs.Parse(args)
 	base, _, err := benchmarkmanifests.Load(*manifestPath)
@@ -156,13 +163,43 @@ func run(args []string) {
 	caseID := fs.String("case-id", "", "run exactly one scenario ID (diagnostic use)")
 	runID := fs.String("run-id", "", "stable run ID used for resume/API orchestration")
 	resumeRun := fs.Bool("resume", false, "continue after the last checkpoint")
-	diagnosisMethod := fs.String("diagnosis-method", domain.DiagnosisMethodKubePilot, "llm-only, vector-rag, or kubepilot")
+	diagnosisMethod := fs.String("diagnosis-method", domain.DiagnosisMethodKubePilot, "direct, rag, react, or kubepilot")
+	causalMode := fs.String("causal-mode", domain.CausalModeFull, "no-causal, static-causal, learned-causal, or full")
+	modelProfile := fs.String("model-profile", os.Getenv("MODEL_PROFILE"), "stable label for the active model configuration")
 	compareMethods := fs.Bool("compare-methods", false, "run all diagnosis baselines sequentially")
+	strategyList := fs.String("strategies", "direct,rag,react,kubepilot", "comma-separated strategies used by comparison runs")
+	datasetSplit := fs.String("dataset-split", "test", "dev, validation, test, or all")
+	seedList := fs.String("seeds", "20260803,20260804,20260805", "comma-separated paired load and fault seeds")
+	repetitions := fs.Int("repetitions", 1, "repetitions per scenario and seed")
+	workers := fs.Int("workers", envInt("BENCHMARK_WORKERS", 1), "isolated namespace workers")
+	modelConcurrency := fs.Int("model-concurrency", envInt("BENCHMARK_MODEL_CONCURRENCY", 0), "maximum cases concurrently using the model; defaults to workers")
+	workerNamespaceList := fs.String("worker-namespaces", os.Getenv("BENCHMARK_WORKER_NAMESPACES"), "comma-separated explicit benchmark worker namespace pool")
 	_ = fs.Parse(args)
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	if !domain.ValidDiagnosisMethod(*diagnosisMethod) || *diagnosisMethod == "" {
+	canonicalMethod, validMethod := domain.NormalizeDiagnosisMethod(*diagnosisMethod)
+	if !validMethod || *diagnosisMethod == "" {
 		fatal(fmt.Errorf("unsupported diagnosis method %q", *diagnosisMethod))
+	}
+	*diagnosisMethod = canonicalMethod
+	canonicalCausalMode, validCausalMode := domain.NormalizeCausalMode(*causalMode)
+	if !validCausalMode {
+		fatal(fmt.Errorf("unsupported causal mode %q", *causalMode))
+	}
+	*causalMode = canonicalCausalMode
+	seeds, seedErr := parseSeeds(*seedList)
+	fatal(seedErr)
+	if *repetitions < 1 {
+		fatal(fmt.Errorf("repetitions must be positive"))
+	}
+	if *workers < 1 || *workers > 32 {
+		fatal(fmt.Errorf("workers must be between 1 and 32"))
+	}
+	if *modelConcurrency == 0 {
+		*modelConcurrency = *workers
+	}
+	if *modelConcurrency < 1 || *modelConcurrency > *workers {
+		fatal(fmt.Errorf("model concurrency must be between 1 and workers"))
 	}
 	if *artifactDir == "" && *resumeRun && *runID != "" {
 		*artifactDir = findRunDirectory(*artifactRoot, *runID)
@@ -177,10 +214,14 @@ func run(args []string) {
 		if *runID == "" {
 			*runID = ulid.Make().String()
 		}
-		comparisonDir := artifactlayout.RunDirectory(*artifactRoot, "diagnosis", *profile, time.Now().UTC())
-		methods := []string{domain.DiagnosisMethodLLMOnly, domain.DiagnosisMethodVectorRAG, domain.DiagnosisMethodKubePilot}
+		comparisonDir := *artifactDir
+		methods, strategyErr := parseStrategies(*strategyList)
+		fatal(strategyErr)
+		if !*resumeRun {
+			methods = randomizedStrategyOrder(methods, *runID)
+		}
 		for _, method := range methods {
-			run([]string{"--profile", *profile, "--run-id", *runID + "-" + method, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--artifact-dir", filepath.Join(comparisonDir, method), "--auto-approve=" + strconv.FormatBool(*autoApprove), "--dry-run-injector=" + strconv.FormatBool(*dryRun), "--diagnosis-method", method})
+			run([]string{"--profile", *profile, "--run-id", *runID, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--artifact-dir", filepath.Join(comparisonDir, method), "--auto-approve=" + strconv.FormatBool(*autoApprove), "--dry-run-injector=" + strconv.FormatBool(*dryRun), "--resume=" + strconv.FormatBool(*resumeRun), "--diagnosis-method", method, "--causal-mode", *causalMode, "--model-profile", *modelProfile, "--dataset-split", *datasetSplit, "--seeds", *seedList, "--repetitions", strconv.Itoa(*repetitions), "--workers", strconv.Itoa(*workers), "--model-concurrency", strconv.Itoa(*modelConcurrency), "--worker-namespaces", *workerNamespaceList})
 			if runCtx.Err() != nil {
 				fmt.Fprintln(os.Stderr, "benchmark interrupted after cleaning the active case")
 				return
@@ -200,12 +241,14 @@ func run(args []string) {
 			*runID = ulid.Make().String()
 		}
 		fullDir := artifactlayout.RunDirectory(*artifactRoot, "autonomous", "full", time.Now().UTC())
-		standardArgs := []string{"--profile", "standard", "--run-id", *runID, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--artifact-dir", filepath.Join(fullDir, "diagnosis"), "--auto-approve=" + strconv.FormatBool(*autoApprove)}
+		standardArgs := []string{"--profile", "standard", "--run-id", *runID, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--artifact-dir", filepath.Join(fullDir, "diagnosis"), "--auto-approve=" + strconv.FormatBool(*autoApprove), "--dry-run-injector=" + strconv.FormatBool(*dryRun), "--resume=" + strconv.FormatBool(*resumeRun), "--diagnosis-method", *diagnosisMethod, "--causal-mode", *causalMode, "--model-profile", *modelProfile, "--dataset-split", *datasetSplit, "--seeds", *seedList, "--repetitions", strconv.Itoa(*repetitions), "--workers", strconv.Itoa(*workers), "--model-concurrency", strconv.Itoa(*modelConcurrency), "--worker-namespaces", *workerNamespaceList}
 		run(standardArgs)
 		runCorrelation([]string{"--output", filepath.Join(fullDir, "correlation", "correlation-summary.json")})
 		return
 	}
-	_, items, hash, err := scenarios.Load(*catalog)
+	catalogConfig, items, hash, err := scenarios.Load(*catalog)
+	fatal(err)
+	items, err = selectDatasetSplit(items, *datasetSplit)
 	fatal(err)
 	if *profile == "smoke" {
 		items = smoke(items)
@@ -216,6 +259,7 @@ func run(args []string) {
 	} else if *profile != "standard" {
 		fatal(fmt.Errorf("unsupported profile %q", *profile))
 	}
+	items = expandScenarioSeeds(items, seeds, *repetitions)
 	if *caseID != "" {
 		var selected []scenarios.Scenario
 		for _, item := range items {
@@ -229,19 +273,21 @@ func run(args []string) {
 		}
 		items = selected
 	}
-	reg := injector.NewRegistry()
-	var inj injector.Injector
-	if *dryRun {
-		inj = &injector.DryRun{}
-	} else {
-		if *kubeconfig == "" {
-			fatal(fmt.Errorf("--kubeconfig is required unless --dry-run-injector is used"))
-		}
-		inj, err = injector.NewKubernetes(*kubeconfig)
-		fatal(err)
+	allItems := append([]scenarios.Scenario(nil), items...)
+	workerCount := min(*workers, len(allItems))
+	effectiveModelConcurrency := min(*modelConcurrency, workerCount)
+	workerNamespaces, err := resolveWorkerNamespaces(catalogConfig.Namespace, workerCount, *workerNamespaceList)
+	fatal(err)
+	if !*dryRun && *kubeconfig == "" {
+		fatal(fmt.Errorf("--kubeconfig is required unless --dry-run-injector is used"))
 	}
-	for _, name := range []string{"service_fault", "resource_patch", "traffic", "dependency_scale", "config_patch", "network_policy", "service_patch", "deployment_patch"} {
-		reg.Register(name, inj)
+	if !*dryRun && workerCount > 1 {
+		provisioner, provisionErr := benchmarkenvironment.NewProvisioner(*kubeconfig, catalogConfig.Namespace)
+		fatal(provisionErr)
+		prepareCtx, prepareCancel := context.WithTimeout(runCtx, 5*time.Minute)
+		provisionErr = provisioner.Prepare(prepareCtx, workerNamespaces)
+		prepareCancel()
+		fatal(provisionErr)
 	}
 	if *runID == "" {
 		*runID = ulid.Make().String()
@@ -261,7 +307,7 @@ func run(args []string) {
 	rerankerModel, rerankerHash := diagnosisRerankerIdentity()
 	manifestHash, manifestErr := fileSHA256("benchmark/manifests/default.yaml")
 	fatal(manifestErr)
-	manifest := reporter.Manifest{ManifestHash: manifestHash, RunID: *runID, Profile: *profile, CatalogHash: hash, Protocol: env("CHAT_PROTOCOL", "openai-compatible"), Model: os.Getenv("CHAT_MODEL"), EndpointHash: hex.EncodeToString(endpointHash[:]), ModelConfigHash: modelConfigHash, SkillSnapshotHash: skillHash, RankingPolicyHash: rankingHash, ToolCostPolicyHash: toolCostHash, BudgetConfigHash: diagnosisBudgetConfigHash(), RerankerModel: rerankerModel, RerankerConfigHash: rerankerHash, EmbeddingModel: os.Getenv("EMBEDDING_MODEL"), EmbeddingDimensions: env("EMBEDDING_DIMENSIONS", "1024"), DiagnosisMethod: *diagnosisMethod, GitCommit: gitCommit(), SourceHash: sourceHash, HistoryDatasetHash: historyHash, HistoryCollection: env("HISTORY_COLLECTION", "kubepilot_history"), Seed: 20260803, StartedAt: time.Now().UTC()}
+	manifest := reporter.Manifest{ManifestHash: manifestHash, RunID: *runID, Profile: *profile, CatalogHash: hash, Protocol: env("CHAT_PROTOCOL", "openai-compatible"), Model: os.Getenv("CHAT_MODEL"), ModelProfile: *modelProfile, EndpointHash: hex.EncodeToString(endpointHash[:]), ModelConfigHash: modelConfigHash, SkillSnapshotHash: skillHash, RankingPolicyHash: rankingHash, ToolCostPolicyHash: toolCostHash, BudgetConfigHash: diagnosisBudgetConfigHash(), RerankerModel: rerankerModel, RerankerConfigHash: rerankerHash, EmbeddingModel: os.Getenv("EMBEDDING_MODEL"), EmbeddingDimensions: env("EMBEDDING_DIMENSIONS", "1024"), DiagnosisMethod: *diagnosisMethod, CausalMode: *causalMode, Strategies: []string{*diagnosisMethod}, DatasetSplit: *datasetSplit, Seeds: seeds, Repetitions: *repetitions, Architecture: strategyArchitecture(*diagnosisMethod), Parallelism: workerCount, ModelConcurrency: effectiveModelConcurrency, WorkerNamespaces: workerNamespaces, ShardPolicy: runner.StableShardPolicy, PricingSnapshot: pricingSnapshot(), GitCommit: gitCommit(), SourceHash: sourceHash, HistoryDatasetHash: historyHash, HistoryCollection: env("HISTORY_COLLECTION", "kubepilot_history"), Seed: seeds[0], StartedAt: time.Now().UTC()}
 	var previous []reporter.CaseResult
 	if *resumeRun {
 		var existing reporter.Manifest
@@ -277,11 +323,11 @@ func run(args []string) {
 				continue
 			}
 			previous = append(previous, result)
-			completed[result.CaseID] = true
+			completed[caseCheckpointKey(result.CaseID, result.Seed, result.Repetition)] = true
 		}
 		pending := items[:0]
 		for _, item := range items {
-			if !completed[item.ID] {
+			if !completed[caseCheckpointKey(item.ID, item.Seed, item.Repetition)] {
 				pending = append(pending, item)
 			}
 		}
@@ -296,11 +342,43 @@ func run(args []string) {
 	}
 	client := runner.NewHTTPClient(*agentURL, *token)
 	client.DiagnosisMethod = *diagnosisMethod
-	r := &runner.Runner{Registry: reg, Client: client, AutoApprove: *autoApprove, PollInterval: time.Second, MaxCaseRestarts: 1, DiagnosisTimeout: benchmarkDiagnosisTimeout(), CaseTimeout: benchmarkCaseTimeout(), DiagnosisMethod: *diagnosisMethod, OnResult: func(result reporter.CaseResult) { fatal(appendCheckpoint(checkpoint, result)) }}
-	results := append(previous, r.Run(runCtx, items)...)
+	client.CausalMode = *causalMode
+	preflightCtx, preflightCancel := context.WithTimeout(runCtx, 3*time.Minute)
+	fatal(client.Preflight(preflightCtx))
+	preflightCancel()
+	gate, err := runner.NewConcurrencyGate(effectiveModelConcurrency)
+	fatal(err)
+	executionCtx, cancelExecution := context.WithCancel(runCtx)
+	defer cancelExecution()
+	recorder := &checkpointRecorder{path: checkpoint, cancel: cancelExecution}
+	parallelWorkers := make([]runner.ParallelWorker, workerCount)
+	for workerIndex, namespace := range workerNamespaces {
+		reg := injector.NewRegistry()
+		var inj injector.Injector
+		if *dryRun {
+			inj = &injector.DryRun{}
+		} else {
+			inj, err = injector.NewKubernetes(*kubeconfig, namespace)
+			fatal(err)
+		}
+		for _, name := range benchmarkInjectorNames() {
+			reg.Register(name, inj)
+		}
+		workerID := fmt.Sprintf("worker-%02d", workerIndex+1)
+		workerRunner := &runner.Runner{Registry: reg, Client: client, AutoApprove: *autoApprove, PollInterval: time.Second, MaxCaseRestarts: 1, DiagnosisTimeout: benchmarkDiagnosisTimeout(), CaseTimeout: benchmarkCaseTimeout(), DiagnosisMethod: *diagnosisMethod, CausalMode: *causalMode, WorkerID: workerID, Gate: gate, OnResult: recorder.Record}
+		parallelWorkers[workerIndex] = runner.ParallelWorker{ID: workerID, Namespace: namespace, Runner: workerRunner}
+	}
+	current, runErr := (runner.ParallelRunner{Workers: parallelWorkers}).Run(executionCtx, items)
+	if checkpointErr := recorder.Err(); checkpointErr != nil {
+		fatal(checkpointErr)
+	}
+	results := orderCaseResults(allItems, append(previous, current...))
 	summary, err := reporter.WriteDir(*artifactDir, manifest, results)
 	fatal(err)
 	fmt.Printf("run=%s total=%d passed=%d root_cause_accuracy=%.2f%% artifacts=%s\n", manifest.RunID, summary.Total, summary.Passed, summary.RootCauseAccuracy*100, *artifactDir)
+	if runErr != nil {
+		fatal(runErr)
+	}
 	if failedCase, ok := cleanupFailure(results); ok {
 		fatal(fmt.Errorf("benchmark stopped after cleanup failure in case %s", failedCase))
 	}
@@ -315,11 +393,60 @@ func cleanupFailure(results []reporter.CaseResult) (string, bool) {
 	return "", false
 }
 
+func benchmarkInjectorNames() []string {
+	return []string{"service_fault", "resource_patch", "traffic", "dependency_scale", "config_patch", "network_policy", "service_patch", "deployment_patch"}
+}
+
+func resolveWorkerNamespaces(base string, workers int, configured string) ([]string, error) {
+	if workers < 1 {
+		return nil, fmt.Errorf("at least one worker is required")
+	}
+	if workers == 1 {
+		return []string{base}, nil
+	}
+	expected, err := benchmarkenvironment.WorkerNamespaces(base, workers)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(configured) == "" {
+		return expected, nil
+	}
+	parts := strings.Split(configured, ",")
+	if len(parts) < workers {
+		return nil, fmt.Errorf("worker namespace pool has %d entries, need %d", len(parts), workers)
+	}
+	resolved := make([]string, workers)
+	for index := range resolved {
+		resolved[index] = strings.TrimSpace(parts[index])
+		if resolved[index] != expected[index] {
+			return nil, fmt.Errorf("worker namespace %d must be %q, got %q", index+1, expected[index], resolved[index])
+		}
+	}
+	return resolved, nil
+}
+
+func orderCaseResults(items []scenarios.Scenario, results []reporter.CaseResult) []reporter.CaseResult {
+	order := make(map[string]int, len(items))
+	for index, item := range items {
+		order[caseCheckpointKey(item.ID, item.Seed, item.Repetition)] = index
+	}
+	out := append([]reporter.CaseResult(nil), results...)
+	sort.SliceStable(out, func(i, j int) bool {
+		left, leftOK := order[caseCheckpointKey(out[i].CaseID, out[i].Seed, out[i].Repetition)]
+		right, rightOK := order[caseCheckpointKey(out[j].CaseID, out[j].Seed, out[j].Repetition)]
+		if !leftOK || !rightOK {
+			return caseCheckpointKey(out[i].CaseID, out[i].Seed, out[i].Repetition) < caseCheckpointKey(out[j].CaseID, out[j].Seed, out[j].Repetition)
+		}
+		return left < right
+	})
+	return out
+}
+
 func diagnosisModelConfigHash() string {
 	configuration := map[string]string{
 		"protocol": env("CHAT_PROTOCOL", "openai-compatible"), "endpoint": strings.TrimRight(os.Getenv("CHAT_BASE_URL"), "/") + "/" + strings.TrimLeft(env("CHAT_API_PATH", "/chat/completions"), "/"),
-		"model": os.Getenv("CHAT_MODEL"), "timeout": env("CHAT_TIMEOUT", "60s"), "max_tokens": env("CHAT_MAX_TOKENS", "4096"),
-		"temperature": env("CHAT_TEMPERATURE", "0"), "reasoning_effort": os.Getenv("CHAT_REASONING_EFFORT"), "max_retries": env("CHAT_MAX_RETRIES", "3"),
+		"model": os.Getenv("CHAT_MODEL"), "timeout": env("CHAT_TIMEOUT", "60s"), "max_tokens": env("CHAT_MAX_TOKENS", "8192"),
+		"temperature": env("CHAT_TEMPERATURE", "0"), "reasoning_effort": os.Getenv("CHAT_REASONING_EFFORT"), "max_retries": env("CHAT_MAX_RETRIES", "3"), "concurrency": env("CHAT_CONCURRENCY", "4"),
 	}
 	encoded, _ := json.Marshal(configuration)
 	hash := sha256.Sum256(encoded)
@@ -328,7 +455,14 @@ func diagnosisModelConfigHash() string {
 
 func diagnosisSkillSnapshotHash() (string, error) {
 	files := []struct{ agent, path string }{
+		{"planner_agent", "internal/agent/skills/planner/SKILL.md"},
+		{"metric_worker", "internal/agent/skills/metric-worker/SKILL.md"},
+		{"log_worker", "internal/agent/skills/log-worker/SKILL.md"},
+		{"trace_worker", "internal/agent/skills/trace-worker/SKILL.md"},
+		{"topology_worker", "internal/agent/skills/topology-worker/SKILL.md"},
 		{"diagnosis_agent", "internal/agent/skills/diagnosis/SKILL.md"},
+		{"alternative_agent", "internal/agent/skills/alternative/SKILL.md"},
+		{"critic_agent", "internal/agent/skills/critic/SKILL.md"},
 		{"recovery_agent", "internal/agent/skills/recovery/SKILL.md"},
 		{"supervisor_agent", "internal/agent/skills/supervisor/SKILL.md"},
 	}
@@ -346,9 +480,9 @@ func diagnosisSkillSnapshotHash() (string, error) {
 func diagnosisBudgetConfigHash() string {
 	configuration := map[string]string{}
 	for key, fallback := range map[string]string{
-		"SUPERVISOR_MAX_ITERATIONS": "10", "SUPERVISOR_MAX_TOOL_USES": "50", "SUPERVISOR_MAX_TOKENS": "12000", "SUPERVISOR_MAX_CORRECTIONS": "3",
-		"DIAGNOSIS_MAX_ITERATIONS": "12", "DIAGNOSIS_MAX_TOOL_USES": "50", "DIAGNOSIS_MAX_TOKENS": "30000", "DIAGNOSIS_MAX_CORRECTIONS": "3",
-		"RECOVERY_MAX_ITERATIONS": "10", "RECOVERY_MAX_TOOL_USES": "50", "RECOVERY_MAX_TOKENS": "16000", "RECOVERY_MAX_CORRECTIONS": "2",
+		"SUPERVISOR_MAX_ITERATIONS": "10", "SUPERVISOR_MAX_TOOL_USES": "50", "SUPERVISOR_MAX_TOKENS": "8192", "SUPERVISOR_MAX_CORRECTIONS": "3",
+		"DIAGNOSIS_MAX_ITERATIONS": "18", "DIAGNOSIS_MAX_TOOL_USES": "50", "DIAGNOSIS_MAX_TOKENS": "8192", "DIAGNOSIS_MAX_CORRECTIONS": "3",
+		"RECOVERY_MAX_ITERATIONS": "10", "RECOVERY_MAX_TOOL_USES": "50", "RECOVERY_MAX_TOKENS": "8192", "RECOVERY_MAX_CORRECTIONS": "2",
 	} {
 		configuration[key] = env(key, fallback)
 	}
@@ -370,15 +504,20 @@ func validateResumeManifest(existing, current reporter.Manifest) error {
 	fields := []field{
 		{"profile", existing.Profile, current.Profile}, {"catalog_hash", existing.CatalogHash, current.CatalogHash},
 		{"manifest_hash", existing.ManifestHash, current.ManifestHash},
-		{"chat_protocol", existing.Protocol, current.Protocol}, {"chat_model", existing.Model, current.Model},
+		{"chat_protocol", existing.Protocol, current.Protocol}, {"chat_model", existing.Model, current.Model}, {"model_profile", existing.ModelProfile, current.ModelProfile},
 		{"endpoint_hash", existing.EndpointHash, current.EndpointHash}, {"model_config_hash", existing.ModelConfigHash, current.ModelConfigHash},
 		{"skill_snapshot_hash", existing.SkillSnapshotHash, current.SkillSnapshotHash}, {"ranking_policy_hash", existing.RankingPolicyHash, current.RankingPolicyHash},
 		{"tool_cost_policy_hash", existing.ToolCostPolicyHash, current.ToolCostPolicyHash}, {"budget_config_hash", existing.BudgetConfigHash, current.BudgetConfigHash},
 		{"reranker_model", existing.RerankerModel, current.RerankerModel}, {"reranker_config_hash", existing.RerankerConfigHash, current.RerankerConfigHash},
 		{"embedding_model", existing.EmbeddingModel, current.EmbeddingModel}, {"embedding_dimensions", existing.EmbeddingDimensions, current.EmbeddingDimensions},
 		{"diagnosis_method", existing.DiagnosisMethod, current.DiagnosisMethod}, {"git_commit", existing.GitCommit, current.GitCommit},
+		{"causal_mode", existing.CausalMode, current.CausalMode},
 		{"source_hash", existing.SourceHash, current.SourceHash}, {"history_dataset_hash", existing.HistoryDatasetHash, current.HistoryDatasetHash},
 		{"history_collection", existing.HistoryCollection, current.HistoryCollection},
+		{"dataset_split", existing.DatasetSplit, current.DatasetSplit}, {"repetitions", strconv.Itoa(existing.Repetitions), strconv.Itoa(current.Repetitions)},
+		{"parallelism", strconv.Itoa(existing.Parallelism), strconv.Itoa(current.Parallelism)}, {"model_concurrency", strconv.Itoa(existing.ModelConcurrency), strconv.Itoa(current.ModelConcurrency)},
+		{"worker_namespaces", stableJSON(existing.WorkerNamespaces), stableJSON(current.WorkerNamespaces)}, {"shard_policy", existing.ShardPolicy, current.ShardPolicy},
+		{"seeds", stableJSON(existing.Seeds), stableJSON(current.Seeds)}, {"pricing_snapshot", stableJSON(existing.PricingSnapshot), stableJSON(current.PricingSnapshot)},
 	}
 	for _, item := range fields {
 		if item.old != item.new {
@@ -388,38 +527,319 @@ func validateResumeManifest(existing, current reporter.Manifest) error {
 	return nil
 }
 
-func writeDiagnosisComparison(root, profile, runID string, methods []string) error {
-	type row struct {
-		Method  string           `json:"method"`
-		Summary reporter.Summary `json:"summary"`
+func stableJSON(value any) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func parseSeeds(value string) ([]int64, error) {
+	seen := map[int64]bool{}
+	var seeds []int64
+	for _, part := range strings.Split(value, ",") {
+		seed, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+		if err != nil || seed <= 0 {
+			return nil, fmt.Errorf("invalid seed %q", part)
+		}
+		if !seen[seed] {
+			seen[seed] = true
+			seeds = append(seeds, seed)
+		}
 	}
-	rows := make([]row, 0, len(methods))
+	if len(seeds) == 0 {
+		return nil, fmt.Errorf("at least one seed is required")
+	}
+	return seeds, nil
+}
+
+func selectDatasetSplit(items []scenarios.Scenario, split string) ([]scenarios.Scenario, error) {
+	if split == "all" {
+		return append([]scenarios.Scenario(nil), items...), nil
+	}
+	if split != "dev" && split != "validation" && split != "test" {
+		return nil, fmt.Errorf("unsupported dataset split %q", split)
+	}
+	out := make([]scenarios.Scenario, 0, len(items))
+	for _, item := range items {
+		if item.Split == split {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
+func expandScenarioSeeds(items []scenarios.Scenario, seeds []int64, repetitions int) []scenarios.Scenario {
+	out := make([]scenarios.Scenario, 0, len(items)*len(seeds)*repetitions)
+	for _, item := range items {
+		for _, seed := range seeds {
+			for repetition := 1; repetition <= repetitions; repetition++ {
+				copy := item
+				copy.Seed = seed
+				copy.Repetition = repetition
+				copy.InjectParams = map[string]any{"variant": copy.Variant, "seed": seed, "repetition": repetition}
+				out = append(out, copy)
+			}
+		}
+	}
+	return out
+}
+
+func caseCheckpointKey(caseID string, seed int64, repetition int) string {
+	return fmt.Sprintf("%s|%d|%d", caseID, seed, repetition)
+}
+
+func comparisonStrategyOrder(runID string) []string {
+	return randomizedStrategyOrder([]string{domain.DiagnosisMethodDirect, domain.DiagnosisMethodRAG, domain.DiagnosisMethodReAct, domain.DiagnosisMethodKubePilot}, runID)
+}
+
+func randomizedStrategyOrder(strategies []string, runID string) []string {
+	digest := sha256.Sum256([]byte(runID))
+	ordered := append([]string(nil), strategies...)
+	for index := len(ordered) - 1; index > 0; index-- {
+		swap := int(digest[len(ordered)-1-index]) % (index + 1)
+		ordered[index], ordered[swap] = ordered[swap], ordered[index]
+	}
+	return ordered
+}
+
+func parseStrategies(value string) ([]string, error) {
+	seen := map[string]bool{}
+	var strategies []string
+	for _, part := range strings.Split(value, ",") {
+		strategy, ok := domain.NormalizeDiagnosisMethod(strings.TrimSpace(part))
+		if !ok || seen[strategy] {
+			return nil, fmt.Errorf("invalid or duplicate strategy %q", part)
+		}
+		seen[strategy] = true
+		strategies = append(strategies, strategy)
+	}
+	if len(strategies) < 2 {
+		return nil, fmt.Errorf("comparison requires at least two strategies")
+	}
+	return strategies, nil
+}
+
+func strategyArchitecture(strategy string) string {
+	switch strategy {
+	case domain.DiagnosisMethodDirect:
+		return "single-pass"
+	case domain.DiagnosisMethodRAG:
+		return "single-pass-episodic"
+	case domain.DiagnosisMethodReAct:
+		return "single-react"
+	default:
+		return "hierarchical-causal-react"
+	}
+}
+
+func pricingSnapshot() map[string]float64 {
+	prices := map[string]float64{}
+	for key, environment := range map[string]string{"input_per_million": "CHAT_INPUT_PRICE_PER_MILLION", "output_per_million": "CHAT_OUTPUT_PRICE_PER_MILLION", "reasoning_per_million": "CHAT_REASONING_PRICE_PER_MILLION"} {
+		value, _ := strconv.ParseFloat(os.Getenv(environment), 64)
+		prices[key] = value
+	}
+	return prices
+}
+
+func writeDiagnosisComparison(root, profile, runID string, methods []string) error {
+	summaries := map[string]reporter.Summary{}
+	caseResults := map[string][]reporter.CaseResult{}
+	var parent reporter.Manifest
 	for _, method := range methods {
+		var methodManifest reporter.Manifest
+		if err := readJSON(filepath.Join(root, method, "manifest.json"), &methodManifest); err != nil {
+			return err
+		}
+		if methodManifest.RunID != runID || methodManifest.DiagnosisMethod != method {
+			return fmt.Errorf("strategy %s artifact does not belong to comparison run %s", method, runID)
+		}
+		if parent.RunID == "" {
+			parent = methodManifest
+		} else if err := validateComparisonManifest(parent, methodManifest); err != nil {
+			return fmt.Errorf("strategy %s manifest is not paired with the comparison configuration: %w", method, err)
+		}
 		var summary reporter.Summary
 		if err := readJSON(filepath.Join(root, method, "summary.json"), &summary); err != nil {
 			return err
 		}
-		rows = append(rows, row{Method: method, Summary: summary})
+		items, err := readCaseResults(filepath.Join(root, method, "cases.jsonl"))
+		if err != nil {
+			return err
+		}
+		summaries[method] = summary
+		caseResults[method] = items
+	}
+	comparisonReport, err := benchmarkcomparison.Build(runID, profile, summaries, caseResults)
+	if err != nil {
+		return err
 	}
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(map[string]any{"run_id": runID, "profile": profile, "methods": rows}, "", "  ")
+	parent.DiagnosisMethod = ""
+	parent.Strategies = append([]string(nil), methods...)
+	parent.Architecture = "paired-strategy-comparison"
+	parent.FinishedAt = time.Now().UTC()
+	if err = reporter.WriteManifestDir(root, parent); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(comparisonReport, "", "  ")
 	if err != nil {
 		return err
 	}
 	if err = os.WriteFile(filepath.Join(root, "diagnosis-comparison.json"), b, 0o640); err != nil {
 		return err
 	}
-	var report strings.Builder
-	fmt.Fprintf(&report, "# KubePilot Diagnosis Baseline Comparison\n\n- Run: `%s`\n- Profile: `%s`\n\n", runID, profile)
-	report.WriteString("| Method | Strict RCA | Localization | Category | Variant | Evidence Precision | Evidence Recall | Brier | ECE |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
-	for _, item := range rows {
-		s := item.Summary
-		fmt.Fprintf(&report, "| %s | %.2f%% | %.2f%% | %.2f%% | %.2f%% | %.2f%% | %.2f%% | %.4f | %.4f |\n", item.Method, s.RootCauseAccuracy*100, s.RootCauseLocalizationAccuracy*100, s.CategoryAccuracy*100, s.VariantAccuracy*100, s.EvidencePrecision*100, s.EvidenceRecall*100, s.ConfidenceBrierScore, s.ConfidenceECE)
+	if err = writeComparisonCSV(filepath.Join(root, "diagnosis-comparison.csv"), comparisonReport); err != nil {
+		return err
 	}
-	report.WriteString("\nLocalization requires exact category, root-cause variant, service, and resource matching. Strict RCA additionally requires at least 50% required-evidence recall.\n")
+	if err = writeSystemCSV(filepath.Join(root, "diagnosis-systems.csv"), comparisonReport); err != nil {
+		return err
+	}
+	if err = writeBreakdownCSV(filepath.Join(root, "diagnosis-breakdowns.csv"), comparisonReport); err != nil {
+		return err
+	}
+	if err = writeComparisonFailures(filepath.Join(root, "failures.json"), caseResults); err != nil {
+		return err
+	}
+	var report strings.Builder
+	fmt.Fprintf(&report, "# KubePilot Diagnosis Baseline Comparison\n\n- Run: `%s`\n- Profile: `%s`\n- Valid: `%t`\n\n", runID, profile, comparisonReport.Valid)
+	report.WriteString("| System | Strict Diagnosis Accuracy (95% CI) | Recovery Success (95% CI) | Safety Violations | Mean Cost (95% CI) | P95 Latency |\n|---|---:|---:|---:|---:|---:|\n")
+	for _, item := range comparisonReport.Systems {
+		s := item.Summary
+		fmt.Fprintf(&report, "| %s | %.2f%% [%.2f, %.2f] | %.2f%% [%.2f, %.2f] | %d | %.6f [%.6f, %.6f] | %.3fs [%.3f, %.3f] |\n", item.Strategy, item.DiagnosisAccuracy.Estimate*100, item.DiagnosisAccuracy.Lower*100, item.DiagnosisAccuracy.Upper*100, item.RecoverySuccess.Estimate*100, item.RecoverySuccess.Lower*100, item.RecoverySuccess.Upper*100, s.SafetyViolations, item.MeanCost.Estimate, item.MeanCost.Lower, item.MeanCost.Upper, item.P95Latency.Estimate, item.P95Latency.Lower, item.P95Latency.Upper)
+	}
+	report.WriteString("\n## Paired comparisons against KubePilot\n\n| Baseline | Metric | Absolute difference (95% CI) | Relative change | Test | Holm-adjusted p | Effect size |\n|---|---|---:|---:|---|---:|---:|\n")
+	for _, item := range comparisonReport.Comparisons {
+		fmt.Fprintf(&report, "| %s | %s | %.4f [%.4f, %.4f] | %.2f%% | %s | %.6f | %.4f |\n", item.Baseline, item.Metric, item.Difference.Estimate, item.Difference.Lower, item.Difference.Upper, item.RelativeImprovement*100, item.Test, item.HolmAdjustedPValue, item.EffectSize)
+	}
+	report.WriteString("\nInfrastructure failures are excluded from model metrics. The run is invalid if their rate exceeds 2% or any approval bypass, namespace violation, or duplicate mutation is observed. Claims of superiority require the paired 95% CI to exclude zero after retaining all baseline outcomes. Category, root-cause variant, service, and resource slices are stored in `diagnosis-breakdowns.csv` and the JSON report.\n")
 	return os.WriteFile(filepath.Join(root, "report.md"), []byte(report.String()), 0o640)
+}
+
+func validateComparisonManifest(parent, candidate reporter.Manifest) error {
+	type field struct{ name, old, new string }
+	fields := []field{
+		{"profile", parent.Profile, candidate.Profile},
+		{"manifest_hash", parent.ManifestHash, candidate.ManifestHash},
+		{"catalog_hash", parent.CatalogHash, candidate.CatalogHash},
+		{"chat_protocol", parent.Protocol, candidate.Protocol},
+		{"chat_model", parent.Model, candidate.Model},
+		{"model_profile", parent.ModelProfile, candidate.ModelProfile},
+		{"endpoint_hash", parent.EndpointHash, candidate.EndpointHash},
+		{"model_config_hash", parent.ModelConfigHash, candidate.ModelConfigHash},
+		{"skill_snapshot_hash", parent.SkillSnapshotHash, candidate.SkillSnapshotHash},
+		{"ranking_policy_hash", parent.RankingPolicyHash, candidate.RankingPolicyHash},
+		{"tool_cost_policy_hash", parent.ToolCostPolicyHash, candidate.ToolCostPolicyHash},
+		{"budget_config_hash", parent.BudgetConfigHash, candidate.BudgetConfigHash},
+		{"reranker_model", parent.RerankerModel, candidate.RerankerModel},
+		{"reranker_config_hash", parent.RerankerConfigHash, candidate.RerankerConfigHash},
+		{"embedding_model", parent.EmbeddingModel, candidate.EmbeddingModel},
+		{"embedding_dimensions", parent.EmbeddingDimensions, candidate.EmbeddingDimensions},
+		{"causal_mode", parent.CausalMode, candidate.CausalMode},
+		{"source_hash", parent.SourceHash, candidate.SourceHash},
+		{"history_dataset_hash", parent.HistoryDatasetHash, candidate.HistoryDatasetHash},
+		{"history_collection", parent.HistoryCollection, candidate.HistoryCollection},
+		{"dataset_split", parent.DatasetSplit, candidate.DatasetSplit},
+		{"repetitions", strconv.Itoa(parent.Repetitions), strconv.Itoa(candidate.Repetitions)},
+		{"parallelism", strconv.Itoa(parent.Parallelism), strconv.Itoa(candidate.Parallelism)},
+		{"model_concurrency", strconv.Itoa(parent.ModelConcurrency), strconv.Itoa(candidate.ModelConcurrency)},
+		{"worker_namespaces", stableJSON(parent.WorkerNamespaces), stableJSON(candidate.WorkerNamespaces)},
+		{"shard_policy", parent.ShardPolicy, candidate.ShardPolicy},
+		{"seeds", stableJSON(parent.Seeds), stableJSON(candidate.Seeds)},
+		{"pricing_snapshot", stableJSON(parent.PricingSnapshot), stableJSON(candidate.PricingSnapshot)},
+	}
+	for _, item := range fields {
+		if item.old != item.new {
+			return fmt.Errorf("%s differs (left=%q right=%q)", item.name, item.old, item.new)
+		}
+	}
+	return nil
+}
+
+func writeSystemCSV(path string, report benchmarkcomparison.Report) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+	_ = writer.Write([]string{"strategy", "strict_accuracy", "strict_accuracy_ci_lower", "strict_accuracy_ci_upper", "recovery_success", "recovery_ci_lower", "recovery_ci_upper", "safety_violations", "mean_cost", "mean_cost_ci_lower", "mean_cost_ci_upper", "p95_latency_seconds", "p95_latency_ci_lower", "p95_latency_ci_upper", "valid"})
+	for _, item := range report.Systems {
+		_ = writer.Write([]string{item.Strategy, formatFloat(item.DiagnosisAccuracy.Estimate), formatFloat(item.DiagnosisAccuracy.Lower), formatFloat(item.DiagnosisAccuracy.Upper), formatFloat(item.RecoverySuccess.Estimate), formatFloat(item.RecoverySuccess.Lower), formatFloat(item.RecoverySuccess.Upper), strconv.Itoa(item.Summary.SafetyViolations), formatFloat(item.MeanCost.Estimate), formatFloat(item.MeanCost.Lower), formatFloat(item.MeanCost.Upper), formatFloat(item.P95Latency.Estimate), formatFloat(item.P95Latency.Lower), formatFloat(item.P95Latency.Upper), strconv.FormatBool(item.Summary.Valid)})
+	}
+	return writer.Error()
+}
+
+func writeBreakdownCSV(path string, report benchmarkcomparison.Report) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+	_ = writer.Write([]string{"strategy", "dimension", "value", "cases", "strict_accuracy", "strict_accuracy_ci_lower", "strict_accuracy_ci_upper", "recovery_success", "recovery_ci_lower", "recovery_ci_upper", "mean_cost", "mean_cost_ci_lower", "mean_cost_ci_upper", "p95_latency_seconds", "p95_latency_ci_lower", "p95_latency_ci_upper"})
+	for _, system := range report.Systems {
+		for _, item := range system.Breakdowns {
+			_ = writer.Write([]string{system.Strategy, item.Dimension, item.Value, strconv.Itoa(item.Cases), formatFloat(item.DiagnosisAccuracy.Estimate), formatFloat(item.DiagnosisAccuracy.Lower), formatFloat(item.DiagnosisAccuracy.Upper), formatFloat(item.RecoverySuccess.Estimate), formatFloat(item.RecoverySuccess.Lower), formatFloat(item.RecoverySuccess.Upper), formatFloat(item.MeanCost.Estimate), formatFloat(item.MeanCost.Lower), formatFloat(item.MeanCost.Upper), formatFloat(item.P95Latency.Estimate), formatFloat(item.P95Latency.Lower), formatFloat(item.P95Latency.Upper)})
+		}
+	}
+	return writer.Error()
+}
+
+func writeComparisonFailures(path string, cases map[string][]reporter.CaseResult) error {
+	type failure struct {
+		Strategy              string `json:"strategy"`
+		CaseID                string `json:"case_id"`
+		Seed                  int64  `json:"seed"`
+		Repetition            int    `json:"repetition"`
+		Status                string `json:"status"`
+		InfrastructureFailure bool   `json:"infrastructure_failure"`
+		SafetyViolation       bool   `json:"safety_violation"`
+		ApprovalBypass        bool   `json:"approval_bypass"`
+		NamespaceViolation    bool   `json:"namespace_violation"`
+		DuplicateMutation     bool   `json:"duplicate_mutation"`
+		Error                 string `json:"error,omitempty"`
+	}
+	var failures []failure
+	for strategy, items := range cases {
+		for _, item := range items {
+			if item.Status == "passed" && !item.InfrastructureFailure && !item.SafetyViolation && item.Score.StrictRootCause && item.VerificationOK {
+				continue
+			}
+			failures = append(failures, failure{Strategy: strategy, CaseID: item.CaseID, Seed: item.Seed, Repetition: item.Repetition, Status: item.Status, InfrastructureFailure: item.InfrastructureFailure, SafetyViolation: item.SafetyViolation, ApprovalBypass: item.ApprovalBypass, NamespaceViolation: item.NamespaceViolation, DuplicateMutation: item.DuplicateMutation, Error: item.Error})
+		}
+	}
+	sort.Slice(failures, func(i, j int) bool {
+		left := fmt.Sprintf("%s|%s|%d|%d", failures[i].Strategy, failures[i].CaseID, failures[i].Seed, failures[i].Repetition)
+		right := fmt.Sprintf("%s|%s|%d|%d", failures[j].Strategy, failures[j].CaseID, failures[j].Seed, failures[j].Repetition)
+		return left < right
+	})
+	raw, err := json.MarshalIndent(failures, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, raw, 0o640)
+}
+
+func formatFloat(value float64) string {
+	return strconv.FormatFloat(value, 'f', 8, 64)
+}
+
+func writeComparisonCSV(path string, report benchmarkcomparison.Report) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+	_ = writer.Write([]string{"baseline", "target", "metric", "pairs", "difference", "ci_lower", "ci_upper", "relative_change", "test", "p_value", "holm_adjusted_p_value", "effect_size"})
+	for _, item := range report.Comparisons {
+		_ = writer.Write([]string{item.Baseline, item.Target, item.Metric, strconv.Itoa(item.Pairs), strconv.FormatFloat(item.Difference.Estimate, 'f', 8, 64), strconv.FormatFloat(item.Difference.Lower, 'f', 8, 64), strconv.FormatFloat(item.Difference.Upper, 'f', 8, 64), strconv.FormatFloat(item.RelativeImprovement, 'f', 8, 64), item.Test, strconv.FormatFloat(item.PValue, 'f', 8, 64), strconv.FormatFloat(item.HolmAdjustedPValue, 'f', 8, 64), strconv.FormatFloat(item.EffectSize, 'f', 8, 64)})
+	}
+	return writer.Error()
 }
 func robustness(all []scenarios.Scenario) []scenarios.Scenario {
 	counts := map[string]int{}
@@ -564,13 +984,20 @@ func seedHistory(args []string) {
 	batchSize := fs.Int("embedding-batch-size", envInt("EMBEDDING_BATCH_SIZE", 10), "maximum texts per embedding request")
 	requestInterval := fs.Duration("embedding-request-interval", envDuration("EMBEDDING_REQUEST_INTERVAL", time.Second), "minimum interval between embedding requests")
 	concurrency := fs.Int("embedding-concurrency", envInt("EMBEDDING_CONCURRENCY", 1), "maximum concurrent embedding requests")
+	namespaceList := fs.String("namespaces", "", "comma-separated memory scopes; defaults to the dataset namespace")
 	output := fs.String("output", "", "seed manifest; defaults to a timestamped history dataset directory")
 	_ = fs.Parse(args)
 	if *output == "" {
 		*output = filepath.Join(artifactlayout.RunDirectory("artifacts/benchmark", "history-seed", "full", time.Now().UTC()), "manifest.json")
 	}
-	_, items, datasetHash, err := history.Load(*dataset)
+	historyCatalog, items, datasetHash, err := history.Load(*dataset)
 	fatal(err)
+	namespaces := []string{historyCatalog.Namespace}
+	if strings.TrimSpace(*namespaceList) != "" {
+		namespaces, err = parseNamespaceList(*namespaceList)
+		fatal(err)
+	}
+	items = expandHistoryNamespaces(items, historyCatalog.Namespace, namespaces)
 	embedCfg := config.EmbeddingConfig{
 		BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: env("EMBEDDING_API_PATH", "/embeddings"),
 		APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"),
@@ -606,6 +1033,7 @@ func seedHistory(args []string) {
 	endpointHash := sha256.Sum256([]byte(embedCfg.BaseURL))
 	manifest := map[string]any{
 		"documents": len(docs), "embedding_calls": calls, "dataset_sha256": datasetHash,
+		"namespaces":      namespaces,
 		"collection":      *collection,
 		"embedding_model": embedCfg.Model, "embedding_dimensions": *dimensions,
 		"embedding_endpoint_hash": hex.EncodeToString(endpointHash[:]), "generated_at": time.Now().UTC(),
@@ -615,6 +1043,39 @@ func seedHistory(args []string) {
 	fatal(os.MkdirAll(filepath.Dir(*output), 0o750))
 	fatal(os.WriteFile(*output, b, 0o640))
 	fmt.Printf("seeded history documents=%d embedding_calls=%d output=%s\n", len(docs), calls, *output)
+}
+
+func parseNamespaceList(value string) ([]string, error) {
+	seen := map[string]bool{}
+	var namespaces []string
+	for _, part := range strings.Split(value, ",") {
+		namespace := strings.TrimSpace(part)
+		if namespace == "" {
+			return nil, fmt.Errorf("namespace list contains an empty entry")
+		}
+		if seen[namespace] {
+			return nil, fmt.Errorf("namespace %q is duplicated", namespace)
+		}
+		seen[namespace] = true
+		namespaces = append(namespaces, namespace)
+	}
+	return namespaces, nil
+}
+
+func expandHistoryNamespaces(items []history.SeedDocument, sourceNamespace string, namespaces []string) []history.SeedDocument {
+	out := make([]history.SeedDocument, 0, len(items)*len(namespaces))
+	for _, namespace := range namespaces {
+		for _, item := range items {
+			copy := item
+			if namespace != sourceNamespace {
+				copy.Document.ID = item.Document.ID + "-" + namespace
+			}
+			copy.Document.Namespace = namespace
+			copy.Text = strings.ReplaceAll(item.Text, sourceNamespace, namespace)
+			out = append(out, copy)
+		}
+	}
+	return out
 }
 
 func fileSHA256(path string) (string, error) {
@@ -655,7 +1116,35 @@ func resume(args []string) {
 	if method == "" {
 		method = domain.DiagnosisMethodKubePilot
 	}
-	run([]string{"--profile", manifest.Profile, "--run-id", *runID, "--artifacts", *root, "--artifact-dir", *artifactDir, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--resume=true", "--auto-approve=" + strconv.FormatBool(*auto), "--diagnosis-method", method})
+	seeds := manifest.Seeds
+	if len(seeds) == 0 {
+		seeds = []int64{manifest.Seed}
+	}
+	seedValues := make([]string, 0, len(seeds))
+	for _, seed := range seeds {
+		seedValues = append(seedValues, strconv.FormatInt(seed, 10))
+	}
+	repetitions := manifest.Repetitions
+	if repetitions <= 0 {
+		repetitions = 1
+	}
+	split := manifest.DatasetSplit
+	if split == "" {
+		split = "all"
+	}
+	parallelism := manifest.Parallelism
+	if parallelism < 1 {
+		parallelism = 1
+	}
+	modelConcurrency := manifest.ModelConcurrency
+	if modelConcurrency < 1 {
+		modelConcurrency = parallelism
+	}
+	runArgs := []string{"--profile", manifest.Profile, "--run-id", *runID, "--artifacts", *root, "--artifact-dir", *artifactDir, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--resume=true", "--auto-approve=" + strconv.FormatBool(*auto), "--diagnosis-method", method, "--causal-mode", manifest.CausalMode, "--dataset-split", split, "--seeds", strings.Join(seedValues, ","), "--repetitions", strconv.Itoa(repetitions), "--workers", strconv.Itoa(parallelism), "--model-concurrency", strconv.Itoa(modelConcurrency), "--worker-namespaces", strings.Join(manifest.WorkerNamespaces, ",")}
+	if len(manifest.Strategies) > 1 {
+		runArgs = append(runArgs, "--compare-methods=true", "--strategies", strings.Join(manifest.Strategies, ","))
+	}
+	run(runArgs)
 }
 
 func report(args []string) {
@@ -676,6 +1165,11 @@ func report(args []string) {
 	}
 	var manifest reporter.Manifest
 	fatal(readJSON(filepath.Join(dir, "manifest.json"), &manifest))
+	if len(manifest.Strategies) > 1 {
+		fatal(writeDiagnosisComparison(dir, manifest.Profile, manifest.RunID, manifest.Strategies))
+		fmt.Println(filepath.Join(dir, "report.md"))
+		return
+	}
 	items, err := readCaseResults(filepath.Join(dir, "cases.jsonl"))
 	fatal(err)
 	_, err = reporter.WriteDir(dir, manifest, items)
@@ -692,7 +1186,37 @@ func appendCheckpoint(path string, result reporter.CaseResult) error {
 		return err
 	}
 	defer f.Close()
-	return json.NewEncoder(f).Encode(result)
+	if err = json.NewEncoder(f).Encode(result); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
+type checkpointRecorder struct {
+	path   string
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	err    error
+}
+
+func (r *checkpointRecorder) Record(result reporter.CaseResult) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return
+	}
+	if err := appendCheckpoint(r.path, result); err != nil {
+		r.err = fmt.Errorf("append benchmark checkpoint: %w", err)
+		if r.cancel != nil {
+			r.cancel()
+		}
+	}
+}
+
+func (r *checkpointRecorder) Err() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.err
 }
 func readCaseResults(path string) ([]reporter.CaseResult, error) {
 	f, err := os.Open(path)
@@ -727,6 +1251,7 @@ func findRunDirectory(root, runID string) string {
 		return ""
 	}
 	var found string
+	comparisonFound := false
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -736,7 +1261,12 @@ func findRunDirectory(root, runID string) string {
 		}
 		var manifest reporter.Manifest
 		if err := readJSON(path, &manifest); err == nil && manifest.RunID == runID {
-			found = filepath.Dir(path)
+			if len(manifest.Strategies) > 1 {
+				found = filepath.Dir(path)
+				comparisonFound = true
+			} else if !comparisonFound && found == "" {
+				found = filepath.Dir(path)
+			}
 		}
 		return nil
 	})

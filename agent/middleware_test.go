@@ -32,16 +32,18 @@ func TestModelTokensForBudgetFallsBackToCurrentMessage(t *testing.T) {
 	}
 }
 
-func TestRuntimePolicySeparatesRequestLimitFromCumulativeBudget(t *testing.T) {
+func TestRuntimePolicyAppliesPerResponseOutputLimitToEveryAgent(t *testing.T) {
 	registry := &AgentRegistry{limits: map[string]domain.AgentBudget{}}
 	registry.ConfigureRuntimePolicy(RuntimePolicy{
-		Diagnosis:        domain.AgentBudget{MaxIterations: 12, MaxTokens: 30000},
-		RequestMaxTokens: 4096,
+		Diagnosis:        domain.AgentBudget{MaxIterations: 12, MaxTokens: 8192},
+		RequestMaxTokens: 8192,
 	})
-	if registry.limits[DiagnosisAgentName].MaxTokens != 30000 {
-		t.Fatalf("cumulative budget changed: %+v", registry.limits[DiagnosisAgentName])
+	for _, name := range diagnosisAgentNames() {
+		if registry.limits[name].MaxTokens != 8192 {
+			t.Fatalf("%s did not receive an independent token budget: %+v", name, registry.limits[name])
+		}
 	}
-	if registry.requestMaxTokens != 4096 {
+	if registry.requestMaxTokens != 8192 {
 		t.Fatalf("request token limit not retained: got %d", registry.requestMaxTokens)
 	}
 }

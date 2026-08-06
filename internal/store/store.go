@@ -31,6 +31,11 @@ type WorkflowIdentityStore interface {
 	WorkflowIdentity(context.Context, string) (string, error)
 }
 
+type RuntimeObservationStore interface {
+	RecordMemoryAccess(context.Context, domain.MemoryAccessEvent) error
+	RecordModelUsage(context.Context, domain.ModelUsageEvent) error
+}
+
 // KnowledgeStore is a structured Agent capability boundary. It deliberately
 // exposes no raw SQL, tsquery, or database expression.
 type KnowledgeStore interface {
@@ -41,15 +46,18 @@ type KnowledgeStore interface {
 	ListCausalPatterns(context.Context, string) ([]domain.CausalPattern, error)
 	GetCausalPattern(context.Context, string) (*domain.CausalPattern, error)
 	SetCausalPatternStatus(context.Context, string, string, string) (*domain.CausalPattern, error)
+	RollbackCausalPattern(context.Context, string, int, string) (*domain.CausalPattern, error)
 	RecordCausalPatternEvent(context.Context, string, string, string, string, map[string]any) error
 	CountCausalPatternSupport(context.Context, string) (int, error)
 }
 
 type MemoryStore struct {
-	mu        sync.RWMutex
-	incidents map[string]*domain.Incident
-	audit     map[string][]domain.AuditEvent
-	approvals map[string]bool
+	mu           sync.RWMutex
+	incidents    map[string]*domain.Incident
+	audit        map[string][]domain.AuditEvent
+	approvals    map[string]bool
+	memoryAccess []domain.MemoryAccessEvent
+	modelUsage   []domain.ModelUsageEvent
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -142,6 +150,20 @@ func (s *MemoryStore) ListAudit(_ context.Context, id string) ([]domain.AuditEve
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]domain.AuditEvent(nil), s.audit[id]...), nil
+}
+
+func (s *MemoryStore) RecordMemoryAccess(_ context.Context, event domain.MemoryAccessEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.memoryAccess = append(s.memoryAccess, event)
+	return nil
+}
+
+func (s *MemoryStore) RecordModelUsage(_ context.Context, event domain.ModelUsageEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modelUsage = append(s.modelUsage, event)
+	return nil
 }
 
 type CheckpointStore interface {

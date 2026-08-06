@@ -1,11 +1,15 @@
 package domain
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
 
 type IncidentStatus string
+type DiagnosisMethod = string
+
+const WorkflowRuntimeName = "eino-hierarchical-causal-react"
 
 const (
 	StatusReceived         IncidentStatus = "RECEIVED"
@@ -24,53 +28,239 @@ const (
 )
 
 type Incident struct {
-	ID                   string            `json:"id"`
-	Status               IncidentStatus    `json:"status"`
-	Severity             string            `json:"severity"`
-	Service              string            `json:"service"`
-	Namespace            string            `json:"namespace"`
-	Resource             string            `json:"resource"`
-	Summary              string            `json:"summary"`
-	DiagnosisMethod      string            `json:"diagnosis_method,omitempty"`
-	DiagnosisError       string            `json:"diagnosis_error,omitempty"`
-	EvidenceStartAt      time.Time         `json:"evidence_start_at,omitempty"`
-	RootCause            string            `json:"root_cause,omitempty"`
-	RootCauseCategory    string            `json:"root_cause_category,omitempty"`
-	RootCauseVariant     string            `json:"root_cause_variant,omitempty"`
-	RootCauseService     string            `json:"root_cause_service,omitempty"`
-	RootCauseResource    string            `json:"root_cause_resource,omitempty"`
-	RootCauseEvidenceIDs []string          `json:"root_cause_evidence_ids,omitempty"`
-	Confidence           float64           `json:"confidence,omitempty"`
-	ReasoningType        string            `json:"reasoning_type,omitempty"`
-	ModelProtocol        string            `json:"model_protocol,omitempty"`
-	ModelName            string            `json:"model_name,omitempty"`
-	ModelConfigHash      string            `json:"model_config_hash,omitempty"`
-	SkillSnapshotHash    string            `json:"skill_snapshot_hash,omitempty"`
-	RankingPolicyHash    string            `json:"ranking_policy_hash,omitempty"`
-	RerankerConfigHash   string            `json:"reranker_config_hash,omitempty"`
-	TraceID              string            `json:"trace_id,omitempty"`
-	CreatedAt            time.Time         `json:"created_at"`
-	UpdatedAt            time.Time         `json:"updated_at"`
-	Alerts               []Alert           `json:"alerts,omitempty"`
-	Evidence             []Evidence        `json:"evidence,omitempty"`
-	Hypotheses           []Hypothesis      `json:"hypotheses,omitempty"`
-	Proposal             *RecoveryProposal `json:"recovery_proposal,omitempty"`
-	DryRun               *DryRunResult     `json:"dry_run,omitempty"`
-	ExecutionContext     *ExecutionContext `json:"execution_context,omitempty"`
-	WorkflowInterruptID  string            `json:"workflow_interrupt_id,omitempty"`
-	Verification         *Verification     `json:"verification,omitempty"`
-	DiagnosisLedger      *DiagnosisLedger  `json:"diagnosis_ledger,omitempty"`
-	AgentBudget          *AgentBudgetState `json:"agent_budget,omitempty"`
+	ID                   string             `json:"id"`
+	Status               IncidentStatus     `json:"status"`
+	Severity             string             `json:"severity"`
+	Service              string             `json:"service"`
+	Cluster              string             `json:"cluster,omitempty"`
+	Namespace            string             `json:"namespace"`
+	Resource             string             `json:"resource"`
+	Summary              string             `json:"summary"`
+	DiagnosisMethod      string             `json:"diagnosis_method,omitempty"`
+	CausalMode           string             `json:"causal_mode,omitempty"`
+	DiagnosisError       string             `json:"diagnosis_error,omitempty"`
+	EvidenceStartAt      time.Time          `json:"evidence_start_at,omitempty"`
+	RootCause            string             `json:"root_cause,omitempty"`
+	RootCauseCategory    string             `json:"root_cause_category,omitempty"`
+	RootCauseVariant     string             `json:"root_cause_variant,omitempty"`
+	RootCauseService     string             `json:"root_cause_service,omitempty"`
+	RootCauseResource    string             `json:"root_cause_resource,omitempty"`
+	RootCauseEvidenceIDs []string           `json:"root_cause_evidence_ids,omitempty"`
+	Confidence           float64            `json:"confidence,omitempty"`
+	ReasoningType        string             `json:"reasoning_type,omitempty"`
+	ModelProtocol        string             `json:"model_protocol,omitempty"`
+	ModelName            string             `json:"model_name,omitempty"`
+	ModelConfigHash      string             `json:"model_config_hash,omitempty"`
+	SkillSnapshotHash    string             `json:"skill_snapshot_hash,omitempty"`
+	RankingPolicyHash    string             `json:"ranking_policy_hash,omitempty"`
+	RerankerConfigHash   string             `json:"reranker_config_hash,omitempty"`
+	TraceID              string             `json:"trace_id,omitempty"`
+	CreatedAt            time.Time          `json:"created_at"`
+	UpdatedAt            time.Time          `json:"updated_at"`
+	Alerts               []Alert            `json:"alerts,omitempty"`
+	Evidence             []Evidence         `json:"evidence,omitempty"`
+	Hypotheses           []Hypothesis       `json:"hypotheses,omitempty"`
+	Proposal             *RecoveryProposal  `json:"recovery_proposal,omitempty"`
+	DryRun               *DryRunResult      `json:"dry_run,omitempty"`
+	ExecutionContext     *ExecutionContext  `json:"execution_context,omitempty"`
+	RecoveryExecution    *RecoveryExecution `json:"recovery_execution,omitempty"`
+	WorkflowInterruptID  string             `json:"workflow_interrupt_id,omitempty"`
+	Verification         *Verification      `json:"verification,omitempty"`
+	DiagnosisLedger      *DiagnosisLedger   `json:"diagnosis_ledger,omitempty"`
+	AgentBudget          *AgentBudgetState  `json:"agent_budget,omitempty"`
+	Investigation        *Investigation     `json:"investigation,omitempty"`
 }
 
 const (
+	DiagnosisMethodDirect    = "direct"
+	DiagnosisMethodRAG       = "rag"
+	DiagnosisMethodReAct     = "react"
+	DiagnosisMethodKubePilot = "kubepilot"
+	// Deprecated request aliases are accepted at the API boundary only. All
+	// persisted state and benchmark artifacts use the canonical identifiers.
 	DiagnosisMethodLLMOnly   = "llm-only"
 	DiagnosisMethodVectorRAG = "vector-rag"
-	DiagnosisMethodKubePilot = "kubepilot"
 )
 
+const (
+	CausalModeNone    = "no-causal"
+	CausalModeStatic  = "static-causal"
+	CausalModeLearned = "learned-causal"
+	CausalModeFull    = "full"
+)
+
+func NormalizeCausalMode(value string) (string, bool) {
+	switch value {
+	case "", CausalModeFull:
+		return CausalModeFull, true
+	case CausalModeNone, CausalModeStatic, CausalModeLearned:
+		return value, true
+	default:
+		return "", false
+	}
+}
+
 func ValidDiagnosisMethod(value string) bool {
-	return value == "" || value == DiagnosisMethodLLMOnly || value == DiagnosisMethodVectorRAG || value == DiagnosisMethodKubePilot
+	_, ok := NormalizeDiagnosisMethod(value)
+	return ok
+}
+
+func NormalizeDiagnosisMethod(value string) (string, bool) {
+	switch value {
+	case "":
+		return DiagnosisMethodKubePilot, true
+	case DiagnosisMethodLLMOnly:
+		return DiagnosisMethodDirect, true
+	case DiagnosisMethodVectorRAG:
+		return DiagnosisMethodRAG, true
+	case DiagnosisMethodDirect, DiagnosisMethodRAG, DiagnosisMethodReAct, DiagnosisMethodKubePilot:
+		return value, true
+	default:
+		return "", false
+	}
+}
+
+type Investigation struct {
+	Architecture string              `json:"architecture"`
+	Plan         InvestigationPlan   `json:"plan"`
+	Findings     []WorkerFinding     `json:"findings,omitempty"`
+	Debate       []DebateRound       `json:"debate,omitempty"`
+	Arbitration  *ArbitrationResult  `json:"arbitration,omitempty"`
+	MemoryReads  []MemoryAccessEvent `json:"memory_reads,omitempty"`
+	ModelUsage   []ModelUsageEvent   `json:"model_usage,omitempty"`
+	StartedAt    time.Time           `json:"started_at"`
+	CompletedAt  time.Time           `json:"completed_at,omitempty"`
+}
+
+type InvestigationPlan struct {
+	Objective      string       `json:"objective"`
+	Tasks          []WorkerTask `json:"tasks"`
+	StopConditions []string     `json:"stop_conditions"`
+	RoundLimit     int          `json:"round_limit"`
+	CreatedAt      time.Time    `json:"created_at"`
+}
+
+type WorkerTask struct {
+	ID            string   `json:"id"`
+	Source        string   `json:"source"`
+	Question      string   `json:"question"`
+	HypothesisIDs []string `json:"hypothesis_ids,omitempty"`
+	Required      bool     `json:"required"`
+}
+
+type WorkerFinding struct {
+	TaskID                     string    `json:"task_id"`
+	Worker                     string    `json:"worker"`
+	Source                     string    `json:"source"`
+	Summary                    string    `json:"summary"`
+	EvidenceIDs                []string  `json:"evidence_ids"`
+	SupportingHypothesisIDs    []string  `json:"supporting_hypothesis_ids,omitempty"`
+	ContradictingHypothesisIDs []string  `json:"contradicting_hypothesis_ids,omitempty"`
+	Unknowns                   []string  `json:"unknowns,omitempty"`
+	CompletedAt                time.Time `json:"completed_at"`
+}
+
+type HypothesisArgument struct {
+	Author      string            `json:"author"`
+	Hypotheses  []HypothesisDraft `json:"hypotheses"`
+	EvidenceIDs []string          `json:"evidence_ids,omitempty"`
+	Uncertainty string            `json:"uncertainty,omitempty"`
+}
+
+type Critique struct {
+	HypothesisID       string   `json:"hypothesis_id"`
+	Challenge          string   `json:"challenge"`
+	MissingEvidence    []string `json:"missing_evidence,omitempty"`
+	ContradictingIDs   []string `json:"contradicting_evidence_ids,omitempty"`
+	RecommendedSources []string `json:"recommended_sources,omitempty"`
+}
+
+type DebateRound struct {
+	Round       int                `json:"round"`
+	Primary     HypothesisArgument `json:"primary"`
+	Alternative HypothesisArgument `json:"alternative"`
+	Critiques   []Critique         `json:"critiques,omitempty"`
+	OccurredAt  time.Time          `json:"occurred_at"`
+}
+
+type ArbitrationResult struct {
+	SelectedHypothesisID string   `json:"selected_hypothesis_id,omitempty"`
+	RankedHypothesisIDs  []string `json:"ranked_hypothesis_ids,omitempty"`
+	SelectedScore        float64  `json:"selected_score"`
+	ScoreMargin          float64  `json:"score_margin"`
+	Accepted             bool     `json:"accepted"`
+	NeedsMoreEvidence    bool     `json:"needs_more_evidence"`
+	Reason               string   `json:"reason"`
+}
+
+type MemoryKind string
+
+const (
+	MemoryWorking    MemoryKind = "working"
+	MemoryEpisodic   MemoryKind = "episodic"
+	MemorySemantic   MemoryKind = "semantic"
+	MemoryProcedural MemoryKind = "procedural"
+)
+
+type MemoryScope struct {
+	Cluster   string `json:"cluster,omitempty"`
+	Namespace string `json:"namespace"`
+}
+
+type MemoryQuery struct {
+	IncidentID string      `json:"incident_id"`
+	Agent      string      `json:"agent"`
+	Kind       MemoryKind  `json:"kind"`
+	Scope      MemoryScope `json:"scope"`
+	Terms      []string    `json:"terms,omitempty"`
+	Limit      int         `json:"limit"`
+}
+
+type MemoryResult struct {
+	ID         string         `json:"id"`
+	Kind       MemoryKind     `json:"kind"`
+	Scope      MemoryScope    `json:"scope"`
+	Summary    string         `json:"summary"`
+	Score      float64        `json:"score"`
+	Version    string         `json:"version,omitempty"`
+	Provenance map[string]any `json:"provenance,omitempty"`
+	ObservedAt time.Time      `json:"observed_at,omitempty"`
+}
+
+type MemoryAccessResult struct {
+	ID      string  `json:"id"`
+	Score   float64 `json:"score"`
+	Version string  `json:"version,omitempty"`
+}
+
+type MemoryAccessEvent struct {
+	IncidentID    string               `json:"incident_id"`
+	Agent         string               `json:"agent"`
+	Kind          MemoryKind           `json:"kind"`
+	Scope         MemoryScope          `json:"scope"`
+	QueryHash     string               `json:"query_hash"`
+	ResultIDs     []string             `json:"result_ids,omitempty"`
+	Results       []MemoryAccessResult `json:"results,omitempty"`
+	PolicyVersion string               `json:"policy_version,omitempty"`
+	CreatedAt     time.Time            `json:"created_at"`
+}
+
+type IncidentLearningInput struct {
+	Incident *Incident `json:"incident"`
+	Source   string    `json:"source"`
+}
+
+type ModelUsageEvent struct {
+	IncidentID      string    `json:"incident_id"`
+	Agent           string    `json:"agent"`
+	ParentAgent     string    `json:"parent_agent,omitempty"`
+	Phase           string    `json:"phase"`
+	InputTokens     int       `json:"input_tokens"`
+	OutputTokens    int       `json:"output_tokens"`
+	ReasoningTokens int       `json:"reasoning_tokens,omitempty"`
+	DurationMS      float64   `json:"duration_ms"`
+	EstimatedCost   float64   `json:"estimated_cost"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 type Alert struct {
@@ -130,6 +320,7 @@ type EvidenceRankBreakdown struct {
 // labels or model-generated ground truth.
 type IncidentFeatures struct {
 	IncidentID       string                  `json:"incident_id"`
+	Cluster          string                  `json:"cluster,omitempty"`
 	Namespace        string                  `json:"namespace"`
 	Service          string                  `json:"service"`
 	Resource         string                  `json:"resource"`
@@ -189,6 +380,7 @@ type IncidentRankBreakdown struct {
 
 type RetrievalCandidate struct {
 	IncidentID     string             `json:"incident_id"`
+	Cluster        string             `json:"cluster,omitempty"`
 	Namespace      string             `json:"namespace"`
 	Service        string             `json:"service"`
 	Resource       string             `json:"resource"`
@@ -205,29 +397,75 @@ type RetrievalCandidate struct {
 }
 
 type CausalNode struct {
-	ID    string   `json:"id" yaml:"id"`
-	Type  string   `json:"type" yaml:"type"`
-	Match []string `json:"match" yaml:"match"`
+	ID                string   `json:"id" yaml:"id"`
+	Type              string   `json:"type" yaml:"type"`
+	Name              string   `json:"name,omitempty" yaml:"name,omitempty"`
+	Source            string   `json:"source,omitempty" yaml:"source,omitempty"`
+	Match             []string `json:"match,omitempty" yaml:"match,omitempty"`
+	Confidence        float64  `json:"confidence,omitempty" yaml:"confidence,omitempty"`
+	SourceEvidenceIDs []string `json:"source_evidence_ids,omitempty" yaml:"source_evidence_ids,omitempty"`
 }
 
 type CausalEdge struct {
-	From string `json:"from" yaml:"from"`
-	To   string `json:"to" yaml:"to"`
+	From       string  `json:"from" yaml:"from"`
+	To         string  `json:"to" yaml:"to"`
+	Relation   string  `json:"relation,omitempty" yaml:"relation,omitempty"`
+	Confidence float64 `json:"confidence,omitempty" yaml:"confidence,omitempty"`
+}
+
+func (edge *CausalEdge) UnmarshalJSON(data []byte) error {
+	type wire struct {
+		From       string  `json:"from"`
+		To         string  `json:"to"`
+		Source     string  `json:"source"`
+		Target     string  `json:"target"`
+		Relation   string  `json:"relation"`
+		Confidence float64 `json:"confidence"`
+	}
+	var value wire
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	edge.From, edge.To = value.From, value.To
+	if edge.From == "" {
+		edge.From = value.Source
+	}
+	if edge.To == "" {
+		edge.To = value.Target
+	}
+	edge.Relation, edge.Confidence = value.Relation, value.Confidence
+	return nil
+}
+
+type CausalGraph struct {
+	Nodes []CausalNode `json:"nodes" yaml:"nodes"`
+	Edges []CausalEdge `json:"edges" yaml:"edges"`
+}
+
+type CausalEvidencePattern struct {
+	Source string   `json:"source" yaml:"source"`
+	Type   string   `json:"type" yaml:"type"`
+	Tokens []string `json:"tokens,omitempty" yaml:"tokens,omitempty"`
 }
 
 type CausalPattern struct {
-	ID           string       `json:"id" yaml:"id"`
-	Category     string       `json:"category" yaml:"category"`
-	Cause        string       `json:"cause" yaml:"cause"`
-	Nodes        []CausalNode `json:"nodes" yaml:"nodes"`
-	Edges        []CausalEdge `json:"edges" yaml:"edges"`
-	Source       string       `json:"source" yaml:"source"`
-	Confidence   float64      `json:"confidence" yaml:"confidence"`
-	Status       string       `json:"status" yaml:"status"`
-	Version      int          `json:"version" yaml:"version"`
-	SupportCount int          `json:"support_count,omitempty" yaml:"support_count,omitempty"`
-	CreatedAt    time.Time    `json:"created_at,omitempty" yaml:"-"`
-	UpdatedAt    time.Time    `json:"updated_at,omitempty" yaml:"-"`
+	ID                    string                  `json:"id" yaml:"id"`
+	Category              string                  `json:"category" yaml:"category"`
+	Cause                 string                  `json:"cause" yaml:"cause"`
+	Nodes                 []CausalNode            `json:"nodes" yaml:"nodes"`
+	Edges                 []CausalEdge            `json:"edges" yaml:"edges"`
+	SupportingEvidence    []CausalEvidencePattern `json:"supporting_evidence,omitempty" yaml:"supporting_evidence,omitempty"`
+	ContradictingEvidence []CausalEvidencePattern `json:"contradicting_evidence,omitempty" yaml:"contradicting_evidence,omitempty"`
+	SourceIncidents       []string                `json:"source_incidents,omitempty" yaml:"source_incidents,omitempty"`
+	Cluster               string                  `json:"cluster,omitempty" yaml:"cluster,omitempty"`
+	Namespace             string                  `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Source                string                  `json:"source" yaml:"source"`
+	Confidence            float64                 `json:"confidence" yaml:"confidence"`
+	Status                string                  `json:"status" yaml:"status"`
+	Version               int                     `json:"version" yaml:"version"`
+	SupportCount          int                     `json:"support_count,omitempty" yaml:"support_count,omitempty"`
+	CreatedAt             time.Time               `json:"created_at,omitempty" yaml:"-"`
+	UpdatedAt             time.Time               `json:"updated_at,omitempty" yaml:"-"`
 }
 
 type HypothesisDraft struct {
@@ -316,8 +554,8 @@ type SafetyFeedback struct {
 type AgentBudget struct {
 	MaxIterations int `json:"max_iterations"`
 	MaxToolUses   int `json:"max_tool_uses"`
-	// MaxTokens is the cumulative generated-token budget for one agent run.
-	// The per-request output cap is supplied separately by the model runtime.
+	// MaxTokens is the generated-output cap for one Agent model response. Input
+	// tokens and cumulative Agent/Incident totals are telemetry only.
 	MaxTokens      int `json:"max_tokens"`
 	MaxCorrections int `json:"max_corrections"`
 }
@@ -478,6 +716,20 @@ type ExecutionContext struct {
 	MutationSpecHash   string    `json:"mutation_spec_hash"`
 	ApprovedAt         time.Time `json:"approved_at"`
 	ExpiresAt          time.Time `json:"expires_at"`
+}
+
+// RecoveryExecution is server-owned audit state for the deterministic action
+// boundary. It records confirmed mutations separately from attempts whose
+// result is unknown, allowing safety checks without exposing backend internals.
+type RecoveryExecution struct {
+	Attempts           int       `json:"attempts"`
+	ConfirmedMutations int       `json:"confirmed_mutations"`
+	Namespace          string    `json:"namespace,omitempty"`
+	Target             string    `json:"target,omitempty"`
+	Action             string    `json:"action,omitempty"`
+	Outcome            string    `json:"outcome"`
+	LastAttemptAt      time.Time `json:"last_attempt_at"`
+	CompletedAt        time.Time `json:"completed_at,omitempty"`
 }
 
 type Verification struct {

@@ -59,7 +59,7 @@ func Evaluate(cases []Case) Metrics {
 		out.ConfidenceCalibration += 1 - abs(p.Confidence-1)
 		covered := 0
 		for _, expected := range item.ExpectedPath {
-			for _, n := range p.CausalGraph.Nodes {
+			for _, n := range p.Nodes {
 				if n.Name == expected {
 					covered++
 					break

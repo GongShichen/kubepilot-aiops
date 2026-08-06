@@ -34,7 +34,7 @@ func TestPostgresLexicalAndCrossServiceTopologyRetrieval(t *testing.T) {
 		t.Fatal(err)
 	}
 	lexicalQuery := domain.IncidentFeatures{Namespace: namespace, Service: "order-service", Resource: "deployment/order-service", Terms: []string{"mysql", "connection", "refused"}, TopologyServices: []string{"order-service", "mysql"}}
-	topologyQuery := domain.IncidentFeatures{Namespace: "different-namespace", Service: "order-service", Resource: "deployment/order-service", Terms: []string{"mysql", "connection", "refused"}, TopologyServices: []string{"order-service", "mysql"}, TopologyGraph: domain.IncidentDependencyGraph{RootService: "order-service", Nodes: []domain.DependencyNode{{ID: "order-service", Role: "root"}, {ID: "mysql", Role: "critical_dependency"}}, Edges: []domain.DependencyEdge{{From: "order-service", To: "mysql", Kind: "observed_call"}}, SuspectedFailureNodes: []string{"mysql"}, ErrorPropagationPaths: [][]string{{"order-service", "mysql"}}}}
+	topologyQuery := domain.IncidentFeatures{Namespace: namespace, Service: "order-service", Resource: "deployment/order-service", Terms: []string{"mysql", "connection", "refused"}, TopologyServices: []string{"order-service", "mysql"}, TopologyGraph: domain.IncidentDependencyGraph{RootService: "order-service", Nodes: []domain.DependencyNode{{ID: "order-service", Role: "root"}, {ID: "mysql", Role: "critical_dependency"}}, Edges: []domain.DependencyEdge{{From: "order-service", To: "mysql", Kind: "observed_call"}}, SuspectedFailureNodes: []string{"mysql"}, ErrorPropagationPaths: [][]string{{"order-service", "mysql"}}}}
 	lexical, err := database.SearchLexicalIncidents(ctx, lexicalQuery, 50)
 	if err != nil || len(lexical) != 1 || lexical[0].IncidentID != incident.ID {
 		t.Fatalf("lexical=%#v err=%v", lexical, err)
@@ -42,6 +42,11 @@ func TestPostgresLexicalAndCrossServiceTopologyRetrieval(t *testing.T) {
 	topology, err := database.SearchTopologyIncidents(ctx, topologyQuery, 50)
 	if err != nil || len(topology) != 1 || topology[0].IncidentID != incident.ID || topology[0].Service == topologyQuery.Service || topology[0].SourceScores["topology"] <= 0 {
 		t.Fatalf("cross-service topology=%#v err=%v", topology, err)
+	}
+	topologyQuery.Namespace = "different-namespace"
+	topology, err = database.SearchTopologyIncidents(ctx, topologyQuery, 50)
+	if err != nil || len(topology) != 0 {
+		t.Fatalf("cross-namespace topology leaked: %#v err=%v", topology, err)
 	}
 	if err = database.DeleteIncidents(ctx, []string{incident.ID}); err != nil {
 		t.Fatalf("delete isolated incident: %v", err)

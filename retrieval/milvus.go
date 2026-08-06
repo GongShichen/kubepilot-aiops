@@ -58,7 +58,7 @@ func (m *MilvusStore) Upsert(ctx context.Context, docs []Document) error {
 		if len(doc.Vector) != m.dim {
 			return fmt.Errorf("document %s vector dimension %d, expected %d", doc.ID, len(doc.Vector), m.dim)
 		}
-		data = append(data, map[string]any{"id": numericID(doc.ID), "external_id": doc.ID, "service": doc.Service, "namespace": doc.Namespace, "category": doc.Category, "template": doc.Template, "root_cause": doc.RootCause, "recovery": doc.Recovery, "level": doc.Level, "occurrence_count": doc.OccurrenceCount, "vector": doc.Vector})
+		data = append(data, map[string]any{"id": numericID(doc.ID), "external_id": doc.ID, "service": doc.Service, "cluster": doc.Cluster, "namespace": doc.Namespace, "category": doc.Category, "template": doc.Template, "root_cause": doc.RootCause, "recovery": doc.Recovery, "level": doc.Level, "occurrence_count": doc.OccurrenceCount, "vector": doc.Vector})
 	}
 	return m.call(ctx, "/v2/vectordb/entities/upsert", map[string]any{"collectionName": m.collection, "data": data}, nil)
 }
@@ -68,12 +68,12 @@ func (m *MilvusStore) Search(ctx context.Context, vector []float32, filters map[
 		return nil, fmt.Errorf("query vector dimension %d, expected %d", len(vector), m.dim)
 	}
 	var clauses []string
-	for _, key := range []string{"service", "namespace", "category"} {
+	for _, key := range []string{"service", "cluster", "namespace", "category"} {
 		if value := filters[key]; value != "" {
 			clauses = append(clauses, fmt.Sprintf(`%s == %q`, key, value))
 		}
 	}
-	body := map[string]any{"collectionName": m.collection, "data": [][]float32{vector}, "limit": limit, "outputFields": []string{"external_id", "service", "namespace", "category", "template", "root_cause", "recovery", "level", "occurrence_count"}}
+	body := map[string]any{"collectionName": m.collection, "data": [][]float32{vector}, "limit": limit, "outputFields": []string{"external_id", "service", "cluster", "namespace", "category", "template", "root_cause", "recovery", "level", "occurrence_count"}}
 	if len(clauses) > 0 {
 		body["filter"] = strings.Join(clauses, " and ")
 	}
@@ -82,6 +82,7 @@ func (m *MilvusStore) Search(ctx context.Context, vector []float32, filters map[
 			Distance        float64 `json:"distance"`
 			ExternalID      string  `json:"external_id"`
 			Service         string  `json:"service"`
+			Cluster         string  `json:"cluster"`
 			Namespace       string  `json:"namespace"`
 			Category        string  `json:"category"`
 			Template        string  `json:"template"`
@@ -96,7 +97,7 @@ func (m *MilvusStore) Search(ctx context.Context, vector []float32, filters map[
 	}
 	out := make([]Document, 0, len(result.Data))
 	for _, item := range result.Data {
-		out = append(out, Document{ID: item.ExternalID, Service: item.Service, Namespace: item.Namespace, Category: item.Category, Template: item.Template, RootCause: item.RootCause, Recovery: item.Recovery, Level: item.Level, OccurrenceCount: item.OccurrenceCount, Score: item.Distance})
+		out = append(out, Document{ID: item.ExternalID, Service: item.Service, Cluster: item.Cluster, Namespace: item.Namespace, Category: item.Category, Template: item.Template, RootCause: item.RootCause, Recovery: item.Recovery, Level: item.Level, OccurrenceCount: item.OccurrenceCount, Score: item.Distance})
 	}
 	return out, nil
 }

@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: KubePilot-AIOps API
+  title: KubePilot Causal-Aware Autonomous SRE Agent API
   version: 0.4.0
 servers: [{url: "http://localhost:8080"}]
 security: [{bearerAuth: []}]
@@ -8,7 +8,7 @@ paths:
   /healthz:
     get: {security: [], responses: {'200': {description: Healthy}}}
   /readyz:
-    get: {security: [], responses: {'200': {description: Ready}}}
+    get: {security: [], responses: {'200': {description: Postgres, Redis, and Agent Registry ready}, '503': {description: A required component is unavailable}}}
   /metrics:
     get: {security: [], responses: {'200': {description: Prometheus metrics}}}
   /api/v1/alerts/alertmanager:
@@ -42,9 +42,14 @@ paths:
       responses: {'200': {description: Hypothesis ledger}, '404': {description: Incident not found}}
   /api/v1/incidents/{id}/agent-runs:
     get:
-      summary: Read constrained ReAct budgets, decision events, and Safety feedback
+      summary: Read strategy identity, parent-child Agent usage, decisions, and Safety feedback
       parameters: [{$ref: '#/components/parameters/IncidentID'}]
-      responses: {'200': {description: Agent run ledger}, '404': {description: Incident not found}}
+      responses: {'200': {description: Agent run ledger, content: {application/json: {schema: {$ref: '#/components/schemas/AgentRunLedger'}}}}, '404': {description: Incident not found}}
+  /api/v1/incidents/{id}/investigation:
+    get:
+      summary: Read the structured plan, worker findings, debate, and deterministic arbitration
+      parameters: [{$ref: '#/components/parameters/IncidentID'}]
+      responses: {'200': {description: Investigation without hidden reasoning, content: {application/json: {schema: {$ref: '#/components/schemas/Investigation'}}}}, '404': {description: Incident not found}}
   /api/v1/incidents/{id}/events:
     get: {parameters: [{$ref: '#/components/parameters/IncidentID'}], responses: {'200': {description: Audit events}}}
   /api/v1/incidents/{id}/stream:
@@ -66,10 +71,12 @@ paths:
     get: {responses: {'200': {description: Redacted reranker configuration status}, '503': {description: Reranker unavailable}}}
   /api/v1/reranker/probe:
     post: {responses: {'200': {description: Reranker probe passed}, '502': {description: Probe failed}, '503': {description: Reranker unavailable}}}
+  /api/v1/runtime/readiness:
+    get: {responses: {'200': {description: Runtime and model components ready}, '503': {description: One or more benchmark prerequisites are unavailable}}}
   /api/v1/knowledge/causal-patterns:
     get:
       summary: List causal patterns
-      parameters: [{name: status, in: query, schema: {type: string, enum: [active, disabled, candidate]}}]
+      parameters: [{name: status, in: query, schema: {type: string, enum: [candidate, validating, active, rejected, disabled]}}]
       responses: {'200': {description: Causal patterns, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/CausalPattern'}}}}}}
   /api/v1/knowledge/causal-patterns/{id}:
     get:
@@ -78,12 +85,34 @@ paths:
   /api/v1/knowledge/causal-patterns/{id}/status:
     post:
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
-      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [status], properties: {status: {type: string, enum: [active, disabled]}}}}}}
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [status], properties: {status: {type: string, enum: [validating, active, rejected, disabled]}}}}}}
       responses: {'200': {description: Updated causal pattern}, '400': {description: Invalid status}}
+  /api/v1/knowledge/causal-patterns/{id}/rollback:
+    post:
+      summary: Restore a recorded causal pattern revision while keeping monotonic audit history
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: X-Operator, in: header, required: true, schema: {type: string}}
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [revision], properties: {revision: {type: integer, minimum: 1}}}}}}
+      responses: {'200': {description: Restored causal pattern}, '400': {description: Invalid revision or missing operator}, '404': {description: Revision not found}}
   /api/v1/benchmarks/runs:
     get: {responses: {'200': {description: Benchmark runs}}}
     post:
-      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [profile], properties: {profile: {type: string, enum: [smoke, standard, robustness, correlation, retrieval, full]}, auto_approve: {type: boolean}}}}}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile]
+              properties:
+                profile: {type: string, enum: [smoke, ci, standard, robustness, correlation, log-retrieval, incident-retrieval, full]}
+                strategies: {type: array, items: {type: string, enum: [direct, rag, react, kubepilot]}, default: [direct, rag, react, kubepilot]}
+                dataset_split: {type: string, enum: [dev, validation, test, all], default: test}
+                seeds: {type: array, minItems: 1, items: {type: integer, format: int64}, default: [20260803, 20260804, 20260805]}
+                repetitions: {type: integer, minimum: 1, default: 1}
+                model_profile: {type: string}
+                auto_approve: {type: boolean}
       responses: {'200': {description: Benchmark run created}}
   /api/v1/benchmarks/runs/{id}:
     get: {parameters: [{name: id, in: path, required: true, schema: {type: string}}], responses: {'200': {description: Benchmark run}}}
@@ -91,6 +120,8 @@ paths:
     get: {parameters: [{name: id, in: path, required: true, schema: {type: string}}], responses: {'200': {description: Benchmark SSE}}}
   /api/v1/benchmarks/runs/{id}/cancel:
     post: {parameters: [{name: id, in: path, required: true, schema: {type: string}}], responses: {'200': {description: Cancellation requested}}}
+  /api/v1/benchmarks/runs/{id}/resume:
+    post: {parameters: [{name: id, in: path, required: true, schema: {type: string}}], responses: {'200': {description: Run resumed from persisted case checkpoints}, '409': {description: Run is not resumable}}}
   /api/v1/benchmarks/runs/{id}/results:
     get: {parameters: [{name: id, in: path, required: true, schema: {type: string}}], responses: {'200': {description: Machine-readable results}}}
   /api/v1/benchmarks/runs/{id}/artifacts:
@@ -107,10 +138,12 @@ components:
       properties:
         severity: {type: string}
         service: {type: string}
+        cluster: {type: string, description: Stable cluster scope used for memory isolation}
         namespace: {type: string}
         resource: {type: string}
         summary: {type: string}
-        diagnosis_method: {type: string, enum: [llm-only, vector-rag, kubepilot], default: kubepilot}
+        diagnosis_method: {type: string, enum: [direct, rag, react, kubepilot, llm-only, vector-rag], default: kubepilot, description: Legacy llm-only and vector-rag values are normalized before persistence}
+        causal_mode: {type: string, enum: [no-causal, static-causal, learned-causal, full], default: full, description: Runtime causal knowledge policy used for controlled ablations and deployments}
         evidence_start_at: {type: string, format: date-time, description: Optional start of the incident observation window}
     Approval:
       type: object
@@ -127,14 +160,28 @@ components:
         status: {type: string, enum: [RECEIVED, CORRELATING, COLLECTING, DIAGNOSING, PROPOSING, AWAITING_APPROVAL, RECOVERING, VERIFYING, RESOLVED, NEEDS_ATTENTION, REJECTED, RECOVERY_FAILED, CANCELLED]}
         severity: {type: string}
         service: {type: string}
+        cluster: {type: string}
         namespace: {type: string}
         resource: {type: string}
         summary: {type: string}
-        diagnosis_method: {type: string, enum: [llm-only, vector-rag, kubepilot]}
+        diagnosis_method: {type: string, enum: [direct, rag, react, kubepilot]}
+        causal_mode: {type: string, enum: [no-causal, static-causal, learned-causal, full]}
         diagnosis_error: {type: string, description: Workflow failure kept separate from an incorrect diagnosis}
+        recovery_execution:
+          type: object
+          description: Server-owned deterministic mutation audit; unknown outcomes are not counted as confirmed mutations
+          properties:
+            attempts: {type: integer}
+            confirmed_mutations: {type: integer}
+            namespace: {type: string}
+            target: {type: string}
+            action: {type: string}
+            outcome: {type: string, enum: [attempting, succeeded, failed, unknown]}
+            last_attempt_at: {type: string, format: date-time}
+            completed_at: {type: string, format: date-time}
         evidence_start_at: {type: string, format: date-time}
         root_cause: {type: string}
-        root_cause_category: {type: string, enum: [cpu, memory, database, network, deployment]}
+        root_cause_category: {type: string, enum: [cpu, memory, database, network, deployment, dependency]}
         root_cause_variant: {type: string, description: Operational failure variant selected by the Diagnosis Agent}
         root_cause_service: {type: string, description: Service selected by the diagnosis agent as the root-cause location}
         root_cause_resource: {type: string, description: Kubernetes workload selected by the diagnosis agent as the root-cause resource}
@@ -142,6 +189,7 @@ components:
         confidence: {type: number}
         reasoning_type: {type: string, enum: [hypothesis_verification]}
         dry_run: {$ref: '#/components/schemas/DryRunResult'}
+        investigation: {$ref: '#/components/schemas/Investigation'}
         created_at: {type: string, format: date-time}
     Evidence:
       type: object
@@ -207,15 +255,143 @@ components:
       required: [id, category, cause, nodes, edges, source, confidence, status, version]
       properties:
         id: {type: string}
-        category: {type: string, enum: [cpu, memory, database, network, deployment]}
+        category: {type: string, enum: [cpu, memory, database, network, deployment, dependency]}
         cause: {type: string}
         nodes: {type: array, items: {type: object}}
         edges: {type: array, items: {type: object}}
+        supporting_evidence: {type: array, items: {type: object}}
+        contradicting_evidence: {type: array, items: {type: object}}
+        source_incidents: {type: array, items: {type: string}}
+        cluster: {type: string}
+        namespace: {type: string}
         source: {type: string}
         confidence: {type: number, minimum: 0, maximum: 1}
-        status: {type: string, enum: [active, disabled, candidate]}
+        status: {type: string, enum: [candidate, validating, active, rejected, disabled]}
         version: {type: integer}
         support_count: {type: integer}
+    Investigation:
+      type: object
+      required: [architecture, plan, started_at]
+      properties:
+        architecture: {type: string, enum: [single-pass, single-pass-episodic, single-react, hierarchical-causal-react]}
+        plan: {$ref: '#/components/schemas/InvestigationPlan'}
+        findings: {type: array, items: {$ref: '#/components/schemas/WorkerFinding'}}
+        debate: {type: array, maxItems: 2, items: {$ref: '#/components/schemas/DebateRound'}}
+        arbitration: {$ref: '#/components/schemas/ArbitrationResult'}
+        memory_reads: {type: array, items: {$ref: '#/components/schemas/MemoryAccessEvent'}}
+        model_usage: {type: array, items: {$ref: '#/components/schemas/ModelUsageEvent'}}
+        started_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time}
+    AgentRunLedger:
+      type: object
+      required: [workflow, strategy, architecture, agents, model_usage]
+      properties:
+        workflow: {type: string}
+        strategy: {type: string, enum: [direct, rag, react, kubepilot]}
+        architecture: {type: string}
+        skill_snapshot_hash: {type: string}
+        ranking_policy_hash: {type: string}
+        reranker_config_hash: {type: string}
+        agents: {type: array, items: {$ref: '#/components/schemas/AgentRunSummary'}}
+        budget: {type: object}
+        model_usage: {type: array, items: {$ref: '#/components/schemas/ModelUsageEvent'}}
+        memory_reads: {type: array, items: {$ref: '#/components/schemas/MemoryAccessEvent'}}
+        decisions: {type: array, items: {$ref: '#/components/schemas/AgentDecisionEvent'}}
+        safety_feedback: {type: array, items: {$ref: '#/components/schemas/SafetyFeedback'}}
+    AgentRunSummary:
+      type: object
+      required: [agent, model_calls, input_tokens, output_tokens, reasoning_tokens, duration_ms, estimated_cost, iterations, tool_uses, tool_complexity_cost, corrections]
+      properties:
+        agent: {type: string}
+        parent_agent: {type: string}
+        model_calls: {type: integer, minimum: 0}
+        input_tokens: {type: integer, minimum: 0}
+        output_tokens: {type: integer, minimum: 0}
+        reasoning_tokens: {type: integer, minimum: 0}
+        duration_ms: {type: number, minimum: 0}
+        estimated_cost: {type: number, minimum: 0}
+        iterations: {type: integer, minimum: 0}
+        tool_uses: {type: integer, minimum: 0}
+        tool_complexity_cost: {type: integer, minimum: 0}
+        corrections: {type: integer, minimum: 0}
+    InvestigationPlan:
+      type: object
+      required: [objective, tasks, stop_conditions, round_limit, created_at]
+      properties:
+        objective: {type: string}
+        tasks: {type: array, maxItems: 4, items: {$ref: '#/components/schemas/WorkerTask'}}
+        stop_conditions: {type: array, items: {type: string}}
+        round_limit: {type: integer, minimum: 1, maximum: 2}
+        created_at: {type: string, format: date-time}
+    WorkerTask:
+      type: object
+      required: [id, source, question, required]
+      properties:
+        id: {type: string}
+        source: {type: string, enum: [metric, log, trace, topology]}
+        question: {type: string}
+        hypothesis_ids: {type: array, items: {type: string}}
+        required: {type: boolean}
+    WorkerFinding:
+      type: object
+      required: [task_id, worker, source, summary, evidence_ids, completed_at]
+      properties:
+        task_id: {type: string}
+        worker: {type: string}
+        source: {type: string, enum: [metric, log, trace, topology]}
+        summary: {type: string}
+        evidence_ids: {type: array, items: {type: string}}
+        supporting_hypothesis_ids: {type: array, items: {type: string}}
+        contradicting_hypothesis_ids: {type: array, items: {type: string}}
+        unknowns: {type: array, items: {type: string}}
+        completed_at: {type: string, format: date-time}
+    DebateRound:
+      type: object
+      required: [round, primary, alternative, occurred_at]
+      properties:
+        round: {type: integer, minimum: 1, maximum: 2}
+        primary: {type: object, description: Structured hypothesis argument; hidden reasoning is not retained}
+        alternative: {type: object, description: First-round blind alternative hypothesis argument}
+        critiques: {type: array, items: {type: object}}
+        occurred_at: {type: string, format: date-time}
+    ArbitrationResult:
+      type: object
+      required: [selected_score, score_margin, accepted, needs_more_evidence, reason]
+      properties:
+        selected_hypothesis_id: {type: string}
+        ranked_hypothesis_ids: {type: array, items: {type: string}}
+        selected_score: {type: number, minimum: 0, maximum: 1}
+        score_margin: {type: number}
+        accepted: {type: boolean}
+        needs_more_evidence: {type: boolean}
+        reason: {type: string}
+    MemoryAccessEvent:
+      type: object
+      required: [incident_id, agent, kind, scope, query_hash, created_at]
+      properties:
+        incident_id: {type: string}
+        agent: {type: string}
+        kind: {type: string, enum: [working, episodic, semantic, procedural]}
+        scope: {type: object, properties: {cluster: {type: string}, namespace: {type: string}}}
+        query_hash: {type: string}
+        result_ids: {type: array, items: {type: string}}
+        results: {type: array, items: {type: object, required: [id, score], properties: {id: {type: string}, score: {type: number}, version: {type: string}}}}
+        policy_version: {type: string}
+        created_at: {type: string, format: date-time}
+    ModelUsageEvent:
+      type: object
+      required: [incident_id, agent, input_tokens, output_tokens, duration_ms, estimated_cost, created_at]
+      properties:
+        incident_id: {type: string}
+        agent: {type: string}
+        parent_agent: {type: string}
+        phase: {type: string, enum: [diagnosis, recovery]}
+        input_tokens: {type: integer}
+        output_tokens: {type: integer}
+        reasoning_tokens: {type: integer}
+        duration_ms: {type: number}
+        estimated_cost: {type: number}
+        created_at: {type: string, format: date-time}
     DryRunResult:
       type: object
       required: [success, action, target, mutation_spec_hash, validated_at]

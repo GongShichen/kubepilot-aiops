@@ -13,6 +13,7 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - {name: SERVICE_NAME, value: gateway-service}
+            - {name: K8S_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
             - {name: BENCHMARK_CONTROL_TOKEN, valueFrom: {secretKeyRef: {name: demo-secrets, key: benchmark-control-token}}}
             - {name: ORDER_URL, value: "http://order-service:8080/orders"}
             - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "host.minikube.internal:4317"}
@@ -41,6 +42,7 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - {name: SERVICE_NAME, value: order-service}
+            - {name: K8S_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
             - {name: BENCHMARK_CONTROL_TOKEN, valueFrom: {secretKeyRef: {name: demo-secrets, key: benchmark-control-token}}}
             - {name: PAYMENT_URL, value: "http://payment-service:8080/pay"}
             - {name: REDIS_ADDR, value: "redis:6379"}
@@ -70,6 +72,7 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - {name: SERVICE_NAME, value: payment-service}
+            - {name: K8S_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
             - {name: BENCHMARK_CONTROL_TOKEN, valueFrom: {secretKeyRef: {name: demo-secrets, key: benchmark-control-token}}}
             - {name: DB_ADDR, value: "mysql:3306"}
             - {name: DB_NAME, value: kubepilot}

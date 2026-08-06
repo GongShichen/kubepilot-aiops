@@ -34,3 +34,16 @@ func TestObserveAgentProjectsRuntimeState(t *testing.T) {
 		t.Fatalf("unexpected reasoning observation: %+v", got)
 	}
 }
+
+func TestObserveAgentCountsHierarchicalWorkerFindings(t *testing.T) {
+	incident := &domain.Incident{
+		RootCause: "payment memory leak",
+		Investigation: &domain.Investigation{
+			Findings: []domain.WorkerFinding{{Worker: "metric"}, {Worker: "log"}, {Worker: "trace"}},
+		},
+	}
+	got := ObserveAgent(incident)
+	if got.EvidenceQueries != 3 || got.EvidenceEfficiency != 1.0/3.0 {
+		t.Fatalf("hierarchical evidence work was not observed: %+v", got)
+	}
+}

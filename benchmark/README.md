@@ -1,37 +1,71 @@
 # KubePilot Autonomous SRE Benchmark
 
-`benchmark/` owns only datasets, suite execution, evaluator-side scoring,
-manifests, and report generation. Agent orchestration, budgets, telemetry,
-retrieval ranking, reasoning, safety, and knowledge evolution are implemented
-once in production packages. Benchmarks invoke those public production
-boundaries and never maintain benchmark-only variants.
+`benchmark/` contains only datasets, typed fault injectors, execution adapters, evaluator-only scoring, reproducibility manifests, statistics, and report writers. It calls public production boundaries. Agent orchestration, retrieval, reasoning, memory, causal learning, telemetry, and safety are implemented once outside this directory.
 
-The benchmark is split by capability. The 500,000-record dataset belongs only
-to `log_retrieval` and measures Loki/Drain3/template retrieval. Historical
-incident ranking uses structured incident records under
-`datasets/incidents/`; its topology and causal signals are reranking features,
-not log-template labels. Its runner calls the production
-`retrieval.IncidentRetrievalEngine` against isolated PostgreSQL and Milvus
-records. Log-template evaluation calls the production
-`retrieval.RankLogTemplates` capability. Diagnosis and Recovery use the public
-Incident API, while Agent Behavior and Knowledge Evolution consume
-evaluator-only observations.
+## Diagnosis comparison
 
-## Suites
+The formal comparison uses four production strategies:
 
-- `log_retrieval`: Loki/Drain3/template Recall@K, MRR, NDCG and latency.
-- `incident_retrieval`: semantic, semantic+lexical, topology rerank, causal
-  rerank and full neural ablation metrics.
-- `diagnosis`: public Agent lifecycle, RCA, evidence attribution, hypotheses,
-  causal path coverage and tool efficiency.
-- `recovery`: proposal, dry-run, approval, execution and verification safety.
-- `agent_behavior`: constrained ReAct iteration/tool/correction/budget
-  observations emitted by the production runtime.
-- `evolution`: resolved-incident topology and causal knowledge evolution.
+| Strategy | Required execution footprint |
+|---|---|
+| `direct` | `single-pass`; no Planner, Worker, debate, or Memory events. |
+| `rag` | `single-pass-episodic`; exactly one Episodic Memory read and no live tool loop. |
+| `react` | `single-react`; one Diagnosis ReAct agent with live evidence tools and no hierarchy or long-term memory. |
+| `kubepilot` | `hierarchical-causal-react`; Plan, Worker findings, debate, arbitration, and Episodic/Semantic/Procedural reads. |
 
-`manifests/autonomous.yaml` is the reproducibility contract. Expected root causes,
-related incidents and evolution labels are evaluator-only and are never
-returned by `AgentContext`.
+The comparison fails if these footprints collapse into the same trace. All methods share one model profile, temperature, request cap, diagnosis budget, fault/load seeds, recovery controller, approval policy, mutation executor, and verifier.
 
-Legacy compatibility runners and duplicate ranking implementations have been
-removed. Log retrieval never evaluates topology or causal reasoning.
+Formal runs use four explicitly allowlisted worker namespaces. Cases are assigned by a stable hash of case ID, seed, and repetition. Each worker stays serial inside its namespace while workers run concurrently, and a global gate bounds complete diagnosis/recovery workflows. Metrics, logs, traces, and seeded episodic memory remain namespace scoped. The manifest records the worker pool, gate limit, and shard policy.
+
+`BENCHMARK_WORKERS` and `BENCHMARK_MODEL_CONCURRENCY` can lower concurrency. Worker names come from the fixed `BENCHMARK_WORKER_NAMESPACES` pool; arbitrary names are rejected, and the provisioner refuses to adopt an existing namespace without the benchmark-worker label.
+
+## Dataset
+
+`incidents.yaml` expands to 120 typed scenarios across CPU, Memory, Database, Network, Deployment, and Dependency faults, with 20 scenarios per family. Each family is split into four Dev, four Validation, and twelve Test scenarios. The standard formal run evaluates 72 Test scenarios with three paired seeds, producing 216 cases per strategy.
+
+Ground truth remains runner-side. Incident API requests contain observations only and never contain a case ID, scenario ID, injector name, expected evidence, expected action, root cause, or allowed answer. Audit tests enforce the production/benchmark dependency boundary.
+
+## Statistics and validity
+
+- Diagnosis and recovery: paired McNemar test.
+- Cost and latency: paired Wilcoxon signed-rank test.
+- Core metrics: category-stratified 95% bootstrap confidence intervals.
+- Multiple baselines: Holm correction.
+- Reports: absolute difference, relative change, effect size, per-family breakdown, and failure list.
+
+Infrastructure failures are excluded from model metrics and listed separately. A rate above 2% invalidates the run. A superiority claim requires the paired KubePilot-minus-best-baseline confidence interval to exclude zero.
+
+## Artifacts
+
+One comparison has one parent Run ID. Strategy, case, seed, and repetition form the case identity. The root contains:
+
+- `manifest.json`: parent reproducibility and randomized strategy order;
+- `diagnosis-comparison.json`: systems, confidence intervals, and pairwise tests;
+- `diagnosis-systems.csv` and `diagnosis-comparison.csv`;
+- `report.md`;
+- `failures.json`;
+- one subdirectory per strategy with manifest, checkpoint, cases, summary, and detailed CSV artifacts.
+
+Reports consume explicit paths or the parent run's persisted result path. They never scan modification times for a newest result.
+
+## Other suites
+
+- `log_retrieval`: isolated Loki/Drain3/template Recall@K, MRR, NDCG, and latency.
+- `incident_retrieval`: semantic, lexical, topology, causal, and optional neural ranking ablations against isolated PostgreSQL/Milvus records.
+- `correlation`: public webhook alert grouping.
+- `recovery`: proposal, dry-run, approval, execution, verification, and safety invariants.
+- `agent_behavior`: persisted production Agent observations.
+- `causaldiscovery`: causal pattern-mining precision, recall, F1, false discovery rate, path edit distance, and calibration over positive, negative, counterexample, and out-of-distribution cases.
+- `causal_ablation`: paired live `no-causal`, `static-causal`, `learned-causal`, and `full` runs measuring strict RCA, recovery success, and evidence efficiency with confidence intervals and corrected significance tests.
+- `evolution`: verified-incident topology and causal knowledge evolution.
+
+## Commands
+
+```bash
+make benchmark-validate
+make benchmark-standard
+make benchmark-causal-ablation-report
+make benchmark-full
+```
+
+`benchmark/manifests/default.yaml` is the sole checked-in reproducibility contract. Generated reports remain under `artifacts/` and are not source files.

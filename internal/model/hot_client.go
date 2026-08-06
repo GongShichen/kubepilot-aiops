@@ -45,6 +45,7 @@ type HotClient struct {
 	lastError       string
 	reloading       bool
 	pinnedByHash    map[string]pinnedClient
+	modelPermits    chan struct{}
 }
 
 func NewHotClient(fallback config.ChatConfig, path string, pollEvery, retryEvery time.Duration) *HotClient {
@@ -54,7 +55,11 @@ func NewHotClient(fallback config.ChatConfig, path string, pollEvery, retryEvery
 	if retryEvery <= 0 {
 		retryEvery = 30 * time.Second
 	}
-	return &HotClient{path: path, fallback: fallback, desired: fallback, pollEvery: pollEvery, retryEvery: retryEvery, pinnedByHash: map[string]pinnedClient{}}
+	concurrency := fallback.Concurrency
+	if concurrency <= 0 {
+		concurrency = 4
+	}
+	return &HotClient{path: path, fallback: fallback, desired: fallback, pollEvery: pollEvery, retryEvery: retryEvery, pinnedByHash: map[string]pinnedClient{}, modelPermits: make(chan struct{}, concurrency)}
 }
 
 func (c *HotClient) Run(ctx context.Context) {
@@ -86,6 +91,11 @@ func (c *HotClient) refreshAndLog(ctx context.Context, force bool) {
 }
 
 func (c *HotClient) Complete(ctx context.Context, messages []Message, tools []Tool) (Response, error) {
+	release, err := c.acquireModel(ctx)
+	if err != nil {
+		return Response{}, err
+	}
+	defer release()
 	if snapshot, ok := ctx.Value(clientSnapshotKey{}).(pinnedClient); ok {
 		if snapshot.client == nil {
 			return Response{}, errors.New("model is not ready")
@@ -104,6 +114,11 @@ func (c *HotClient) Complete(ctx context.Context, messages []Message, tools []To
 // Generate implements Eino's BaseChatModel and delegates to the immutable
 // model snapshot pinned to the Incident workflow context.
 func (c *HotClient) Generate(ctx context.Context, messages []*schema.Message, opts ...einomodel.Option) (*schema.Message, error) {
+	release, err := c.acquireModel(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	m := c.einoModel(ctx)
 	if m == nil {
 		return nil, errors.New("model is not ready")
@@ -113,11 +128,39 @@ func (c *HotClient) Generate(ctx context.Context, messages []*schema.Message, op
 
 // Stream implements Eino's streaming model interface.
 func (c *HotClient) Stream(ctx context.Context, messages []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
+	release, err := c.acquireModel(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m := c.einoModel(ctx)
 	if m == nil {
+		release()
 		return nil, errors.New("model is not ready")
 	}
-	return m.Stream(ctx, messages, opts...)
+	reader, err := m.Stream(ctx, messages, opts...)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	return schema.StreamReaderWithConvert(reader, func(message *schema.Message) (*schema.Message, error) {
+		return message, nil
+	}, schema.WithErrWrapper(func(streamErr error) error {
+		release()
+		return streamErr
+	}), schema.WithOnEOF(func() (any, error) {
+		release()
+		return nil, io.EOF
+	})), nil
+}
+
+func (c *HotClient) acquireModel(ctx context.Context) (func(), error) {
+	select {
+	case c.modelPermits <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-c.modelPermits }) }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (c *HotClient) einoModel(ctx context.Context) einomodel.BaseChatModel {

@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -229,7 +230,7 @@ func startFaultWorkers(mode string) context.CancelFunc {
 		}()
 	}
 	switch mode {
-	case "memory_leak", "unbounded_cache":
+	case "memory_leak", "unbounded_cache", "payment_memory_propagation":
 		allocation := 2 << 20
 		if mode == "unbounded_cache" {
 			allocation = 4 << 20
@@ -267,6 +268,8 @@ func startFaultWorkers(mode string) context.CancelFunc {
 			leak = append(leak, allocationBlock)
 			leakMu.Unlock()
 		}()
+	case "pool_exhausted":
+		go holdMySQLConnections(ctx)
 	}
 	return cancel
 }
@@ -287,6 +290,7 @@ func validFaultMode(mode string) bool {
 	case "busy_loop", "cpu_limit_low", "traffic_overload", "worker_fanout",
 		"memory_leak", "memory_burst", "unbounded_cache", "memory_limit_low",
 		"pool_exhausted", "mysql_unavailable", "invalid_credentials", "lock_wait",
+		"redis_unavailable", "redis_wrong_endpoint", "payment_memory_propagation", "payment_unavailable",
 		"network_policy_deny", "selector_mismatch", "wrong_port", "downstream_timeout",
 		"bad_image", "faulty_v2", "probe_failure", "invalid_config", "revision_regression":
 		return true
@@ -298,13 +302,38 @@ func applyFault(mode string) bool {
 	switch mode {
 	case "busy_loop", "worker_fanout", "memory_leak", "unbounded_cache", "memory_burst":
 		return false
-	case "traffic_overload", "faulty_v2", "invalid_config", "revision_regression", "pool_exhausted":
+	case "traffic_overload", "faulty_v2", "invalid_config", "revision_regression":
 		return true
 	case "lock_wait", "downstream_timeout":
 		time.Sleep(4 * time.Second)
 		return true
 	}
 	return false
+}
+
+func holdMySQLConnections(ctx context.Context) {
+	db, err := sql.Open("mysql", mysqlDSN())
+	if err != nil {
+		logJSON(map[string]any{"time": time.Now().UTC(), "level": "ERROR", "error": "connection saturation setup failed: " + err.Error()})
+		return
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(256)
+	connections := make([]*sql.Conn, 0, 192)
+	for len(connections) < cap(connections) {
+		connectCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		connection, connectionErr := db.Conn(connectCtx)
+		cancel()
+		if connectionErr != nil {
+			break
+		}
+		connections = append(connections, connection)
+	}
+	logJSON(map[string]any{"time": time.Now().UTC(), "level": "ERROR", "error": "MySQL connection capacity saturated", "held_connections": len(connections)})
+	<-ctx.Done()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
 }
 func instrument(service string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -338,8 +367,7 @@ func call(ctx context.Context, url string) (int, string) {
 	return resp.StatusCode, resp.Status
 }
 func mysqlPing(ctx context.Context) error {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s", env("DB_USER", "kubepilot"), env("DB_PASSWORD", "kubepilot"), env("DB_ADDR", "mysql:3306"), env("DB_NAME", "kubepilot"))
-	db, err := sql.Open("mysql", dsn)
+	db, err := sql.Open("mysql", mysqlDSN())
 	if err != nil {
 		return err
 	}
@@ -348,6 +376,10 @@ func mysqlPing(ctx context.Context) error {
 	ping, done := context.WithTimeout(ctx, 2*time.Second)
 	defer done()
 	return db.PingContext(ping)
+}
+
+func mysqlDSN() string {
+	return fmt.Sprintf("%s:%s@tcp(%s)/%s", env("DB_USER", "kubepilot"), env("DB_PASSWORD", "kubepilot"), env("DB_ADDR", "mysql:3306"), env("DB_NAME", "kubepilot"))
 }
 func redisPing(ctx context.Context, addr string) error {
 	d := net.Dialer{Timeout: 2 * time.Second}
@@ -400,7 +432,11 @@ func initTrace(ctx context.Context, service string) func(context.Context) error 
 		slog.Warn("trace exporter disabled", "error", err)
 		return func(context.Context) error { return nil }
 	}
-	res, _ := resource.Merge(resource.Default(), resource.NewSchemaless(semconv.ServiceName(service)))
+	attributes := []attribute.KeyValue{semconv.ServiceName(service)}
+	if namespace := strings.TrimSpace(os.Getenv("K8S_NAMESPACE")); namespace != "" {
+		attributes = append(attributes, attribute.String("k8s.namespace.name", namespace))
+	}
+	res, _ := resource.Merge(resource.Default(), resource.NewSchemaless(attributes...))
 	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp), sdktrace.WithResource(res))
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})

@@ -68,15 +68,21 @@ func BuildIncidentCausalGraph(in *domain.Incident) (IncidentCausalGraph, error) 
 	}
 	pathConfidence = clamp(pathConfidence)
 	for i, name := range path {
-		typ := NodeSymptom
+		typ := NodeMechanism
 		if i == 0 {
 			typ = NodeCause
+		} else if i == len(path)-1 {
+			typ = NodeSymptom
 		}
 		id := fmt.Sprintf("path:%d:%s", i, name)
 		pathIDs = append(pathIDs, id)
 		out.Nodes = append(out.Nodes, CausalNode{ID: id, Type: typ, Name: name, Confidence: pathConfidence})
 		if i > 0 {
-			out.Edges = append(out.Edges, CausalEdge{Source: pathIDs[i-1], Target: id, Relation: "causes", Confidence: pathConfidence})
+			relation := "causes"
+			if i == len(path)-1 {
+				relation = "manifests_as"
+			}
+			out.Edges = append(out.Edges, CausalEdge{From: pathIDs[i-1], To: id, Relation: relation, Confidence: pathConfidence})
 		}
 	}
 
@@ -94,18 +100,18 @@ func BuildIncidentCausalGraph(in *domain.Incident) (IncidentCausalGraph, error) 
 		if quality <= 0 {
 			quality = .5
 		}
-		out.Nodes = append(out.Nodes, CausalNode{ID: id, Type: typ, Name: evidenceName(evidence), Confidence: clamp(quality), SourceEvidenceIDs: []string{evidence.ID}})
+		out.Nodes = append(out.Nodes, CausalNode{ID: id, Type: typ, Name: evidenceName(evidence), Source: evidence.Source, Confidence: clamp(quality), SourceEvidenceIDs: []string{evidence.ID}})
 		target := pathIDs[0]
 		if len(pathIDs) > 1 && evidence.Type != "" && (evidence.Type == "symptom" || evidence.Type == "business") {
 			target = pathIDs[len(pathIDs)-1]
 		}
-		out.Edges = append(out.Edges, CausalEdge{Source: id, Target: target, Relation: "supports", Confidence: clamp(quality)})
+		out.Edges = append(out.Edges, CausalEdge{From: id, To: target, Relation: "supports", Confidence: clamp(quality)})
 	}
 
 	if in.Proposal != nil && strings.TrimSpace(string(in.Proposal.Action)) != "" {
 		id := "action:" + strings.ToLower(strings.TrimSpace(string(in.Proposal.Action)))
 		out.Nodes = append(out.Nodes, CausalNode{ID: id, Type: NodeAction, Name: strings.ToLower(strings.TrimSpace(string(in.Proposal.Action))), Confidence: clamp(in.Proposal.Confidence)})
-		out.Edges = append(out.Edges, CausalEdge{Source: pathIDs[len(pathIDs)-1], Target: id, Relation: "precedes", Confidence: clamp(in.Proposal.Confidence)})
+		out.Edges = append(out.Edges, CausalEdge{From: id, To: pathIDs[0], Relation: "mitigates", Confidence: clamp(in.Proposal.Confidence)})
 	}
 	resultID := "recovery:" + boolName(in.Verification.Success)
 	out.Nodes = append(out.Nodes, CausalNode{ID: resultID, Type: NodeRecoveryResult, Name: boolName(in.Verification.Success), Confidence: 1})
@@ -113,7 +119,11 @@ func BuildIncidentCausalGraph(in *domain.Incident) (IncidentCausalGraph, error) 
 	if in.Proposal != nil && strings.TrimSpace(string(in.Proposal.Action)) != "" {
 		resultSource = "action:" + strings.ToLower(strings.TrimSpace(string(in.Proposal.Action)))
 	}
-	out.Edges = append(out.Edges, CausalEdge{Source: resultSource, Target: resultID, Relation: "supports", Confidence: 1})
+	relation := "supports"
+	if in.Proposal != nil && strings.TrimSpace(string(in.Proposal.Action)) != "" {
+		relation = "verifies"
+	}
+	out.Edges = append(out.Edges, CausalEdge{From: resultSource, To: resultID, Relation: relation, Confidence: 1})
 	// Topology is supporting context rather than a causal assertion. Preserve
 	// it as correlates edges so the miner cannot mistake a dependency edge for
 	// a discovered cause.
@@ -125,12 +135,12 @@ func BuildIncidentCausalGraph(in *domain.Incident) (IncidentCausalGraph, error) 
 				continue
 			}
 			id := "topology:" + name
-			out.Nodes = append(out.Nodes, CausalNode{ID: id, Type: NodeSymptom, Name: name, Confidence: .5})
+			out.Nodes = append(out.Nodes, CausalNode{ID: id, Type: NodeObservation, Name: name, Confidence: .5})
 		}
 		for _, edge := range observed.Edges {
 			from := "topology:" + normalizeName(edge.From)
 			to := "topology:" + normalizeName(edge.To)
-			out.Edges = append(out.Edges, CausalEdge{Source: from, Target: to, Relation: "correlates", Confidence: .5})
+			out.Edges = append(out.Edges, CausalEdge{From: from, To: to, Relation: "correlates", Confidence: .5})
 		}
 	}
 	if len(outEvidence(out)) == 0 {
@@ -160,22 +170,7 @@ func latestConfidence(h domain.VerifiedHypothesis) float64 {
 }
 
 func evidenceNodeType(e domain.Evidence) NodeType {
-	typ := strings.ToLower(strings.TrimSpace(e.Type))
-	if typ == "" {
-		typ = strings.ToLower(strings.TrimSpace(e.Kind))
-	}
-	switch {
-	case e.Source == "prometheus", typ == "metric", typ == "metrics":
-		return NodeMetric
-	case e.Source == "loki", typ == "log", typ == "log_pattern", typ == "error_log":
-		return NodeLogPattern
-	case e.Source == "jaeger", typ == "trace", typ == "trace_pattern", typ == "span":
-		return NodeTracePattern
-	case e.Source == "kubernetes", typ == "kubernetes_event", typ == "event":
-		return NodeKubernetesEvent
-	default:
-		return NodeSymptom
-	}
+	return NodeObservation
 }
 
 func evidenceNodeID(e domain.Evidence) string {
@@ -207,8 +202,8 @@ func normalizePath(path []string) []string {
 func normalizeGraph(graph IncidentCausalGraph) IncidentCausalGraph {
 	sort.SliceStable(graph.Nodes, func(i, j int) bool { return graph.Nodes[i].ID < graph.Nodes[j].ID })
 	sort.SliceStable(graph.Edges, func(i, j int) bool {
-		left := graph.Edges[i].Source + ":" + graph.Edges[i].Target + ":" + graph.Edges[i].Relation
-		right := graph.Edges[j].Source + ":" + graph.Edges[j].Target + ":" + graph.Edges[j].Relation
+		left := graph.Edges[i].From + ":" + graph.Edges[i].To + ":" + graph.Edges[i].Relation
+		right := graph.Edges[j].From + ":" + graph.Edges[j].To + ":" + graph.Edges[j].Relation
 		return left < right
 	})
 	return graph
@@ -217,8 +212,7 @@ func normalizeGraph(graph IncidentCausalGraph) IncidentCausalGraph {
 func outEvidence(graph IncidentCausalGraph) []CausalNode {
 	out := []CausalNode{}
 	for _, node := range graph.Nodes {
-		switch node.Type {
-		case NodeMetric, NodeLogPattern, NodeTracePattern, NodeKubernetesEvent:
+		if node.Type == NodeObservation && len(node.SourceEvidenceIDs) > 0 {
 			out = append(out, node)
 		}
 	}

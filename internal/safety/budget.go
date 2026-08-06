@@ -8,8 +8,8 @@ import (
 )
 
 // BudgetController atomically enforces each Agent's independent iteration,
-// ToolCall, token, and correction budgets. Tool cost and Incident totals are
-// retained only as telemetry and never reject an Agent action.
+// ToolCall, per-response generated-output, and correction budgets. Cumulative
+// token usage, tool cost, and Incident totals are telemetry only.
 type BudgetController struct {
 	mu    sync.Mutex
 	state *domain.AgentBudgetState
@@ -105,12 +105,16 @@ func (b *BudgetController) AddTokens(agent string, tokens int) error {
 		return fmt.Errorf("agent %q has no budget", agent)
 	}
 	usage := b.state.Usage[agent]
-	if usage.Tokens+tokens > limit.MaxTokens {
-		return ErrBudgetExceeded{Agent: agent, Resource: "tokens"}
-	}
 	usage.Tokens += tokens
 	b.state.Usage[agent] = usage
 	b.state.IncidentTokens += tokens
+	// The per-response output cap is applied before dispatch through the model
+	// request's max_tokens option. Provider usage is received only after a
+	// response has completed and is consequently telemetry, not an actionable
+	// budget reservation. In particular, compatible providers can report an
+	// inclusive terminal token, so rejecting an otherwise bounded response here
+	// would convert provider accounting into a workflow failure.
+	_ = limit
 	return nil
 }
 

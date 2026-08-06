@@ -245,27 +245,15 @@ func runAutonomousReport(args []string) {
 	agent := fs.String("agent", "", "agent behavior report")
 	recovery := fs.String("recovery", "", "recovery report")
 	knowledge := fs.String("knowledge", "", "knowledge report")
+	ablation := fs.String("ablation", "", "causal ablation report")
 	logRetrieval := fs.String("log-retrieval", "", "log retrieval report")
 	incidentRetrieval := fs.String("incident-retrieval", "", "incident retrieval report")
 	output := fs.String("output", "", "report path; defaults to a timestamped autonomous directory")
 	_ = fs.Parse(args)
-	if *diagnosis == "" {
-		fatal(fmt.Errorf("--diagnosis is required"))
-	}
-	if *agent == "" {
-		*agent = latestArtifactFile("artifacts/benchmark", "agent", "agent_behavior_report.json")
-	}
-	if *recovery == "" {
-		*recovery = latestArtifactFile("artifacts/benchmark", "recovery", "recovery_report.json")
-	}
-	if *knowledge == "" {
-		*knowledge = latestArtifactFile("artifacts/benchmark", "knowledge-evolution", "summary.json")
-	}
-	if *logRetrieval == "" {
-		*logRetrieval = latestArtifactFile("artifacts/benchmark", "log-retrieval", "log_retrieval_report.json")
-	}
-	if *incidentRetrieval == "" {
-		*incidentRetrieval = latestArtifactFile("artifacts/benchmark", "incident-retrieval", "incident_retrieval_report.json")
+	for name, path := range map[string]string{"diagnosis": *diagnosis, "agent": *agent, "recovery": *recovery, "knowledge": *knowledge, "ablation": *ablation, "log-retrieval": *logRetrieval, "incident-retrieval": *incidentRetrieval} {
+		if strings.TrimSpace(path) == "" {
+			fatal(fmt.Errorf("--%s is required; reports never guess the newest artifact", name))
+		}
 	}
 	if *output == "" {
 		*output = filepath.Join(artifactlayout.RunDirectory("artifacts/benchmark", "autonomous", "report", time.Now().UTC()), "autonomous_sre_report.json")
@@ -299,6 +287,7 @@ func runAutonomousReport(args []string) {
 			"agent_behavior":      load(*agent),
 			"recovery":            load(*recovery),
 			"knowledge_evolution": load(*knowledge),
+			"causal_ablation":     load(*ablation),
 		},
 		Cases:       cases,
 		Limitations: []string{"This report composes the full live diagnosis/recovery run and the independent retrieval and knowledge-evolution suites; evaluator-only labels remain outside Agent context."},
@@ -333,10 +322,25 @@ func writeSuiteManifest(path string, payload map[string]any) error {
 
 func runSuiteReport(args []string) {
 	fs := flag.NewFlagSet("suite-report", flag.ExitOnError)
-	manifestPath := fs.String("manifest", "benchmark/manifests/autonomous.yaml", "benchmark manifest")
+	manifestPath := fs.String("manifest", "benchmark/manifests/default.yaml", "benchmark manifest")
 	root := fs.String("root", "artifacts/benchmark", "benchmark artifact root")
+	diagnosis := fs.String("diagnosis", "", "exact diagnosis summary or comparison artifact")
+	recovery := fs.String("recovery", "", "exact recovery report")
+	agent := fs.String("agent", "", "exact agent behavior report")
+	knowledge := fs.String("knowledge", "", "exact knowledge report")
+	ablation := fs.String("ablation", "", "exact causal ablation report")
+	correlation := fs.String("correlation", "", "exact correlation report")
+	autonomous := fs.String("autonomous", "", "exact autonomous report")
+	logRetrieval := fs.String("log-retrieval", "", "exact log retrieval report")
+	incidentRetrieval := fs.String("incident-retrieval", "", "exact incident retrieval report")
 	output := fs.String("output", "", "final report directory; defaults to a timestamped autonomous report directory")
 	_ = fs.Parse(args)
+	paths := map[string]string{"diagnosis": *diagnosis, "recovery": *recovery, "agent": *agent, "knowledge": *knowledge, "ablation": *ablation, "correlation": *correlation, "autonomous": *autonomous, "log-retrieval": *logRetrieval, "incident-retrieval": *incidentRetrieval}
+	for name, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			fatal(fmt.Errorf("--%s is required; suite reports must reference one comparison run explicitly", name))
+		}
+	}
 	if *output == "" {
 		*output = artifactlayout.RunDirectory(*root, "autonomous", "report", time.Now().UTC())
 	}
@@ -350,75 +354,17 @@ func runSuiteReport(args []string) {
 		return value
 	}
 	report := benchmarkreports.SuiteReport{Manifest: manifest, GeneratedAt: time.Now().UTC(),
-		LogRetrieval:       load(latestArtifactFile(*root, "log-retrieval", "log_retrieval_report.json")),
-		IncidentRetrieval:  load(latestArtifactFile(*root, "incident-retrieval", "incident_retrieval_report.json")),
-		Diagnosis:          load(latestSummary(*root)),
-		Recovery:           load(latestArtifactFile(*root, "recovery", "recovery_report.json")),
-		AgentBehavior:      load(latestArtifactFile(*root, "agent", "agent_behavior_report.json")),
-		KnowledgeEvolution: load(latestArtifactFile(*root, "knowledge-evolution", "summary.json")),
-		Correlation:        load(latestArtifactFile(*root, "correlation", "correlation-summary.json")),
-		Autonomous:         load(latestArtifactFile(*root, "autonomous", "autonomous_sre_report.json")),
+		LogRetrieval:       load(*logRetrieval),
+		IncidentRetrieval:  load(*incidentRetrieval),
+		Diagnosis:          load(*diagnosis),
+		Recovery:           load(*recovery),
+		AgentBehavior:      load(*agent),
+		KnowledgeEvolution: load(*knowledge),
+		Ablation:           load(*ablation),
+		Correlation:        load(*correlation),
+		Autonomous:         load(*autonomous),
 		Limitations:        []string{"Recovery and Agent Behavior are measured in the public standard run envelope."},
 	}
 	fatal(benchmarkreports.WriteSuite(*output, report))
 	fmt.Printf("suite=report output=%s\n", *output)
-}
-
-func latestSummary(root string) string {
-	var newest string
-	var newestTime time.Time
-	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() || filepath.Base(path) != "summary.json" {
-			return nil
-		}
-		var value map[string]any
-		if err := readJSON(path, &value); err != nil {
-			return nil
-		}
-		// Diagnosis summaries have a persisted total and RCA metric. Other
-		// suites also use summary.json but must never be mislabelled as diagnosis.
-		if _, ok := value["total"]; !ok {
-			return nil
-		}
-		if _, ok := value["root_cause_accuracy"]; !ok {
-			return nil
-		}
-		info, err := entry.Info()
-		if err == nil && (newest == "" || info.ModTime().After(newestTime)) {
-			newest, newestTime = path, info.ModTime()
-		}
-		return nil
-	})
-	return newest
-}
-
-func latestArtifactFile(root, suite, filename string) string {
-	var newest string
-	var newestTime time.Time
-	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() || filepath.Base(path) != filename {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return nil
-		}
-		parts := strings.Split(filepath.ToSlash(rel), "/")
-		foundSuite := false
-		for _, part := range parts[:len(parts)-1] {
-			if part == suite {
-				foundSuite = true
-				break
-			}
-		}
-		if !foundSuite {
-			return nil
-		}
-		info, err := entry.Info()
-		if err == nil && (newest == "" || info.ModTime().After(newestTime)) {
-			newest, newestTime = path, info.ModTime()
-		}
-		return nil
-	})
-	return newest
 }

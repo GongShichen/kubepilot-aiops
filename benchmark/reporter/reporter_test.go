@@ -26,8 +26,8 @@ func TestCategoryMacroF1(t *testing.T) {
 		{Category: "memory", RootCauseCategory: "cpu"},
 	}
 	got := categoryMacroF1(items)
-	// CPU F1 is 2/3 and the other four categories score zero.
-	if math.Abs(got-(2.0/3.0)/5.0) > .0001 {
+	// CPU F1 is 2/3 and the other five categories score zero.
+	if math.Abs(got-(2.0/3.0)/6.0) > .0001 {
 		t.Fatalf("macro F1=%f", got)
 	}
 }
@@ -39,7 +39,7 @@ func TestCategoryMetrics(t *testing.T) {
 		{Category: "memory", RootCauseCategory: "cpu"},
 	}
 	metrics := categoryMetrics(items)
-	if len(metrics) != 5 {
+	if len(metrics) != 6 {
 		t.Fatalf("metrics=%d", len(metrics))
 	}
 	cpu := metrics[0]

@@ -16,6 +16,7 @@ import (
 type HTTPClient struct {
 	BaseURL, Token  string
 	DiagnosisMethod string
+	CausalMode      string
 	HTTP            *http.Client
 	MaxRetries      int
 }
@@ -83,7 +84,7 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, body any, out 
 	return fmt.Errorf("agent request failed after %d attempts: %w", maxRetries+1, lastErr)
 }
 func (c *HTTPClient) Create(ctx context.Context, s scenarios.Scenario) (*domain.Incident, error) {
-	body := map[string]any{"severity": "critical", "service": s.Service, "namespace": s.Namespace, "resource": s.Target, "summary": "Service degradation detected during an isolated observation window; determine the root cause from collected evidence.", "diagnosis_method": c.DiagnosisMethod, "evidence_start_at": time.Now().UTC().Add(-40 * time.Second)}
+	body := map[string]any{"severity": "critical", "service": s.Service, "namespace": s.Namespace, "resource": s.Target, "summary": "Service degradation detected during an isolated observation window; determine the root cause from collected evidence.", "diagnosis_method": c.DiagnosisMethod, "causal_mode": c.CausalMode, "evidence_start_at": time.Now().UTC().Add(-40 * time.Second)}
 	var out domain.Incident
 	err := c.do(ctx, http.MethodPost, "/api/v1/incidents", body, &out)
 	return &out, err
@@ -94,10 +95,40 @@ func (c *HTTPClient) Get(ctx context.Context, id string) (*domain.Incident, erro
 	return &out, err
 }
 func (c *HTTPClient) Approve(ctx context.Context, in *domain.Incident) error {
+	return c.decide(ctx, in, "approve", "safe benchmark auto-approval")
+}
+
+func (c *HTTPClient) Reject(ctx context.Context, in *domain.Incident) error {
+	return c.decide(ctx, in, "reject", "benchmark proposal rejected because it does not match evaluator ground truth")
+}
+
+func (c *HTTPClient) decide(ctx context.Context, in *domain.Incident, decision, comment string) error {
 	if in.Proposal == nil {
 		return fmt.Errorf("incident has no proposal")
 	}
-	body := map[string]any{"proposal_id": in.Proposal.ID, "decision": "approve", "comment": "safe benchmark auto-approval"}
+	body := map[string]any{"proposal_id": in.Proposal.ID, "decision": decision, "comment": comment}
 	var out domain.Incident
 	return c.do(ctx, http.MethodPost, "/api/v1/incidents/"+in.ID+"/approval", body, &out)
+}
+
+func (c *HTTPClient) Preflight(ctx context.Context) error {
+	// The readiness endpoint probes model, embedding, and optional reranker
+	// services sequentially. It legitimately needs longer than the short API
+	// timeout used for incident CRUD, especially after cold starts.
+	probeClient := *c
+	httpClient := *c.HTTP
+	httpClient.Timeout = 2 * time.Minute
+	probeClient.HTTP = &httpClient
+	var readiness struct {
+		Components map[string]string `json:"components"`
+	}
+	if err := probeClient.do(ctx, http.MethodGet, "/api/v1/runtime/readiness", nil, &readiness); err != nil {
+		return fmt.Errorf("runtime readiness: %w", err)
+	}
+	for component, status := range readiness.Components {
+		if status != "ready" && status != "disabled" {
+			return fmt.Errorf("runtime component %s is %s", component, status)
+		}
+	}
+	return nil
 }

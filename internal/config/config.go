@@ -81,16 +81,20 @@ type AgentBudgetsConfig struct {
 }
 
 type ChatConfig struct {
-	Protocol        string
-	BaseURL         string
-	APIPath         string
-	APIKey          string
-	Model           string
-	Timeout         time.Duration
-	MaxTokens       int
-	Temperature     float64
-	ReasoningEffort string
-	MaxRetries      int
+	Protocol                 string
+	BaseURL                  string
+	APIPath                  string
+	APIKey                   string
+	Model                    string
+	Timeout                  time.Duration
+	MaxTokens                int
+	Temperature              float64
+	ReasoningEffort          string
+	MaxRetries               int
+	Concurrency              int
+	InputPricePerMillion     float64
+	OutputPricePerMillion    float64
+	ReasoningPricePerMillion float64
 }
 
 type EmbeddingConfig struct {
@@ -131,11 +135,15 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	maxTokens, err := integer("CHAT_MAX_TOKENS", 4096)
+	maxTokens, err := integer("CHAT_MAX_TOKENS", 8192)
 	if err != nil {
 		return Config{}, err
 	}
 	maxRetries, err := integer("CHAT_MAX_RETRIES", 3)
+	if err != nil {
+		return Config{}, err
+	}
+	chatConcurrency, err := integer("CHAT_CONCURRENCY", 4)
 	if err != nil {
 		return Config{}, err
 	}
@@ -156,6 +164,18 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	temperature, err := decimal("CHAT_TEMPERATURE", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	inputPrice, err := decimal("CHAT_INPUT_PRICE_PER_MILLION", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	outputPrice, err := decimal("CHAT_OUTPUT_PRICE_PER_MILLION", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	reasoningPrice, err := decimal("CHAT_REASONING_PRICE_PER_MILLION", 0)
 	if err != nil {
 		return Config{}, err
 	}
@@ -218,7 +238,7 @@ func Load() (Config, error) {
 		WebhookToken:  os.Getenv("ALERTMANAGER_WEBHOOK_TOKEN"),
 		DatabaseURL:   os.Getenv("DATABASE_URL"),
 		RedisURL:      os.Getenv("REDIS_URL"),
-		Chat:          ChatConfig{Protocol: get("CHAT_PROTOCOL", "openai-compatible"), BaseURL: os.Getenv("CHAT_BASE_URL"), APIPath: get("CHAT_API_PATH", "/chat/completions"), APIKey: os.Getenv("CHAT_API_KEY"), Model: os.Getenv("CHAT_MODEL"), Timeout: chatTimeout, MaxTokens: maxTokens, Temperature: temperature, ReasoningEffort: os.Getenv("CHAT_REASONING_EFFORT"), MaxRetries: maxRetries},
+		Chat:          ChatConfig{Protocol: get("CHAT_PROTOCOL", "openai-compatible"), BaseURL: os.Getenv("CHAT_BASE_URL"), APIPath: get("CHAT_API_PATH", "/chat/completions"), APIKey: os.Getenv("CHAT_API_KEY"), Model: os.Getenv("CHAT_MODEL"), Timeout: chatTimeout, MaxTokens: maxTokens, Temperature: temperature, ReasoningEffort: os.Getenv("CHAT_REASONING_EFFORT"), MaxRetries: maxRetries, Concurrency: chatConcurrency, InputPricePerMillion: inputPrice, OutputPricePerMillion: outputPrice, ReasoningPricePerMillion: reasoningPrice},
 		Embedding:     EmbeddingConfig{BaseURL: os.Getenv("EMBEDDING_BASE_URL"), APIPath: get("EMBEDDING_API_PATH", "/embeddings"), APIKey: os.Getenv("EMBEDDING_API_KEY"), Model: os.Getenv("EMBEDDING_MODEL"), Dimensions: dimensions, BatchSize: embeddingBatchSize, Concurrency: embeddingConcurrency, Timeout: embedTimeout, RequestInterval: embedRequestInterval, MaxRetries: embeddingRetries},
 		PrometheusURL: get("PROMETHEUS_URL", "http://localhost:9090"), LokiURL: get("LOKI_URL", "http://localhost:3100"), JaegerURL: get("JAEGER_URL", "http://localhost:16686"), MilvusAddress: get("MILVUS_ADDRESS", "localhost:19530"), HistoryCollection: get("HISTORY_COLLECTION", "kubepilot_history"), LogIndexCollection: get("LOG_INDEX_COLLECTION", "kubepilot_log_templates"), LogIndexerInterval: logIndexerInterval, BusinessProbeURL: os.Getenv("BUSINESS_PROBE_URL"),
 		Drain3URL: get("DRAIN3_WS_URL", "ws://localhost:8081/ws/v1/parse"), Drain3Token: os.Getenv("DRAIN3_TOKEN"), Kubeconfig: os.Getenv("KUBECONFIG"), AllowedNamespaces: split(get("ALLOWED_NAMESPACES", "kubepilot-demo,kubepilot-benchmark")),
@@ -305,15 +325,15 @@ func loadAgentBudgets() (AgentBudgetsConfig, error) {
 		}
 		return defaults, nil
 	}
-	supervisor, err := load("SUPERVISOR", AgentBudgetConfig{MaxIterations: 10, MaxToolUses: 50, MaxTokens: 12000, MaxCorrections: 3})
+	supervisor, err := load("SUPERVISOR", AgentBudgetConfig{MaxIterations: 10, MaxToolUses: 50, MaxTokens: 8192, MaxCorrections: 3})
 	if err != nil {
 		return AgentBudgetsConfig{}, err
 	}
-	diagnosis, err := load("DIAGNOSIS", AgentBudgetConfig{MaxIterations: 12, MaxToolUses: 50, MaxTokens: 30000, MaxCorrections: 3})
+	diagnosis, err := load("DIAGNOSIS", AgentBudgetConfig{MaxIterations: 18, MaxToolUses: 50, MaxTokens: 8192, MaxCorrections: 3})
 	if err != nil {
 		return AgentBudgetsConfig{}, err
 	}
-	recovery, err := load("RECOVERY", AgentBudgetConfig{MaxIterations: 10, MaxToolUses: 50, MaxTokens: 16000, MaxCorrections: 2})
+	recovery, err := load("RECOVERY", AgentBudgetConfig{MaxIterations: 10, MaxToolUses: 50, MaxTokens: 8192, MaxCorrections: 2})
 	if err != nil {
 		return AgentBudgetsConfig{}, err
 	}
@@ -339,6 +359,12 @@ func ValidateChat(chat ChatConfig) error {
 	}
 	if chat.MaxRetries < 0 || chat.MaxRetries > 3 {
 		return fmt.Errorf("CHAT_MAX_RETRIES must be between 0 and 3")
+	}
+	if chat.Concurrency < 0 || chat.Concurrency > 64 {
+		return fmt.Errorf("CHAT_CONCURRENCY must be between 1 and 64")
+	}
+	if chat.InputPricePerMillion < 0 || chat.OutputPricePerMillion < 0 || chat.ReasoningPricePerMillion < 0 {
+		return errors.New("chat pricing values cannot be negative")
 	}
 	return nil
 }

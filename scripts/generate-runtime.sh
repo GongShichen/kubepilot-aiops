@@ -30,5 +30,18 @@ chmod 600 "$runtime_dir/kubeconfig" "$generated_dir/client.key"
 
 api_port=$(printf '%s' "$server" | sed -E 's#https://[^:]+:([0-9]+)#\1#')
 sed -e "s/host.docker.internal:8443/host.docker.internal:$api_port/" "$root_dir/deploy/docker/prometheus/minikube-targets.template.yml" > "$runtime_dir/minikube-targets.yml"
+worker_namespaces=${BENCHMARK_WORKER_NAMESPACES:-kubepilot-benchmark-worker-01,kubepilot-benchmark-worker-02,kubepilot-benchmark-worker-03,kubepilot-benchmark-worker-04}
+for namespace in $(printf '%s' "$worker_namespaces" | tr ',' ' '); do
+  for service in gateway-service order-service payment-service; do
+    {
+      printf '%s\n' '- targets: ["host.docker.internal:'"$api_port"'"]'
+      printf '%s\n' '  labels:'
+      printf '    __metrics_path__: /api/v1/namespaces/%s/services/http:%s:http/proxy/metrics\n' "$namespace" "$service"
+      printf '%s\n' '    cluster: kubepilot-local'
+      printf '    namespace: %s\n' "$namespace"
+      printf '    service: %s\n' "$service"
+    } >> "$runtime_dir/minikube-targets.yml"
+  done
+done
 cp "$runtime_dir/minikube-targets.yml" "$generated_dir/minikube-targets.yml"
 echo "generated runtime kubeconfig and Prometheus credentials"

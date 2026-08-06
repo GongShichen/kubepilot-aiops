@@ -42,6 +42,14 @@ func LoadChatFile(path string, fallback ChatConfig) (ChatConfig, error) {
 			return ChatConfig{}, fmt.Errorf("CHAT_TEMPERATURE: %w", err)
 		}
 	}
+	for key, target := range map[string]*float64{"CHAT_INPUT_PRICE_PER_MILLION": &chat.InputPricePerMillion, "CHAT_OUTPUT_PRICE_PER_MILLION": &chat.OutputPricePerMillion, "CHAT_REASONING_PRICE_PER_MILLION": &chat.ReasoningPricePerMillion} {
+		if raw, ok := values[key]; ok {
+			*target, err = strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return ChatConfig{}, fmt.Errorf("%s: %w", key, err)
+			}
+		}
+	}
 	if raw, ok := values["CHAT_MAX_RETRIES"]; ok {
 		chat.MaxRetries, err = strconv.Atoi(raw)
 		if err != nil {

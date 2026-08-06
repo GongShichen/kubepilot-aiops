@@ -56,10 +56,12 @@ func (t *Timeouts) UnmarshalYAML(value *yaml.Node) error {
 
 type Scenario struct {
 	ID             string         `json:"id"`
+	Split          string         `json:"split"`
 	Category       string         `json:"category"`
 	Variant        string         `json:"variant"`
 	Description    string         `json:"description"`
 	Seed           int64          `json:"seed"`
+	Repetition     int            `json:"repetition"`
 	Namespace      string         `json:"namespace"`
 	Service        string         `json:"service"`
 	Target         string         `json:"target"`
@@ -101,22 +103,35 @@ func Expand(c Catalog) []Scenario {
 	services := []string{"gateway-service", "order-service", "payment-service"}
 	var out []Scenario
 	for _, cat := range c.Categories {
+		categoryIndex := 0
 		for _, v := range cat.Variants {
 			for i := 1; i <= cat.Repetitions; i++ {
 				service := services[(i-1)%len(services)]
 				if cat.Name == "database" {
 					service = "payment-service"
+				} else if cat.Name == "dependency" {
+					service = "order-service"
+					if len(v.Name) >= len("payment_") && v.Name[:len("payment_")] == "payment_" {
+						service = "payment-service"
+					}
+				}
+				categoryIndex++
+				split := "test"
+				if categoryIndex <= 4 {
+					split = "dev"
+				} else if categoryIndex <= 8 {
+					split = "validation"
 				}
 				id := fmt.Sprintf("%s-%s-%02d", cat.Name, v.Name, i)
-				out = append(out, Scenario{ID: id, Category: cat.Name, Variant: v.Name, Description: v.RootCause, Seed: int64(1000 + len(out)), Namespace: c.Namespace, Service: service, Target: service, Preconditions: []string{"target_exists", "baseline_healthy"}, Injector: v.Injector, InjectParams: map[string]any{"variant": v.Name, "seed": int64(1000 + len(out))}, ExpectedAlerts: []string{cat.Name + "_anomaly", "service_error_rate"}, Timeouts: c.Defaults, Verification: []string{"pod_ready", "deployment_available", "business_probe"}, Cleanup: "restore_deployment_snapshot", GroundTruth: GroundTruth{RootCauseCategory: cat.Name, RootCauseDetail: v.RootCause, Service: service, Resource: service, RequiredEvidence: append([]string(nil), v.RequiredEvidence...), AllowedRecoveryActions: append([]string(nil), v.AllowedActions...)}})
+				out = append(out, Scenario{ID: id, Split: split, Category: cat.Name, Variant: v.Name, Description: v.RootCause, Seed: int64(1000 + len(out)), Repetition: 1, Namespace: c.Namespace, Service: service, Target: service, Preconditions: []string{"target_exists", "baseline_healthy"}, Injector: v.Injector, InjectParams: map[string]any{"variant": v.Name, "seed": int64(1000 + len(out))}, ExpectedAlerts: []string{cat.Name + "_anomaly", "service_error_rate"}, Timeouts: c.Defaults, Verification: []string{"pod_ready", "deployment_available", "business_probe"}, Cleanup: "restore_deployment_snapshot", GroundTruth: GroundTruth{RootCauseCategory: cat.Name, RootCauseDetail: v.RootCause, Service: service, Resource: service, RequiredEvidence: append([]string(nil), v.RequiredEvidence...), AllowedRecoveryActions: append([]string(nil), v.AllowedActions...)}})
 			}
 		}
 	}
 	return out
 }
 func Validate(items []Scenario) error {
-	if len(items) != 100 {
-		return fmt.Errorf("catalog must expand to 100 scenarios, got %d", len(items))
+	if len(items) != 120 {
+		return fmt.Errorf("catalog must expand to 120 scenarios, got %d", len(items))
 	}
 	seen := map[string]bool{}
 	counts := map[string]int{}
@@ -146,9 +161,18 @@ func Validate(items []Scenario) error {
 			}
 		}
 	}
-	for _, cat := range []string{"cpu", "memory", "database", "network", "deployment"} {
+	for _, cat := range []string{"cpu", "memory", "database", "network", "deployment", "dependency"} {
 		if counts[cat] != 20 {
 			return fmt.Errorf("category %s has %d scenarios, want 20", cat, counts[cat])
+		}
+	}
+	splits := map[string]int{}
+	for _, item := range items {
+		splits[item.Split]++
+	}
+	for split, expected := range map[string]int{"dev": 24, "validation": 24, "test": 72} {
+		if splits[split] != expected {
+			return fmt.Errorf("split %s has %d scenarios, want %d", split, splits[split], expected)
 		}
 	}
 	return nil

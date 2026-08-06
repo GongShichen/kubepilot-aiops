@@ -43,6 +43,10 @@ func (s *HypothesisTransitionService) Transition(id string, from, to domain.Hypo
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.transitionLocked(id, from, to, reason, toolCallID, evidenceIDs)
+}
+
+func (s *HypothesisTransitionService) transitionLocked(id string, from, to domain.HypothesisStatus, reason, toolCallID string, evidenceIDs []string) error {
 	current, exists := s.statuses[id]
 	if !exists && from != "" {
 		return fmt.Errorf("hypothesis %q has no current lifecycle status", id)
@@ -64,19 +68,29 @@ func (s *HypothesisTransitionService) Transition(id string, from, to domain.Hypo
 // TransitionVerified applies a validated transition and updates the
 // materialized verified ledger atomically under the same service lock.
 func (s *HypothesisTransitionService) TransitionVerified(items *[]domain.VerifiedHypothesis, id string, from, to domain.HypothesisStatus, reason, toolCallID string, evidenceIDs []string) error {
+	if s == nil || s.ledger == nil || id == "" {
+		return fmt.Errorf("hypothesis transition service is unavailable")
+	}
 	if items == nil {
 		return fmt.Errorf("verified hypothesis slice is required")
 	}
-	if err := s.Transition(id, from, to, reason, toolCallID, evidenceIDs); err != nil {
-		return err
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	selected := -1
 	for index := range *items {
 		if (*items)[index].Draft.ID == id {
-			(*items)[index].Status = to
-			return nil
+			selected = index
+			break
 		}
 	}
-	return fmt.Errorf("hypothesis %q is not present in verified ledger", id)
+	if selected < 0 {
+		return fmt.Errorf("hypothesis %q is not present in verified ledger", id)
+	}
+	if err := s.transitionLocked(id, from, to, reason, toolCallID, evidenceIDs); err != nil {
+		return err
+	}
+	(*items)[selected].Status = to
+	return nil
 }
 
 func CanTransitionHypothesis(from, to domain.HypothesisStatus) bool {
@@ -100,11 +114,12 @@ func TransitionHypothesis(ledger *domain.DiagnosisLedger, id string, from, to do
 	return nil
 }
 
-// Confidence makes the model prior deliberately the least influential positive
-// signal. Temporal consistency is computed from the current, non-expired
-// evidence set rather than from incident wording.
-func Confidence(item domain.VerifiedHypothesis, temporalConsistency float64) float64 {
-	score := .10*item.Draft.PriorProbability + .30*item.SupportingScore + .25*item.CausalPathCoverage + .15*item.HistoricalRelevance + .15*item.TopologyRelevance + .05*clamp(temporalConsistency) - .30*item.ContradictionScore
+// Confidence is the deterministic arbitration score. Model prior is the least
+// influential positive signal; current evidence and causal coverage dominate.
+// Temporal consistency remains in the audit breakdown but is not an extra
+// weight that would silently change the declared policy.
+func Confidence(item domain.VerifiedHypothesis, _ float64) float64 {
+	score := .10*item.Draft.PriorProbability + .30*item.SupportingScore + .25*item.CausalPathCoverage + .15*item.HistoricalRelevance + .20*item.TopologyRelevance - .30*item.ContradictionScore
 	return clamp(score)
 }
 

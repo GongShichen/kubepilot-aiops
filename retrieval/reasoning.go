@@ -116,7 +116,7 @@ func (r HistoricalRetriever) Semantic(ctx context.Context, features domain.Incid
 	if len(vectors) != 1 || len(vectors[0]) == 0 {
 		return nil, fmt.Errorf("embedding provider returned %d vectors for one incident query", len(vectors))
 	}
-	docs, err := r.Vectors.Search(ctx, vectors[0], map[string]string{"namespace": features.Namespace}, limit)
+	docs, err := r.Vectors.Search(ctx, vectors[0], map[string]string{"cluster": features.Cluster, "namespace": features.Namespace}, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +129,7 @@ func (r HistoricalRetriever) Semantic(ctx context.Context, features domain.Incid
 		if doc.Service == features.Service {
 			score += .1
 		}
-		out = append(out, domain.RetrievalCandidate{IncidentID: doc.ID, Namespace: doc.Namespace, Service: doc.Service, Category: doc.Category, RootCause: doc.RootCause, Summary: doc.Template, Features: domain.IncidentFeatures{IncidentID: doc.ID, Namespace: doc.Namespace, Service: doc.Service, Terms: strings.Fields(strings.ToLower(doc.Template + " " + doc.RootCause)), TopologyServices: []string{doc.Service}}, SourceScores: map[string]float64{"semantic": score}})
+		out = append(out, domain.RetrievalCandidate{IncidentID: doc.ID, Cluster: doc.Cluster, Namespace: doc.Namespace, Service: doc.Service, Category: doc.Category, RootCause: doc.RootCause, Summary: doc.Template, Features: domain.IncidentFeatures{IncidentID: doc.ID, Cluster: doc.Cluster, Namespace: doc.Namespace, Service: doc.Service, Terms: strings.Fields(strings.ToLower(doc.Template + " " + doc.RootCause)), TopologyServices: []string{doc.Service}}, SourceScores: map[string]float64{"semantic": score}})
 	}
 	return out, nil
 }

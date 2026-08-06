@@ -16,13 +16,13 @@ func (a TraceCollector) Collect(ctx context.Context, in *domain.Incident) ([]dom
 	if start.IsZero() {
 		start = in.CreatedAt.Add(-5 * time.Minute)
 	}
-	traces, err := a.Client.Query(ctx, in.Service, start, time.Now().UTC(), 20)
+	traces, err := a.Client.QueryNamespace(ctx, in.Service, in.Namespace, start, time.Now().UTC(), 20)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]domain.Evidence, 0, len(traces))
 	for _, t := range traces {
-		out = append(out, domain.Evidence{ID: ulid.Make().String(), Source: "jaeger", Kind: "trace", Summary: "trace critical-path analysis", Data: map[string]any{"trace_id": t.TraceID, "duration_micros": t.DurationMicros, "slow_service": t.SlowService, "error_service": t.ErrorService, "failed_operation": t.FailedOperation}, ObservedAt: time.Now().UTC()})
+		out = append(out, domain.Evidence{ID: ulid.Make().String(), Source: "jaeger", Kind: "trace", Namespace: in.Namespace, Service: in.Service, Resource: in.Resource, Summary: "trace critical-path analysis", Data: map[string]any{"trace_id": t.TraceID, "duration_micros": t.DurationMicros, "slow_service": t.SlowService, "error_service": t.ErrorService, "failed_operation": t.FailedOperation}, ObservedAt: time.Now().UTC()})
 	}
 	return out, nil
 }

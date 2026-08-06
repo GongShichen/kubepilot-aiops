@@ -37,6 +37,7 @@ type constrainedToolDeps struct {
 	TopologyPatterns   topologyknowledge.Reader
 	CausalPatterns     causalknowledge.Reader
 	DiscoveredPatterns causaldiscovery.Reader
+	Memory             MemoryService
 	Transition         func(context.Context, *domain.Incident, domain.IncidentStatus) error
 }
 
@@ -131,6 +132,7 @@ func buildConstrainedDiagnosisCapabilities(deps constrainedToolDeps) ([]captools
 			if loadErr != nil {
 				return constrainedToolOutput{OK: false, Message: "causal knowledge unavailable"}, nil
 			}
+			patterns = causalPatternsForScope(patterns, runtime.state.Incident.Cluster, runtime.state.Incident.Namespace, 0)
 			items = deps.Reasoning.AnnotateCausalNodes(items, patterns)
 		}
 		runtime.state.RankedEvidence = items
@@ -192,14 +194,21 @@ func buildConstrainedDiagnosisCapabilities(deps constrainedToolDeps) ([]captools
 
 	if deps.CausalPatterns != nil {
 		if err := appendConstrainedCapability(&result, captools.CategoryRetrieval, captools.NodeDiagnosisReact, "retrieve_causal_patterns", "Retrieve bounded validated causal patterns. Patterns are observational knowledge and cannot be modified by the Agent.", func(ctx context.Context, in boundedLimit) (constrainedToolOutput, error) {
+			runtime, err := runtimeFromContext(ctx)
+			if err != nil {
+				return constrainedToolOutput{}, err
+			}
 			limit := in.Limit
 			if limit <= 0 || limit > 20 {
 				limit = 10
 			}
-			patterns, callErr := deps.CausalPatterns.List(ctx, "active", limit)
+			patterns, callErr := deps.CausalPatterns.List(ctx, "active", 0)
 			if callErr != nil {
 				return constrainedToolOutput{OK: false, Message: "causal knowledge unavailable"}, nil
 			}
+			runtime.mu.Lock()
+			patterns = causalPatternsForScope(patterns, runtime.state.Incident.Cluster, runtime.state.Incident.Namespace, limit)
+			runtime.mu.Unlock()
 			return constrainedToolOutput{OK: true, CausalKnowledgePatterns: patterns}, nil
 		}); err != nil {
 			return nil, err
@@ -237,7 +246,7 @@ func buildConstrainedDiagnosisCapabilities(deps constrainedToolDeps) ([]captools
 				proposal = *runtime.state.CausalProposal
 			}
 			runtime.mu.Unlock()
-			ok := proposal.Pattern.PatternID != ""
+			ok := proposal.Pattern.ID != ""
 			if !ok {
 				proposal, ok = causalextractor.Propose(&incident)
 			}
@@ -382,6 +391,7 @@ func buildConstrainedDiagnosisCapabilities(deps constrainedToolDeps) ([]captools
 		}
 		runtime.mu.Lock()
 		defer runtime.mu.Unlock()
+		patterns = causalPatternsForScope(patterns, runtime.state.Incident.Cluster, runtime.state.Incident.Namespace, 0)
 		runtime.state.CausalPatterns = deps.Reasoning.MatchCausalPatterns(runtime.state.Features, runtime.state.RankedEvidence, patterns)
 		runtime.state.DiagnosisLedger.CausalPatterns = runtime.state.CausalPatterns
 		return constrainedToolOutput{OK: true, Patterns: runtime.state.CausalPatterns}, nil
@@ -855,10 +865,8 @@ func recordHypotheses(ctx context.Context, in HypothesisSubmission) (constrained
 				missing = append(missing, "a hypothesis references evidence outside the current allowlist")
 			}
 		}
-		for _, previous := range runtime.state.VerifiedHypotheses {
-			if previous.Draft.ID == draft.ID && previous.Status == domain.HypothesisRefuted {
-				missing = append(missing, "a refuted hypothesis identity cannot be reused; reconsideration requires a new version")
-			}
+		if hypothesisLifecycleStatus(runtime, draft.ID) == domain.HypothesisRefuted {
+			missing = append(missing, "a refuted hypothesis identity cannot be reused; reconsideration requires a new version")
 		}
 	}
 	if len(missing) > 0 {
@@ -867,20 +875,21 @@ func recordHypotheses(ctx context.Context, in HypothesisSubmission) (constrained
 	runtime.state.HypothesisDrafts = in.Hypotheses
 	runtime.state.DiagnosisLedger.Drafts = in.Hypotheses
 	for _, draft := range in.Hypotheses {
-		previousStatus := domain.HypothesisStatus("")
-		for _, previous := range runtime.state.VerifiedHypotheses {
-			if previous.Draft.ID == draft.ID {
-				previousStatus = previous.Status
-				break
-			}
-		}
+		previousStatus := hypothesisLifecycleStatus(runtime, draft.ID)
 		switch previousStatus {
 		case domain.HypothesisSupported:
 			if err := transitionHypothesis(runtime, draft.ID, domain.HypothesisSupported, domain.HypothesisEvidenceSearching, "new observations require verification", "", draft.SupportingEvidenceIDs); err != nil {
 				return constrainedToolOutput{}, err
 			}
+		case domain.HypothesisCreated:
+			if err := transitionHypothesis(runtime, draft.ID, domain.HypothesisCreated, domain.HypothesisEvidenceSearching, "investigation resumed", "", draft.SupportingEvidenceIDs); err != nil {
+				return constrainedToolOutput{}, err
+			}
 		case domain.HypothesisEvidenceSearching:
 			// The draft remains under investigation; do not create a duplicate lifecycle.
+		case domain.HypothesisAccepted:
+			// A completed diagnosis is idempotent if a delayed model turn repeats
+			// its already accepted hypothesis.
 		default:
 			if err := transitionHypothesis(runtime, draft.ID, "", domain.HypothesisCreated, "hypothesis recorded", "", draft.SupportingEvidenceIDs); err != nil {
 				return constrainedToolOutput{}, err
@@ -891,6 +900,21 @@ func recordHypotheses(ctx context.Context, in HypothesisSubmission) (constrained
 		}
 	}
 	return constrainedToolOutput{OK: true, Message: "hypothesis ledger updated"}, nil
+}
+
+func hypothesisLifecycleStatus(runtime *constrainedRuntime, id string) domain.HypothesisStatus {
+	if runtime == nil || id == "" {
+		return ""
+	}
+	if runtime.hypotheses != nil {
+		return runtime.hypotheses.Status(id)
+	}
+	for _, item := range runtime.state.VerifiedHypotheses {
+		if item.Draft.ID == id {
+			return item.Status
+		}
+	}
+	return ""
 }
 
 func verifyConstrainedHypotheses(ctx context.Context, deps constrainedToolDeps) (constrainedToolOutput, error) {

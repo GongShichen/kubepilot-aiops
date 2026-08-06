@@ -24,3 +24,14 @@ func TestSafetyFeedbackTruncationPreservesUTF8(t *testing.T) {
 		t.Fatalf("unexpected bounded reason length: %d", len([]rune(feedback.Reason)))
 	}
 }
+
+func TestHumanAndAllowedFeedbackRemainStructured(t *testing.T) {
+	human := HumanRequired(domain.SafetyScopeRecoveryProposal, "operator_required", " explicit operator decision required ")
+	if !human.RequiresHuman || human.Reason != "explicit operator decision required" || !ValidateFeedback(human, nil) {
+		t.Fatalf("human feedback=%+v", human)
+	}
+	allowed := Allowed(domain.SafetyScopeDiagnosis)
+	if !allowed.Allowed || !ValidateFeedback(allowed, nil) {
+		t.Fatalf("allowed feedback=%+v", allowed)
+	}
+}

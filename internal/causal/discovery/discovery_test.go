@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,6 +166,93 @@ func TestExplanationProviderCannotPromoteCandidate(t *testing.T) {
 	}
 }
 
+func TestDiscoveryPublicHelpersAndCandidateStore(t *testing.T) {
+	incidents := []*domain.Incident{
+		resolvedIncident("helper-one", []string{"memory growth", "oom killed", "pod restart"}),
+		resolvedIncident("helper-two", []string{"memory growth", "oom killed", "pod restart"}),
+		resolvedIncident("helper-three", []string{"memory growth", "oom killed", "pod restart"}),
+	}
+	graphs := make([]IncidentCausalGraph, 0, len(incidents))
+	graphByID := map[string]IncidentCausalGraph{}
+	incidentByID := map[string]*domain.Incident{}
+	for _, incident := range incidents {
+		graph, err := Build(incident)
+		if err != nil {
+			t.Fatal(err)
+		}
+		graphs = append(graphs, graph)
+		graphByID[incident.ID] = graph
+		incidentByID[incident.ID] = incident
+	}
+	candidates := Mine(graphs)
+	if len(candidates) == 0 || !ValidateCandidate(context.Background(), candidates[0], graphByID, incidentByID, nil) {
+		t.Fatalf("public discovery helpers rejected grounded candidate: %+v", candidates)
+	}
+	if string(MarshalPath([]string{"memory growth", "oom killed"})) != `["memory growth","oom killed"]` {
+		t.Fatal("causal path JSON is not stable")
+	}
+	store := NewMemoryStore()
+	accepted := NormalizeCandidate(candidates[0])
+	accepted.Status = StatusAccepted
+	accepted.Confidence = .9
+	if err := store.Upsert(context.Background(), accepted); err != nil {
+		t.Fatal(err)
+	}
+	rejected := NormalizeCandidate(CausalPatternCandidate{CausalPath: []string{"network", "timeout"}, Status: StatusRejected, Confidence: .2})
+	if err := store.Upsert(context.Background(), rejected); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.List(context.Background(), StatusAccepted, 1)
+	if err != nil || len(listed) != 1 || listed[0].PatternID != accepted.PatternID {
+		t.Fatalf("candidate list=%+v err=%v", listed, err)
+	}
+	found, err := store.Search(context.Background(), []string{"OOM"}, 1)
+	if err != nil || len(found) != 1 || !strings.Contains(strings.Join(found[0].CausalPath, " "), "oom") {
+		t.Fatalf("candidate search=%+v err=%v", found, err)
+	}
+	allAccepted, err := store.Search(context.Background(), nil, 1)
+	if err != nil || len(allAccepted) != 1 {
+		t.Fatalf("empty search=%+v err=%v", allAccepted, err)
+	}
+	var unavailable *MemoryStore
+	if err := unavailable.Upsert(context.Background(), accepted); err == nil {
+		t.Fatal("nil candidate store accepted a write")
+	}
+	if _, err := unavailable.List(context.Background(), "", 0); err == nil {
+		t.Fatal("nil candidate store returned data")
+	}
+}
+
+func TestCausalGraphBuildRejectsUnverifiedInputs(t *testing.T) {
+	if _, err := Build(nil); err == nil {
+		t.Fatal("nil incident entered causal learning")
+	}
+	base := resolvedIncident("invalid-input", []string{"cause", "symptom"})
+	cases := []struct {
+		name   string
+		mutate func(*domain.Incident)
+	}{
+		{name: "unresolved", mutate: func(in *domain.Incident) { in.Status = domain.StatusDiagnosing }},
+		{name: "verification", mutate: func(in *domain.Incident) { in.Verification = nil }},
+		{name: "selection", mutate: func(in *domain.Incident) { in.DiagnosisLedger.SelectedHypothesisID = "missing" }},
+		{name: "contradiction", mutate: func(in *domain.Incident) { in.DiagnosisLedger.Verified[0].ContradictionScore = .2 }},
+		{name: "confidence", mutate: func(in *domain.Incident) { in.DiagnosisLedger.Verified[0].FinalScore = .7 }},
+		{name: "path", mutate: func(in *domain.Incident) { in.DiagnosisLedger.Verified[0].Draft.ExpectedCausalPath = nil }},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			copyIncident := *base
+			ledger := *base.DiagnosisLedger
+			ledger.Verified = append([]domain.VerifiedHypothesis(nil), base.DiagnosisLedger.Verified...)
+			copyIncident.DiagnosisLedger = &ledger
+			test.mutate(&copyIncident)
+			if _, err := Build(&copyIncident); err == nil {
+				t.Fatalf("%s input entered causal learning", test.name)
+			}
+		})
+	}
+}
+
 func testGraph(id string, path []string) IncidentCausalGraph {
 	graph := IncidentCausalGraph{IncidentID: id}
 	for i, name := range path {
@@ -175,7 +263,7 @@ func testGraph(id string, path []string) IncidentCausalGraph {
 		}
 		graph.Nodes = append(graph.Nodes, CausalNode{ID: nodeID, Type: typ, Name: name, Confidence: .9})
 		if i > 0 {
-			graph.Edges = append(graph.Edges, CausalEdge{Source: "n" + string(rune('0'+i-1)), Target: nodeID, Relation: "causes", Confidence: .9})
+			graph.Edges = append(graph.Edges, CausalEdge{From: "n" + string(rune('0'+i-1)), To: nodeID, Relation: "causes", Confidence: .9})
 		}
 	}
 	graph.Nodes = append(graph.Nodes,
@@ -195,7 +283,7 @@ func hasNodeType(graph IncidentCausalGraph, typ NodeType) bool {
 
 func hasEdge(graph IncidentCausalGraph, relation, source, target string) bool {
 	for _, edge := range graph.Edges {
-		if edge.Relation == relation && edge.Source == source && edge.Target == target {
+		if edge.Relation == relation && edge.From == source && edge.To == target {
 			return true
 		}
 	}

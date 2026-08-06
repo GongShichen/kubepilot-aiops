@@ -43,7 +43,7 @@ func NewEinoChatModel(ctx context.Context, cfg config.ChatConfig) (model.BaseCha
 		maxTokens := cfg.MaxTokens
 		chat, err := openmodel.NewChatModel(ctx, &openmodel.ChatModelConfig{
 			APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Model, HTTPClient: httpClient,
-			MaxTokens: &maxTokens, Temperature: &temperature,
+			MaxTokens: &maxTokens, Temperature: &temperature, ReasoningEffort: openmodel.ReasoningEffortLevel(cfg.ReasoningEffort),
 		})
 		if err != nil {
 			return nil, err

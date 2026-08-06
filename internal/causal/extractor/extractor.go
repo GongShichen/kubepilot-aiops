@@ -15,7 +15,7 @@ func Propose(in *domain.Incident) (knowledge.Proposal, bool) {
 }
 
 func ValidateText(proposal knowledge.Proposal) error {
-	if strings.TrimSpace(proposal.Pattern.Cause) == "" || len(proposal.Pattern.CausalGraph.Nodes) < 2 {
+	if strings.TrimSpace(proposal.Pattern.Cause) == "" || len(proposal.Pattern.Nodes) < 2 {
 		return fmt.Errorf("causal proposal requires a cause and a complete graph")
 	}
 	return nil

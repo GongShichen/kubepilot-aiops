@@ -71,6 +71,7 @@ type SupervisorDeps struct {
 	TopologyPatterns     topologyknowledge.Reader
 	CausalPatterns       causalknowledge.Reader
 	DiscoveredPatterns   causaldiscovery.Reader
+	Memory               MemoryService
 	VerificationInterval time.Duration
 	VerificationTimeout  time.Duration
 }
@@ -153,7 +154,7 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 		return nil, err
 	}
 	if err := add("constrained_react_agents", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.RunConstrained(ctx, s, constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Transition: transition, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns}); err != nil {
+		if err := deps.Agents.RunConstrained(ctx, s, constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Transition: transition, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory}); err != nil {
 			return s, err
 		}
 		s.Incident.DiagnosisLedger = &s.DiagnosisLedger
@@ -186,15 +187,31 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 			_ = transition(ctx, s.Incident, domain.StatusNeedsAttention)
 			return s, nil
 		}
+		if s.Incident.RecoveryExecution == nil {
+			s.Incident.RecoveryExecution = &domain.RecoveryExecution{}
+		}
+		execution := s.Incident.RecoveryExecution
+		execution.Attempts++
+		execution.Namespace = s.Incident.Proposal.Namespace
+		execution.Target = s.Incident.Proposal.Target
+		execution.Action = string(s.Incident.Proposal.Action)
+		execution.Outcome = "attempting"
+		execution.LastAttemptAt = time.Now().UTC()
 		if err := actionExecutor.Execute(ctx, s.Incident, *s.Incident.Proposal); err != nil {
 			status := domain.StatusRecoveryFailed
 			if errors.Is(err, ErrActionResultUnknown) {
 				status = domain.StatusNeedsAttention
+				execution.Outcome = "unknown"
+			} else {
+				execution.Outcome = "failed"
 			}
 			s.Errors = append(s.Errors, err.Error())
 			_ = transition(ctx, s.Incident, status)
 			return s, nil
 		}
+		execution.ConfirmedMutations++
+		execution.Outcome = "succeeded"
+		execution.CompletedAt = time.Now().UTC()
 		if err := transition(ctx, s.Incident, domain.StatusVerifying); err != nil {
 			return s, err
 		}
@@ -735,7 +752,7 @@ func validateExecutionContext(s *WorkflowState) error {
 	return nil
 }
 func safeIncident(in *domain.Incident) map[string]any {
-	return map[string]any{"id": in.ID, "severity": in.Severity, "service": in.Service, "namespace": in.Namespace, "resource": in.Resource, "summary": in.Summary, "evidence_start_at": in.EvidenceStartAt}
+	return map[string]any{"id": in.ID, "severity": in.Severity, "service": in.Service, "cluster": in.Cluster, "namespace": in.Namespace, "resource": in.Resource, "summary": in.Summary, "causal_mode": in.CausalMode, "evidence_start_at": in.EvidenceStartAt}
 }
 
 func (s *Supervisor) Run(ctx context.Context, in *domain.Incident) (*WorkflowState, error) {

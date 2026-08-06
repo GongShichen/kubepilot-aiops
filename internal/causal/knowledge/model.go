@@ -14,41 +14,11 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
 
-type CausalNode struct {
-	ID   string `json:"id"`
-	Type string `json:"type"` // cause, symptom, evidence, action
-	Name string `json:"name"`
-}
-
-type CausalEdge struct {
-	Source   string `json:"source"`
-	Target   string `json:"target"`
-	Relation string `json:"relation"` // causes, supports, contradicts
-}
-
-type CausalGraph struct {
-	Nodes []CausalNode `json:"nodes"`
-	Edges []CausalEdge `json:"edges"`
-}
-
-type EvidencePattern struct {
-	Source string   `json:"source"`
-	Type   string   `json:"type"`
-	Tokens []string `json:"tokens,omitempty"`
-}
-
-type CausalPattern struct {
-	PatternID             string            `json:"pattern_id"`
-	Cause                 string            `json:"cause"`
-	CausalGraph           CausalGraph       `json:"causal_graph"`
-	SupportingEvidence    []EvidencePattern `json:"supporting_evidence,omitempty"`
-	ContradictingEvidence []EvidencePattern `json:"contradicting_evidence,omitempty"`
-	Confidence            float64           `json:"confidence"`
-	SourceIncidents       []string          `json:"source_incidents,omitempty"`
-	CreatedAt             time.Time         `json:"created_at"`
-	UpdatedAt             time.Time         `json:"updated_at"`
-	Status                string            `json:"status"` // pending, active, disabled
-}
+type CausalNode = domain.CausalNode
+type CausalEdge = domain.CausalEdge
+type CausalGraph = domain.CausalGraph
+type EvidencePattern = domain.CausalEvidencePattern
+type CausalPattern = domain.CausalPattern
 
 type Proposal struct {
 	Pattern    CausalPattern `json:"pattern"`
@@ -77,12 +47,30 @@ type PatternStore interface {
 
 func PatternID(pattern CausalPattern) string {
 	copyPattern := pattern
-	copyPattern.PatternID = ""
+	// Nodes and edges are slices. Copy them before removing incident-specific
+	// fields so identity calculation can never mutate the audited graph held by
+	// the caller.
+	copyPattern.Nodes = append([]CausalNode(nil), pattern.Nodes...)
+	copyPattern.Edges = append([]CausalEdge(nil), pattern.Edges...)
+	copyPattern.ID = ""
+	copyPattern.Category = ""
+	copyPattern.Source = ""
 	copyPattern.Confidence = 0
 	copyPattern.SourceIncidents = nil
+	copyPattern.SupportingEvidence = nil
+	copyPattern.ContradictingEvidence = nil
 	copyPattern.CreatedAt = time.Time{}
 	copyPattern.UpdatedAt = time.Time{}
 	copyPattern.Status = ""
+	copyPattern.Version = 0
+	copyPattern.SupportCount = 0
+	for index := range copyPattern.Nodes {
+		copyPattern.Nodes[index].Confidence = 0
+		copyPattern.Nodes[index].SourceEvidenceIDs = nil
+	}
+	for index := range copyPattern.Edges {
+		copyPattern.Edges[index].Confidence = 0
+	}
 	raw, _ := json.Marshal(copyPattern)
 	hash := sha256.Sum256(raw)
 	return "causal-" + hex.EncodeToString(hash[:8])
@@ -90,27 +78,49 @@ func PatternID(pattern CausalPattern) string {
 
 func Canonicalize(pattern CausalPattern) CausalPattern {
 	pattern.Cause = strings.ToLower(strings.TrimSpace(pattern.Cause))
-	for i := range pattern.CausalGraph.Nodes {
-		pattern.CausalGraph.Nodes[i].ID = strings.TrimSpace(pattern.CausalGraph.Nodes[i].ID)
-		pattern.CausalGraph.Nodes[i].Type = strings.ToLower(strings.TrimSpace(pattern.CausalGraph.Nodes[i].Type))
-		pattern.CausalGraph.Nodes[i].Name = strings.ToLower(strings.TrimSpace(pattern.CausalGraph.Nodes[i].Name))
+	for i := range pattern.Nodes {
+		pattern.Nodes[i].ID = strings.TrimSpace(pattern.Nodes[i].ID)
+		pattern.Nodes[i].Type = strings.ToLower(strings.TrimSpace(pattern.Nodes[i].Type))
+		pattern.Nodes[i].Name = strings.ToLower(strings.TrimSpace(pattern.Nodes[i].Name))
 	}
-	sort.Slice(pattern.CausalGraph.Nodes, func(i, j int) bool { return pattern.CausalGraph.Nodes[i].ID < pattern.CausalGraph.Nodes[j].ID })
-	for i := range pattern.CausalGraph.Edges {
-		pattern.CausalGraph.Edges[i].Relation = strings.ToLower(strings.TrimSpace(pattern.CausalGraph.Edges[i].Relation))
+	sort.Slice(pattern.Nodes, func(i, j int) bool { return pattern.Nodes[i].ID < pattern.Nodes[j].ID })
+	for i := range pattern.Edges {
+		pattern.Edges[i].Relation = strings.ToLower(strings.TrimSpace(pattern.Edges[i].Relation))
 	}
-	sort.Slice(pattern.CausalGraph.Edges, func(i, j int) bool {
-		return pattern.CausalGraph.Edges[i].Source+pattern.CausalGraph.Edges[i].Target+pattern.CausalGraph.Edges[i].Relation < pattern.CausalGraph.Edges[j].Source+pattern.CausalGraph.Edges[j].Target+pattern.CausalGraph.Edges[j].Relation
+	sort.Slice(pattern.Edges, func(i, j int) bool {
+		return pattern.Edges[i].From+pattern.Edges[i].To+pattern.Edges[i].Relation < pattern.Edges[j].From+pattern.Edges[j].To+pattern.Edges[j].Relation
 	})
 	pattern.SupportingEvidence = uniqueEvidence(pattern.SupportingEvidence)
 	pattern.ContradictingEvidence = uniqueEvidence(pattern.ContradictingEvidence)
-	pattern.PatternID = PatternID(pattern)
+	pattern.ID = PatternID(pattern)
 	return pattern
 }
 
 func Merge(left, right CausalPattern) CausalPattern {
-	if left.PatternID == "" {
+	hasExisting := left.ID != ""
+	if !hasExisting {
 		left = right
+	}
+	nextVersion := maxInt(left.Version, right.Version)
+	if hasExisting {
+		nextVersion++
+	} else if nextVersion <= 0 {
+		nextVersion = 1
+	}
+	leftSupport := len(unique(left.SourceIncidents))
+	rightSupport := 0
+	leftSeen := map[string]bool{}
+	for _, incidentID := range left.SourceIncidents {
+		leftSeen[incidentID] = true
+	}
+	for _, incidentID := range right.SourceIncidents {
+		if incidentID != "" && !leftSeen[incidentID] {
+			rightSupport++
+		}
+	}
+	combinedConfidence := left.Confidence
+	if leftSupport+rightSupport > 0 {
+		combinedConfidence = (left.Confidence*float64(leftSupport) + right.Confidence*float64(rightSupport)) / float64(leftSupport+rightSupport)
 	}
 	left = Canonicalize(left)
 	left.SourceIncidents = unique(append(left.SourceIncidents, right.SourceIncidents...))
@@ -122,40 +132,31 @@ func Merge(left, right CausalPattern) CausalPattern {
 	if left.CreatedAt.IsZero() {
 		left.CreatedAt = right.CreatedAt
 	}
-	left.Confidence = confidence(len(left.SourceIncidents), left.Confidence)
-	if len(left.SourceIncidents) >= 2 && left.Confidence >= .80 {
+	left.Confidence = combinedConfidence
+	left.SupportCount = len(left.SourceIncidents)
+	left.Version = nextVersion
+	if eligibleForActivation(left) {
 		left.Status = "active"
 	} else if left.Status != "disabled" {
-		left.Status = "pending"
+		left.Status = "validating"
 	}
 	return left
 }
 
-func confidence(support int, prior float64) float64 {
-	if prior < 0 {
-		prior = 0
+func eligibleForActivation(pattern CausalPattern) bool {
+	if len(unique(pattern.SourceIncidents)) < 3 || pattern.Confidence < .80 {
+		return false
 	}
-	if prior > 1 {
-		prior = 1
+	sources := map[string]bool{}
+	for _, evidence := range pattern.SupportingEvidence {
+		if evidence.Source != "" {
+			sources[evidence.Source] = true
+		}
 	}
-	// A first observation remains tentative; repeated independent resolved
-	// Incidents asymptotically approach high confidence.
-	value := .25*prior + .75*(1-expApprox(-float64(support)/4))
-	if value < 0 {
-		return 0
+	if len(sources) < 2 {
+		return false
 	}
-	if value > 1 {
-		return 1
-	}
-	return value
-}
-func expApprox(v float64) float64 {
-	term, sum := 1.0, 1.0
-	for i := 1; i < 18; i++ {
-		term *= v / float64(i)
-		sum += term
-	}
-	return sum
+	return float64(len(pattern.ContradictingEvidence))/float64(maxInt(1, len(pattern.SupportingEvidence))) <= .10
 }
 func unique(values []string) []string {
 	seen := map[string]bool{}
@@ -219,6 +220,8 @@ func ProposalFromDraft(in *domain.Incident, cause string, path, evidenceIDs []st
 	}
 	sources := map[string]bool{}
 	supporting := []EvidencePattern{}
+	supportingIDs := []string{}
+	confidenceTotal := 0.0
 	for _, id := range evidenceIDs {
 		item, ok := evidence[id]
 		if !ok {
@@ -231,6 +234,15 @@ func ProposalFromDraft(in *domain.Incident, cause string, path, evidenceIDs []st
 		sources[src] = true
 		tokens := strings.Fields(strings.ToLower(item.Summary))
 		supporting = append(supporting, EvidencePattern{Source: src, Type: item.Type, Tokens: tokens[:minInt(6, len(tokens))]})
+		supportingIDs = append(supportingIDs, item.ID)
+		quality := item.Confidence
+		if item.Attribution != nil && item.Attribution.AttributionScore > quality {
+			quality = item.Attribution.AttributionScore
+		}
+		if quality <= 0 {
+			quality = prior
+		}
+		confidenceTotal += quality
 	}
 	if len(sources) < 2 {
 		return Proposal{}, false
@@ -245,23 +257,33 @@ func ProposalFromDraft(in *domain.Incident, cause string, path, evidenceIDs []st
 	}
 	edges := []CausalEdge{}
 	for i := 1; i < len(nodes); i++ {
-		edges = append(edges, CausalEdge{Source: nodes[i-1].ID, Target: nodes[i].ID, Relation: "causes"})
+		edges = append(edges, CausalEdge{From: nodes[i-1].ID, To: nodes[i].ID, Relation: "causes"})
 	}
 	if in.Proposal != nil && in.Proposal.Action != "" {
 		actionID := "a0"
 		nodes = append(nodes, CausalNode{ID: actionID, Type: "action", Name: string(in.Proposal.Action)})
-		edges = append(edges, CausalEdge{Source: nodes[len(path)-1].ID, Target: actionID, Relation: "causes"})
+		edges = append(edges, CausalEdge{From: actionID, To: nodes[0].ID, Relation: "mitigates"})
 	}
 	for i, item := range supporting {
 		id := fmt.Sprintf("e%d", i)
-		nodes = append(nodes, CausalNode{ID: id, Type: "evidence", Name: item.Type})
-		edges = append(edges, CausalEdge{Source: id, Target: nodes[minInt(i, len(path)-1)].ID, Relation: "supports"})
+		nodes = append(nodes, CausalNode{ID: id, Type: "observation", Name: item.Type, Source: item.Source, SourceEvidenceIDs: []string{supportingIDs[i]}})
+		edges = append(edges, CausalEdge{From: id, To: nodes[minInt(i, len(path)-1)].ID, Relation: "supports"})
 	}
-	pattern := Canonicalize(CausalPattern{Cause: cause, CausalGraph: CausalGraph{Nodes: nodes, Edges: edges}, SupportingEvidence: supporting, Confidence: prior, SourceIncidents: []string{in.ID}, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), Status: "pending"})
+	averageConfidence := prior
+	if len(supporting) > 0 {
+		averageConfidence = confidenceTotal / float64(len(supporting))
+	}
+	pattern := Canonicalize(CausalPattern{Cause: cause, Nodes: nodes, Edges: edges, SupportingEvidence: supporting, Cluster: in.Cluster, Namespace: in.Namespace, Source: "learned", Confidence: averageConfidence, SourceIncidents: []string{in.ID}, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), Status: "validating", Version: 1, SupportCount: 1})
 	return Proposal{Pattern: pattern, IncidentID: in.ID}, true
 }
 func minInt(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+func maxInt(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b
@@ -296,17 +318,20 @@ func (s *MemoryStore) Merge(_ context.Context, p CausalPattern) (CausalPattern, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p = Canonicalize(p)
-	old, ok := s.patterns[p.PatternID]
+	old, ok := s.patterns[p.ID]
 	if ok {
 		p = Merge(old, p)
 	} else {
-		p.Confidence = confidence(len(p.SourceIncidents), p.Confidence)
-		if p.Confidence >= .8 {
+		if p.Version <= 0 {
+			p.Version = 1
+		}
+		p.SupportCount = len(unique(p.SourceIncidents))
+		if eligibleForActivation(p) {
 			p.Status = "active"
 		} else {
-			p.Status = "pending"
+			p.Status = "candidate"
 		}
 	}
-	s.patterns[p.PatternID] = p
+	s.patterns[p.ID] = p
 	return p, nil
 }

@@ -127,6 +127,22 @@ func TestHypothesisVerificationCausalPathAndContradiction(t *testing.T) {
 	}
 }
 
+func TestHypothesisVerificationCreditsCurrentKubernetesTopology(t *testing.T) {
+	engine := New(DefaultConfig())
+	evidence := []domain.Evidence{
+		{ID: "kube", Source: "kubernetes", Service: "payment-service", Resource: "payment-pod", RelevanceScore: .9, Summary: "payment pod memory leak"},
+		{ID: "metric", Source: "prometheus", Service: "payment-service", Resource: "payment-pod", RelevanceScore: .9, Summary: "payment pod memory leak"},
+	}
+	draft := domain.HypothesisDraft{ID: "memory", Category: "memory", Service: "payment-service", Resource: "payment-pod", PriorProbability: 1, SupportingEvidenceIDs: []string{"kube", "metric"}, ExpectedCausalPath: []string{"memory leak"}}
+	verified, err := engine.VerifyHypotheses([]domain.HypothesisDraft{draft}, evidence, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(verified) != 1 || verified[0].TopologyRelevance != 1 || verified[0].FinalScore < .80 {
+		t.Fatalf("current topology evidence was not credited: %+v", verified)
+	}
+}
+
 func TestLoadPatternSeed(t *testing.T) {
 	seed, err := LoadPatternSeed("../knowledge/causal_patterns.yaml")
 	if err != nil {

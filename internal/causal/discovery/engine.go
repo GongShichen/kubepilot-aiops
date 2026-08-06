@@ -166,12 +166,11 @@ func graphHasCausalPath(graph IncidentCausalGraph, path []string) bool {
 	return false
 }
 
-func graphEvidenceTypes(graph IncidentCausalGraph) map[NodeType]bool {
-	result := map[NodeType]bool{}
+func graphEvidenceTypes(graph IncidentCausalGraph) map[string]bool {
+	result := map[string]bool{}
 	for _, node := range graph.Nodes {
-		switch node.Type {
-		case NodeMetric, NodeLogPattern, NodeTracePattern, NodeKubernetesEvent:
-			result[node.Type] = true
+		if node.Type == NodeObservation && node.Source != "" && len(node.SourceEvidenceIDs) > 0 {
+			result[node.Source] = true
 		}
 	}
 	return result

@@ -118,25 +118,35 @@ func (m *Matcher) Expand(patternID string, observed []domain.Evidence) (PatternM
 func observedTokens(evidence []domain.Evidence) map[string]bool {
 	seen := map[string]bool{}
 	for _, item := range evidence {
+		observation := strings.ToLower(strings.Join([]string{item.Type, item.Kind, item.Summary, stringify(item.Content), stringify(item.Data)}, " "))
 		for _, value := range []string{item.Type, item.Kind, item.Summary, stringify(item.Content), stringify(item.Data)} {
 			for _, token := range tokenize(value) {
 				seen[token] = true
 			}
 		}
-		if item.Source == "kubernetes" {
+		if item.Source == "kubernetes" && containsAnomaly(observation) {
 			seen["kubernetes_event"] = true
 		}
 		if item.Source == "prometheus" || item.Source == "metric" {
 			seen["memory_metric"] = seen["memory_metric"] || strings.Contains(strings.ToLower(item.Summary), "memory")
 		}
-		if item.Source == "jaeger" || item.Source == "trace" {
+		if (item.Source == "jaeger" || item.Source == "trace") && containsAnomaly(observation) {
 			seen["trace_error"] = true
 		}
-		if item.Source == "loki" || item.Source == "log" {
+		if (item.Source == "loki" || item.Source == "log") && containsAnomaly(observation) {
 			seen["log_error"] = true
 		}
 	}
 	return seen
+}
+
+func containsAnomaly(value string) bool {
+	for _, marker := range []string{"error", "failed", "failure", "timeout", "refused", "unavailable", "oom", "unready", "saturated", "throttl", "latency"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func observedNode(observed map[string]bool, node string) bool {

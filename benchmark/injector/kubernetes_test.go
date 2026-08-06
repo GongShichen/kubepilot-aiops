@@ -8,11 +8,33 @@ import (
 	"time"
 
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
+
+func TestKubernetesPreflightUsesExactNamespaceAllowlist(t *testing.T) {
+	worker := "kubepilot-benchmark-worker-01"
+	client := fake.NewSimpleClientset(&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "payment-service", Namespace: worker}})
+	injector := &Kubernetes{client: client, allowed: map[string]bool{worker: true}}
+	allowed := scenarios.Scenario{Namespace: worker, Target: "payment-service"}
+	if err := injector.Preflight(context.Background(), allowed); err != nil {
+		t.Fatal(err)
+	}
+	for _, namespace := range []string{"kubepilot-benchmark", "kubepilot-benchmark-worker-02", "production"} {
+		blocked := allowed
+		blocked.Namespace = namespace
+		if err := injector.Preflight(context.Background(), blocked); err == nil {
+			t.Fatalf("namespace %q bypassed exact allowlist", namespace)
+		}
+	}
+}
 
 func TestLoadJobNameIsRFC1123(t *testing.T) {
 	got := loadJobName(scenarios.Scenario{ID: "memory-memory_leak-01"})
@@ -110,4 +132,51 @@ func TestApplyLowResourceLimitKeepsRequestsValid(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInjectRetriesDeploymentConflict(t *testing.T) {
+	const namespace = "kubepilot-benchmark"
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "gateway-service", Namespace: namespace},
+		Spec:       appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "service", Image: "kubepilot/demo-service:0.1.0"}}}}},
+	}
+	client := fake.NewSimpleClientset(deployment)
+	injector := &Kubernetes{
+		client:      client,
+		deployments: map[string]*appsv1.Deployment{},
+		services:    map[string]*corev1.Service{},
+		scales:      map[string]int32{},
+		restarts:    map[string]int32{},
+	}
+	updates := 0
+	client.PrependReactor("update", "deployments", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		updates++
+		if updates == 1 {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, deployment.Name, errors.New("concurrent update"))
+		}
+		return false, nil, nil
+	})
+	scenario := scenarios.Scenario{ID: "deployment-retry", Namespace: namespace, Target: deployment.Name, Injector: "deployment_patch", Variant: "revision_regression"}
+	if err := injector.Inject(context.Background(), scenario); err != nil {
+		t.Fatal(err)
+	}
+	if updates < 2 {
+		t.Fatalf("deployment updates=%d, want conflict retry", updates)
+	}
+	current, err := client.AppsV1().Deployments(namespace).Get(context.Background(), deployment.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEnv(current.Spec.Template.Spec.Containers[0].Env, "FAULT_MODE", scenario.Variant) {
+		t.Fatalf("fault mode was not applied after retry: %+v", current.Spec.Template.Spec.Containers[0].Env)
+	}
+}
+
+func hasEnv(values []corev1.EnvVar, name, want string) bool {
+	for _, value := range values {
+		if value.Name == name && value.Value == want {
+			return true
+		}
+	}
+	return false
 }

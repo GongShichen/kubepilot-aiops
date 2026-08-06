@@ -91,27 +91,30 @@ func workflowEventStatus(value string) (domain.IncidentStatus, bool) {
 type ManualIncident struct {
 	Severity        string    `json:"severity"`
 	Service         string    `json:"service"`
+	Cluster         string    `json:"cluster,omitempty"`
 	Namespace       string    `json:"namespace"`
 	Resource        string    `json:"resource"`
 	Summary         string    `json:"summary"`
 	DiagnosisMethod string    `json:"diagnosis_method,omitempty"`
+	CausalMode      string    `json:"causal_mode,omitempty"`
 	EvidenceStartAt time.Time `json:"evidence_start_at,omitempty"`
 }
 
 func (m *IncidentManager) Create(ctx context.Context, input ManualIncident) (*domain.Incident, error) {
 	now := time.Now().UTC()
-	if !domain.ValidDiagnosisMethod(input.DiagnosisMethod) {
+	method, valid := domain.NormalizeDiagnosisMethod(input.DiagnosisMethod)
+	if !valid {
 		return nil, fmt.Errorf("unsupported diagnosis method %q", input.DiagnosisMethod)
 	}
-	method := input.DiagnosisMethod
-	if method == "" {
-		method = domain.DiagnosisMethodKubePilot
+	causalMode, valid := domain.NormalizeCausalMode(input.CausalMode)
+	if !valid {
+		return nil, fmt.Errorf("unsupported causal mode %q", input.CausalMode)
 	}
 	evidenceStartAt := input.EvidenceStartAt
 	if evidenceStartAt.After(now) || evidenceStartAt.Before(now.Add(-15*time.Minute)) {
 		evidenceStartAt = time.Time{}
 	}
-	in := &domain.Incident{ID: ulid.Make().String(), Status: domain.StatusReceived, Severity: input.Severity, Service: input.Service, Namespace: input.Namespace, Resource: input.Resource, Summary: input.Summary, DiagnosisMethod: method, EvidenceStartAt: evidenceStartAt, CreatedAt: now, UpdatedAt: now}
+	in := &domain.Incident{ID: ulid.Make().String(), Status: domain.StatusReceived, Severity: input.Severity, Service: input.Service, Cluster: input.Cluster, Namespace: input.Namespace, Resource: input.Resource, Summary: input.Summary, DiagnosisMethod: method, CausalMode: causalMode, EvidenceStartAt: evidenceStartAt, CreatedAt: now, UpdatedAt: now}
 	if in.Severity == "" {
 		in.Severity = "warning"
 	}
@@ -119,7 +122,9 @@ func (m *IncidentManager) Create(ctx context.Context, input ManualIncident) (*do
 		return nil, err
 	}
 	m.audit(ctx, in.ID, "incident_created", "incident created", nil)
-	go m.diagnose(in.ID)
+	if m.Supervisor != nil {
+		go m.diagnose(in.ID)
+	}
 	return in, nil
 }
 func (m *IncidentManager) IngestAlert(ctx context.Context, a domain.Alert, service, namespace, severity, resource, summary string) (*domain.Incident, error) {
@@ -155,7 +160,7 @@ func (m *IncidentManager) IngestAlert(ctx context.Context, a domain.Alert, servi
 	if evidenceStartAt.IsZero() || evidenceStartAt.After(now) || evidenceStartAt.Before(now.Add(-15*time.Minute)) {
 		evidenceStartAt = time.Time{}
 	}
-	in := &domain.Incident{ID: ulid.Make().String(), Status: domain.StatusReceived, Severity: severity, Service: service, Namespace: namespace, Resource: resource, Summary: summary, EvidenceStartAt: evidenceStartAt, CreatedAt: now, UpdatedAt: now, Alerts: []domain.Alert{a}}
+	in := &domain.Incident{ID: ulid.Make().String(), Status: domain.StatusReceived, Severity: severity, Service: service, Namespace: namespace, Resource: resource, Summary: summary, DiagnosisMethod: domain.DiagnosisMethodKubePilot, CausalMode: domain.CausalModeFull, EvidenceStartAt: evidenceStartAt, CreatedAt: now, UpdatedAt: now, Alerts: []domain.Alert{a}}
 	if err := m.Store.Create(ctx, in); err != nil {
 		return nil, err
 	}
@@ -487,7 +492,7 @@ func (m *IncidentManager) ReconcileLegacyWorkflows(ctx context.Context) error {
 			continue
 		}
 		_ = domain.Transition(incident, domain.StatusNeedsAttention)
-		incident.DiagnosisError = "legacy or incomplete workflow requires explicit retry under constrained ReAct"
+		incident.DiagnosisError = "incomplete workflow from a different architecture requires explicit retry"
 		incident.UpdatedAt = time.Now().UTC()
 		if err = m.Store.Update(ctx, incident); err != nil {
 			return err

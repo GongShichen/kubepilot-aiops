@@ -39,7 +39,7 @@ type WorkflowState struct {
 	DiagnosisLedger    domain.DiagnosisLedger                 `json:"diagnosis_ledger"`
 }
 
-const WorkflowName = "eino-constrained-react"
+const WorkflowName = domain.WorkflowRuntimeName
 
 // The graph only contains the safety skeleton. Exploration happens inside the
 // bounded ADK ReAct runtime, so graph steps remain small and deterministic.

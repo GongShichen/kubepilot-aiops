@@ -15,11 +15,11 @@ type Validator struct {
 }
 
 func New(store knowledge.Reader) *Validator {
-	return &Validator{Store: store, MinimumIndependentSources: 2, MinimumSupport: 2}
+	return &Validator{Store: store, MinimumIndependentSources: 2, MinimumSupport: 3}
 }
 
 func (v *Validator) Validate(ctx context.Context, in *domain.Incident, proposal knowledge.Proposal) (knowledge.ValidationResult, error) {
-	result := knowledge.ValidationResult{PatternID: proposal.Pattern.PatternID, Valid: false}
+	result := knowledge.ValidationResult{PatternID: proposal.Pattern.ID, Valid: false}
 	if in == nil {
 		result.FailedChecks = []string{"incident_missing"}
 		result.Reason = "incident is required"
@@ -36,25 +36,25 @@ func (v *Validator) Validate(ctx context.Context, in *domain.Incident, proposal 
 		return result, nil
 	}
 	p := knowledge.Canonicalize(proposal.Pattern)
-	result.PatternID = p.PatternID
+	result.PatternID = p.ID
 	if strings.TrimSpace(p.Cause) == "" {
 		result.FailedChecks = append(result.FailedChecks, "cause_missing")
 	}
-	if len(p.CausalGraph.Nodes) < 2 || len(p.CausalGraph.Edges) < 1 {
+	if len(p.Nodes) < 2 || len(p.Edges) < 1 {
 		result.FailedChecks = append(result.FailedChecks, "causal_path_incomplete")
 	}
 	nodes := map[string]bool{}
-	for _, n := range p.CausalGraph.Nodes {
+	for _, n := range p.Nodes {
 		nodes[n.ID] = true
-		if n.Type != "cause" && n.Type != "symptom" && n.Type != "evidence" && n.Type != "action" {
+		if n.Type != "cause" && n.Type != "mechanism" && n.Type != "symptom" && n.Type != "observation" && n.Type != "action" && n.Type != "outcome" {
 			result.FailedChecks = append(result.FailedChecks, "node_type_invalid")
 		}
 	}
-	for _, e := range p.CausalGraph.Edges {
-		if !nodes[e.Source] || !nodes[e.Target] {
+	for _, e := range p.Edges {
+		if !nodes[e.From] || !nodes[e.To] {
 			result.FailedChecks = append(result.FailedChecks, "edge_target_missing")
 		}
-		if e.Relation != "causes" && e.Relation != "supports" && e.Relation != "contradicts" {
+		if e.Relation != "causes" && e.Relation != "manifests_as" && e.Relation != "supports" && e.Relation != "contradicts" && e.Relation != "mitigates" && e.Relation != "verifies" && e.Relation != "correlates" {
 			result.FailedChecks = append(result.FailedChecks, "edge_relation_invalid")
 		}
 	}
@@ -86,19 +86,22 @@ func (v *Validator) Validate(ctx context.Context, in *domain.Incident, proposal 
 		result.Reason = "proposal incident does not match current incident"
 		return result, nil
 	}
-	// Every evidence node must be backed by an actual evidence item. This
+	// Every observation node carrying evidence references must be backed by an
+	// actual server-owned evidence item. This
 	// prevents a model proposal from introducing unsupported causal nodes.
-	for _, node := range p.CausalGraph.Nodes {
-		if node.Type == "evidence" {
-			found := false
-			for _, item := range in.Evidence {
-				if strings.EqualFold(item.Type, node.Name) || strings.EqualFold(item.Kind, node.Name) || strings.EqualFold(item.Source, node.Name) {
-					found = true
-					break
+	for _, node := range p.Nodes {
+		if node.Type == "observation" && len(node.SourceEvidenceIDs) > 0 {
+			for _, evidenceID := range node.SourceEvidenceIDs {
+				found := false
+				for _, item := range in.Evidence {
+					if item.ID == evidenceID {
+						found = true
+						break
+					}
 				}
-			}
-			if !found {
-				result.FailedChecks = append(result.FailedChecks, "evidence_node_unobserved")
+				if !found {
+					result.FailedChecks = append(result.FailedChecks, "observation_node_unobserved")
+				}
 			}
 		}
 	}
@@ -131,7 +134,7 @@ func (v *Validator) Validate(ctx context.Context, in *domain.Incident, proposal 
 		}
 		result.SupportCount = 1
 		for _, old := range patterns {
-			if old.PatternID == p.PatternID {
+			if old.ID == p.ID {
 				result.SupportCount = len(old.SourceIncidents)
 				seenIncident := false
 				for _, id := range old.SourceIncidents {
@@ -152,11 +155,8 @@ func (v *Validator) Validate(ctx context.Context, in *domain.Incident, proposal 
 	} else {
 		result.SupportCount = 1
 	}
-	result.Confidence = .25*p.Confidence + .75*(1-approxExp(-float64(result.SupportCount)/4))
-	if result.Confidence > 1 {
-		result.Confidence = 1
-	}
-	result.Accepted = result.SupportCount >= max(v.MinimumSupport, 2) && result.Confidence >= .80
+	result.Confidence = p.Confidence
+	result.Accepted = result.SupportCount >= max(v.MinimumSupport, 3) && result.Confidence >= .80
 	result.Reason = "proposal validated; repeated resolved incidents are required before activation"
 	return result, nil
 }
@@ -173,14 +173,6 @@ func excluded(in *domain.Incident) bool {
 		}
 	}
 	return false
-}
-func approxExp(v float64) float64 {
-	term, sum := 1.0, 1.0
-	for i := 1; i < 18; i++ {
-		term *= v / float64(i)
-		sum += term
-	}
-	return sum
 }
 func max(a, b int) int {
 	if a > b {

@@ -79,6 +79,10 @@ func (s *learningStore) SetCausalPatternStatus(_ context.Context, id, status, op
 	s.patterns[id] = item
 	return &item, nil
 }
+func (s *learningStore) RollbackCausalPattern(_ context.Context, id string, _ int, _ string) (*domain.CausalPattern, error) {
+	item := s.patterns[id]
+	return &item, nil
+}
 func (s *learningStore) RecordCausalPatternEvent(_ context.Context, pattern, incident, event, reason string, _ map[string]any) error {
 	if event == "incident_support" {
 		if s.supports[pattern] == nil {
@@ -100,7 +104,7 @@ func eligibleLearnIncident(id, namespace string) *domain.Incident {
 	return &domain.Incident{ID: id, Namespace: namespace, Service: "order-service", Resource: "order-service", Status: domain.StatusResolved, Confidence: .95, RootCauseCategory: "network", RootCauseEvidenceIDs: []string{"e1", "e2"}, Evidence: []domain.Evidence{e1, e2}, Proposal: &domain.RecoveryProposal{ID: "p"}, ExecutionContext: &domain.ExecutionContext{ApprovalID: "a"}, Verification: &domain.Verification{Success: true, Checks: map[string]bool{"pod": true, "metric": true, "trace": true}, CompletedAt: time.Now()}, DiagnosisLedger: &domain.DiagnosisLedger{Drafts: []domain.HypothesisDraft{draft}, Verified: []domain.VerifiedHypothesis{verified}, SelectedHypothesisID: "h1"}}
 }
 
-func TestCausalLearningNeedsTwoIndependentIncidents(t *testing.T) {
+func TestCausalLearningNeedsThreeIndependentIncidents(t *testing.T) {
 	store := newLearningStore()
 	vectors := &learningVectors{}
 	learner := CausalLearner{Store: store, ConfidenceThreshold: .9, Namespaces: []string{"kubepilot-demo"}, Embedder: learningEmbedder{}, Vectors: vectors}
@@ -108,11 +112,19 @@ func TestCausalLearningNeedsTwoIndependentIncidents(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, pattern := range store.patterns {
-		if pattern.Status != "candidate" {
-			t.Fatalf("activated with one incident: %#v", pattern)
+		if pattern.Status != "validating" {
+			t.Fatalf("candidate did not enter validation after one incident: %#v", pattern)
 		}
 	}
 	if err := learner.Learn(context.Background(), eligibleLearnIncident("i2", "kubepilot-demo")); err != nil {
+		t.Fatal(err)
+	}
+	for _, pattern := range store.patterns {
+		if pattern.Status == "active" {
+			t.Fatalf("activated with only two incidents: %#v", pattern)
+		}
+	}
+	if err := learner.Learn(context.Background(), eligibleLearnIncident("i3", "kubepilot-demo")); err != nil {
 		t.Fatal(err)
 	}
 	active := false
@@ -120,9 +132,9 @@ func TestCausalLearningNeedsTwoIndependentIncidents(t *testing.T) {
 		active = active || pattern.Status == "active"
 	}
 	if !active {
-		t.Fatal("pattern was not activated after two independent incidents")
+		t.Fatal("pattern was not activated after three independent incidents")
 	}
-	if len(vectors.docs) != 2 || vectors.docs[0].Namespace != "kubepilot-demo" {
+	if len(vectors.docs) != 3 || vectors.docs[0].Namespace != "kubepilot-demo" {
 		t.Fatalf("resolved incidents were not added to semantic history: %#v", vectors.docs)
 	}
 }

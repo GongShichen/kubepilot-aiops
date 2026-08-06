@@ -39,6 +39,10 @@ type ResolvedIncidentReader interface {
 	ListResolvedIncidents(context.Context, []string, int) ([]*domain.Incident, error)
 }
 
+func (l CausalLearner) WriteVerifiedIncident(ctx context.Context, input domain.IncidentLearningInput) error {
+	return l.Learn(ctx, input.Incident)
+}
+
 func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
 	if l.Store == nil || in == nil {
 		return nil
@@ -107,6 +111,7 @@ func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
 			return fmt.Errorf("evolve topology knowledge: %w", err)
 		}
 	}
+	managedCausalKnowledge := l.CausalPatterns != nil
 	if l.CausalPatterns != nil {
 		proposal, ok := causalextractor.Propose(in)
 		if ok {
@@ -117,13 +122,13 @@ func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
 			}
 			if validation.Valid {
 				proposal.Pattern.Confidence = validation.Confidence
-				if validation.Accepted {
-					proposal.Pattern.Status = "active"
-				} else {
-					proposal.Pattern.Status = "pending"
+				proposal.Pattern.Status = "candidate"
+				merged, mergeErr := l.CausalPatterns.Merge(ctx, proposal.Pattern)
+				if mergeErr != nil {
+					return fmt.Errorf("evolve causal knowledge: %w", mergeErr)
 				}
-				if _, err := l.CausalPatterns.Merge(ctx, proposal.Pattern); err != nil {
-					return fmt.Errorf("evolve causal knowledge: %w", err)
+				if err := l.Store.RecordCausalPatternEvent(ctx, merged.ID, in.ID, "incident_support", "resolved incident met causal knowledge gates", map[string]any{"confidence": merged.Confidence, "support_count": merged.SupportCount, "status": merged.Status}); err != nil {
+					return err
 				}
 			}
 		}
@@ -154,11 +159,15 @@ func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
 		if in.Proposal != nil {
 			recovery = string(in.Proposal.Action)
 		}
-		if vectorErr := l.Vectors.Upsert(ctx, []retrieval.Document{{ID: in.ID, Namespace: in.Namespace, Service: in.Service, Category: in.RootCauseCategory, Template: in.Summary, RootCause: in.RootCause, Recovery: recovery, Vector: vectors[0]}}); vectorErr != nil {
+		if vectorErr := l.Vectors.Upsert(ctx, []retrieval.Document{{ID: in.ID, Cluster: in.Cluster, Namespace: in.Namespace, Service: in.Service, Category: in.RootCauseCategory, Template: in.Summary, RootCause: in.RootCause, Recovery: recovery, Vector: vectors[0]}}); vectorErr != nil {
 			return fmt.Errorf("index learned incident vector: %w", vectorErr)
 		}
 	}
+	if managedCausalKnowledge {
+		return nil
+	}
 	pattern := selectLearnedPattern(in, ledger, selected)
+	pattern.Status = "candidate"
 	if err := l.Store.SeedCausalPatterns(ctx, []domain.CausalPattern{pattern}); err != nil {
 		return err
 	}
@@ -169,12 +178,18 @@ func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
 	if err != nil {
 		return err
 	}
-	if count < 2 {
-		return nil
-	}
 	current, err := l.Store.GetCausalPattern(ctx, pattern.ID)
 	if err != nil {
 		return err
+	}
+	if count < 3 {
+		if current.Status == "candidate" {
+			if _, err = l.Store.SetCausalPatternStatus(ctx, pattern.ID, "validating", "causal-pattern-learner"); err != nil {
+				return err
+			}
+			return l.Store.RecordCausalPatternEvent(ctx, pattern.ID, in.ID, "validation_started", "first qualified production incident moved the candidate into validation", map[string]any{"support_count": count})
+		}
+		return nil
 	}
 	if current.Status != "active" {
 		_, err = l.Store.SetCausalPatternStatus(ctx, pattern.ID, "active", "causal-auto-learner")
@@ -205,7 +220,7 @@ func evaluationIncident(in *domain.Incident) bool {
 	return false
 }
 func featuresFromLedger(in *domain.Incident) domain.IncidentFeatures {
-	features := domain.IncidentFeatures{IncidentID: in.ID, Namespace: in.Namespace, Service: in.Service, Resource: in.Resource}
+	features := domain.IncidentFeatures{IncidentID: in.ID, Cluster: in.Cluster, Namespace: in.Namespace, Service: in.Service, Resource: in.Resource}
 	if in.DiagnosisLedger != nil && len(in.DiagnosisLedger.Candidates) > 0 {
 		features.TopologyServices = append(features.TopologyServices, in.DiagnosisLedger.Candidates[0].Features.TopologyServices...)
 	}
@@ -222,19 +237,31 @@ func featuresFromLedger(in *domain.Incident) domain.IncidentFeatures {
 func selectLearnedPattern(in *domain.Incident, ledger *domain.DiagnosisLedger, selected *domain.VerifiedHypothesis) domain.CausalPattern {
 	for _, pattern := range ledger.CausalPatterns {
 		if pattern.Category == selected.Draft.Category {
+			pattern.Cluster = in.Cluster
+			pattern.Namespace = in.Namespace
 			return pattern
 		}
 	}
-	normalized := strings.ToLower(selected.Draft.Category + "|" + strings.Join(selected.Draft.ExpectedCausalPath, "->"))
+	normalized := strings.ToLower(in.Cluster + "|" + in.Namespace + "|" + selected.Draft.Category + "|" + strings.Join(selected.Draft.ExpectedCausalPath, "->"))
 	sum := sha256.Sum256([]byte(normalized))
 	nodes := make([]domain.CausalNode, 0, len(selected.Draft.ExpectedCausalPath))
 	edges := make([]domain.CausalEdge, 0, len(selected.Draft.ExpectedCausalPath)-1)
 	for i, node := range selected.Draft.ExpectedCausalPath {
 		id := fmt.Sprintf("node_%d", i)
-		nodes = append(nodes, domain.CausalNode{ID: id, Type: "observed", Match: []string{node}})
+		typeName := "mechanism"
+		if i == 0 {
+			typeName = "cause"
+		} else if i == len(selected.Draft.ExpectedCausalPath)-1 {
+			typeName = "symptom"
+		}
+		nodes = append(nodes, domain.CausalNode{ID: id, Type: typeName, Name: node, Match: []string{node}, Confidence: in.Confidence, SourceEvidenceIDs: append([]string(nil), selected.VerifiedEvidenceIDs...)})
 		if i > 0 {
-			edges = append(edges, domain.CausalEdge{From: fmt.Sprintf("node_%d", i-1), To: id})
+			relation := "causes"
+			if i == len(selected.Draft.ExpectedCausalPath)-1 {
+				relation = "manifests_as"
+			}
+			edges = append(edges, domain.CausalEdge{From: fmt.Sprintf("node_%d", i-1), To: id, Relation: relation, Confidence: in.Confidence})
 		}
 	}
-	return domain.CausalPattern{ID: "learned-" + hex.EncodeToString(sum[:6]), Category: selected.Draft.Category, Cause: selected.Draft.Cause, Nodes: nodes, Edges: edges, Source: "learned", Confidence: in.Confidence, Status: "candidate", Version: 1}
+	return domain.CausalPattern{ID: "learned-" + hex.EncodeToString(sum[:6]), Category: selected.Draft.Category, Cause: selected.Draft.Cause, Nodes: nodes, Edges: edges, Cluster: in.Cluster, Namespace: in.Namespace, Source: "learned", Confidence: in.Confidence, Status: "candidate", Version: 1}
 }

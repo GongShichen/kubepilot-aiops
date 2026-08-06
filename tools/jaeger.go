@@ -30,9 +30,17 @@ type TraceSummary struct {
 }
 
 func (c *JaegerClient) Query(ctx context.Context, service string, start, end time.Time, limit int) ([]TraceSummary, error) {
+	return c.QueryNamespace(ctx, service, "", start, end, limit)
+}
+
+func (c *JaegerClient) QueryNamespace(ctx context.Context, service, namespace string, start, end time.Time, limit int) ([]TraceSummary, error) {
 	u, _ := url.Parse(c.base + "/api/traces")
 	q := u.Query()
 	q.Set("service", service)
+	if namespace != "" {
+		tags, _ := json.Marshal(map[string]string{"k8s.namespace.name": namespace})
+		q.Set("tags", string(tags))
+	}
 	q.Set("start", strconv.FormatInt(start.UnixMicro(), 10))
 	q.Set("end", strconv.FormatInt(end.UnixMicro(), 10))
 	q.Set("limit", strconv.Itoa(limit))

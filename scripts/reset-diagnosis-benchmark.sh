@@ -4,6 +4,20 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_dir"
 compose=(docker compose -f deploy/docker/docker-compose.yml)
+worker_namespaces=${BENCHMARK_WORKER_NAMESPACES:-kubepilot-benchmark-worker-01,kubepilot-benchmark-worker-02,kubepilot-benchmark-worker-03,kubepilot-benchmark-worker-04}
+
+# Remove only namespaces created and labeled by the benchmark provisioner. A
+# matching name without the label is treated as user-owned and aborts cleanup.
+for namespace in ${worker_namespaces//,/ }; do
+  if kubectl get namespace "$namespace" >/dev/null 2>&1; then
+    worker_label=$(kubectl get namespace "$namespace" -o jsonpath='{.metadata.labels.kubepilot\.io/benchmark-worker}')
+    if [[ "$worker_label" != "true" ]]; then
+      echo "refusing to delete unlabeled namespace $namespace" >&2
+      exit 1
+    fi
+    kubectl delete namespace "$namespace" --wait=true >/dev/null
+  fi
+done
 
 # Restore Kubernetes objects first; these selectors are dedicated to the
 # benchmark namespace and cannot match user workloads outside it.
@@ -27,7 +41,7 @@ done
 # incidents, and the history corpus are intentionally preserved.
 "${compose[@]}" exec -T agent-redis redis-cli FLUSHDB >/dev/null
 "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U kubepilot -d kubepilot <<'SQL' >/dev/null
-DELETE FROM incidents WHERE namespace = 'kubepilot-benchmark';
+DELETE FROM incidents WHERE namespace = 'kubepilot-benchmark' OR namespace LIKE 'kubepilot-benchmark-worker-%';
 SQL
 
 # Rebuild the Agent image before every fresh benchmark baseline. Restarting an

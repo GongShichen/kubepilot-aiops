@@ -2,6 +2,7 @@ package safety
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
@@ -94,5 +95,43 @@ func TestTokenBudgetIsScopedPerAgent(t *testing.T) {
 	}
 	if got := controller.State().IncidentTokens; got != 200 {
 		t.Fatalf("aggregate token telemetry=%d, want 200", got)
+	}
+}
+
+func TestIterationCorrectionAndTokenAccountingBoundaries(t *testing.T) {
+	controller := NewBudgetController(nil, map[string]domain.AgentBudget{"diagnosis": {MaxIterations: 1, MaxToolUses: 1, MaxTokens: 10, MaxCorrections: 1}}, map[string]int{"inspect": 2})
+	if err := controller.AddIteration("diagnosis"); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.AddIteration("diagnosis"); err == nil || !strings.Contains(err.Error(), "iterations") {
+		t.Fatalf("iteration limit error=%v", err)
+	}
+	if err := controller.AddTokens("diagnosis", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.AddTokens("diagnosis", 1); err != nil {
+		t.Fatalf("cumulative Agent output incorrectly triggered a total cap: %v", err)
+	}
+	if err := controller.AddTokens("diagnosis", 11); err != nil {
+		t.Fatalf("provider-reported output must remain telemetry after dispatch: %v", err)
+	}
+	if usage := controller.State().Usage["diagnosis"]; usage.Tokens != 22 {
+		t.Fatalf("cumulative output telemetry mismatch after enforcement: %+v", usage)
+	}
+	if _, err := controller.UseCorrection("diagnosis"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.UseCorrection("diagnosis"); err == nil || !strings.Contains(err.Error(), "corrections") {
+		t.Fatalf("correction limit error=%v", err)
+	}
+	known := controller.KnownTools()
+	if len(known) != 1 || known[0] != "inspect" {
+		t.Fatalf("known tools=%v", known)
+	}
+	if err := controller.AddIteration("unknown"); err == nil {
+		t.Fatal("unknown agent received an iteration budget")
+	}
+	if _, err := controller.ReserveTool("unknown", "inspect"); err == nil {
+		t.Fatal("unknown agent received a tool budget")
 	}
 }

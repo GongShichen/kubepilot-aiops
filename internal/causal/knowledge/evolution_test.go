@@ -44,6 +44,21 @@ func TestCausalProposalRequiresValidationBeforeMerge(t *testing.T) {
 	}
 }
 
+func TestPatternIdentityExcludesIncidentSpecificEvidence(t *testing.T) {
+	base := knowledge.CausalPattern{Cause: "memory leak", Cluster: "cluster-a", Namespace: "team-a", Nodes: []knowledge.CausalNode{{ID: "cause", Type: "cause", Name: "memory leak", Confidence: .9}, {ID: "observation", Type: "observation", Name: "memory growth", Source: "prometheus", SourceEvidenceIDs: []string{"incident-a-metric"}}}, Edges: []knowledge.CausalEdge{{From: "observation", To: "cause", Relation: "supports", Confidence: .9}}, SupportingEvidence: []knowledge.EvidencePattern{{Source: "prometheus", Type: "metric", Tokens: []string{"first", "wording"}}}, SourceIncidents: []string{"incident-a"}, Confidence: .9}
+	variant := base
+	variant.Nodes = append([]knowledge.CausalNode(nil), base.Nodes...)
+	variant.Nodes[1].SourceEvidenceIDs = []string{"incident-b-metric"}
+	variant.SupportingEvidence = []knowledge.EvidencePattern{{Source: "prometheus", Type: "metric", Tokens: []string{"different", "wording"}}}
+	variant.SourceIncidents = []string{"incident-b"}
+	if knowledge.PatternID(base) != knowledge.PatternID(variant) {
+		t.Fatal("incident-specific evidence changed the normalized causal pattern identity")
+	}
+	if len(base.Nodes[1].SourceEvidenceIDs) != 1 || base.Nodes[1].SourceEvidenceIDs[0] != "incident-a-metric" || base.Nodes[0].Confidence != .9 {
+		t.Fatalf("identity calculation mutated the audited source graph: %+v", base.Nodes)
+	}
+}
+
 func TestCausalConfidenceEvolvesWithIndependentIncidents(t *testing.T) {
 	store := knowledge.NewMemoryStore()
 	v := validator.New(store)
@@ -71,6 +86,31 @@ func TestCausalConfidenceEvolvesWithIndependentIncidents(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Confidence < .8 {
 		t.Fatalf("repeated incidents did not activate causal pattern: %+v", items)
+	}
+}
+
+func TestCausalLifecycleActivatesAtThreeQualifiedIncidents(t *testing.T) {
+	store := knowledge.NewMemoryStore()
+	v := validator.New(store)
+	expected := []string{"candidate", "validating", "active"}
+	for index, status := range expected {
+		in := resolved("lifecycle-"+strconv.Itoa(index+1), "kubepilot-demo")
+		proposal, ok := extractor.Propose(in)
+		if !ok {
+			t.Fatal("proposal was not extracted")
+		}
+		result, err := v.Validate(context.Background(), in, proposal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proposal.Pattern.Confidence = result.Confidence
+		merged, err := store.Merge(context.Background(), proposal.Pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if merged.Status != status || merged.SupportCount != index+1 || merged.Version != index+1 {
+			t.Fatalf("support=%d status=%s, want %s: %+v", index+1, merged.Status, status, merged)
+		}
 	}
 }
 

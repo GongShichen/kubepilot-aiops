@@ -8,14 +8,14 @@ import (
 )
 
 func TestAutonomousManifestLoadsAndHashes(t *testing.T) {
-	m, h, err := Load("../manifests/autonomous.yaml")
+	m, h, err := Load("../manifests/default.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m.Version == "" || h == "" {
 		t.Fatalf("invalid manifest: %+v %q", m, h)
 	}
-	if _, err = os.Stat(filepath.Join(".", "autonomous.yaml")); err != nil {
+	if _, err = os.Stat(filepath.Join(".", "default.yaml")); err != nil {
 		t.Fatal(err)
 	}
 }

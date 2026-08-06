@@ -21,12 +21,16 @@ func TestEinoOpenAICompatibleStreamingToolCall(t *testing.T) {
 		if r.URL.Path != "/custom/chat" || r.Header.Get("Authorization") != "Bearer secret" {
 			t.Errorf("path=%s authorization=%q", r.URL.Path, r.Header.Get("Authorization"))
 		}
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"reasoning_effort":"low"`) {
+			t.Errorf("reasoning effort was not sent: %s", body)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"probe\",\"arguments\":\"{\\\"nonce\\\":\"}}]}}]}\n\n")
 		_, _ = io.WriteString(w, "data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ok\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
 	}))
 	defer server.Close()
-	chat, err := NewEinoChatModel(context.Background(), config.ChatConfig{Protocol: "openai-compatible", BaseURL: server.URL, APIPath: "/custom/chat", APIKey: "secret", Model: "test", Timeout: time.Second, MaxTokens: 64})
+	chat, err := NewEinoChatModel(context.Background(), config.ChatConfig{Protocol: "openai-compatible", BaseURL: server.URL, APIPath: "/custom/chat", APIKey: "secret", Model: "test", Timeout: time.Second, MaxTokens: 64, ReasoningEffort: "low"})
 	if err != nil {
 		t.Fatal(err)
 	}

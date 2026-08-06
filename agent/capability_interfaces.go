@@ -18,3 +18,9 @@ type HistoricalCandidateRetriever interface {
 type CausalPatternReader interface {
 	ListCausalPatterns(context.Context, string) ([]domain.CausalPattern, error)
 }
+
+type MemoryService interface {
+	Read(context.Context, domain.MemoryQuery) ([]domain.MemoryResult, error)
+	WriteVerifiedIncident(context.Context, domain.IncidentLearningInput) error
+	RecordAccess(context.Context, domain.MemoryAccessEvent) error
+}

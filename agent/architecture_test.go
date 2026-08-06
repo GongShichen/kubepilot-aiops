@@ -59,7 +59,14 @@ func TestAgentProductionCodeHasNoManualEinoToolCallOrBenchmarkDependency(t *test
 func TestSkillsArePinnedAndDoNotEncodeHiddenWorkflow(t *testing.T) {
 	cases := []struct{ agent, path string }{
 		{SupervisorAgentName, "internal/agent/skills/supervisor/SKILL.md"},
+		{PlannerAgentName, "internal/agent/skills/planner/SKILL.md"},
+		{MetricWorkerName, "internal/agent/skills/metric-worker/SKILL.md"},
+		{LogWorkerName, "internal/agent/skills/log-worker/SKILL.md"},
+		{TraceWorkerName, "internal/agent/skills/trace-worker/SKILL.md"},
+		{TopologyWorkerName, "internal/agent/skills/topology-worker/SKILL.md"},
 		{DiagnosisAgentName, "internal/agent/skills/diagnosis/SKILL.md"},
+		{AlternativeAgentName, "internal/agent/skills/alternative/SKILL.md"},
+		{CriticAgentName, "internal/agent/skills/critic/SKILL.md"},
 		{RecoveryAgentName, "internal/agent/skills/recovery/SKILL.md"},
 	}
 	hashes := map[string]bool{}

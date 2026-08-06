@@ -10,12 +10,59 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cloudwego/eino/schema"
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
 )
+
+func TestHotClientEnforcesGlobalModelConcurrency(t *testing.T) {
+	var active atomic.Int32
+	var maximum atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "kubepilot_capability_probe") && strings.Contains(string(body), `"stream":true`) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"id\":\"probe\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"probe\",\"type\":\"function\",\"function\":{\"name\":\"kubepilot_capability_probe\",\"arguments\":\"{\\\"nonce\\\":\\\"kubepilot-probe\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		current := active.Add(1)
+		for {
+			observed := maximum.Load()
+			if current <= observed || maximum.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		time.Sleep(30 * time.Millisecond)
+		active.Add(-1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), ".env")
+	writeChatEnv(t, path, server.URL, "limited-model")
+	hot := NewHotClient(config.ChatConfig{Concurrency: 2}, path, time.Millisecond, time.Millisecond)
+	if err := hot.Probe(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var wait sync.WaitGroup
+	for index := 0; index < 8; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if _, err := hot.Generate(context.Background(), []*schema.Message{schema.UserMessage("test")}); err != nil {
+				t.Errorf("Generate: %v", err)
+			}
+		}()
+	}
+	wait.Wait()
+	if maximum.Load() != 2 {
+		t.Fatalf("maximum model concurrency=%d, want 2", maximum.Load())
+	}
+}
 
 func TestHotClientSwitchesAtomicallyAndPinsWorkflowSnapshot(t *testing.T) {
 	first := modelServer(t, "first")

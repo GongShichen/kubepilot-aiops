@@ -1,7 +1,9 @@
-# KubePilot reproducibility manifest.
+# KubePilot reproducibility and evaluation contract.
 # Runtime values such as code_commit, model names and hashes are resolved into
 # artifacts/<run-id>/manifest.json at benchmark start. This file is hashed and
 # recorded so a run cannot be resumed after the benchmark contract changes.
+version: autonomous-sre
+dataset_version: incident-dataset
 code_commit: "${GIT_COMMIT}"
 model:
   protocol: "${CHAT_PROTOCOL}"
@@ -10,37 +12,40 @@ model:
 embedding_model: "${EMBEDDING_MODEL}"
 reranker:
   protocol: "${RERANKER_PROTOCOL}"
-  model: "${RERANKER_MODEL}"
+  name: "${RERANKER_MODEL}"
   config_hash: "${RERANKER_CONFIG_HASH}"
 skill_hash: "${SKILL_SNAPSHOT_HASH}"
 budget_config:
-  supervisor:
+  # max_tokens is per Agent response; input and cumulative tokens are telemetry.
+  supervisor_agent:
     max_iterations: 10
-    max_tool_uses: 8
-    max_tool_cost: 24
-    max_tokens: 12000
+    max_tool_uses: 50
+    max_tokens: 8192
     max_corrections: 3
-  diagnosis:
-    max_iterations: 12
-    max_tool_uses: 15
-    max_tool_cost: 32
-    max_tokens: 30000
+  planner_agent: &diagnosis_agent_budget
+    max_iterations: 18
+    max_tool_uses: 50
+    max_tokens: 8192
     max_corrections: 3
-  recovery:
+  metric_worker: *diagnosis_agent_budget
+  log_worker: *diagnosis_agent_budget
+  trace_worker: *diagnosis_agent_budget
+  topology_worker: *diagnosis_agent_budget
+  diagnosis_agent: *diagnosis_agent_budget
+  alternative_agent: *diagnosis_agent_budget
+  critic_agent: *diagnosis_agent_budget
+  recovery_agent:
     max_iterations: 10
-    max_tool_uses: 10
-    max_tool_cost: 16
-    max_tokens: 16000
+    max_tool_uses: 50
+    max_tokens: 8192
     max_corrections: 2
-  incident:
-    max_tool_uses: 30
-    max_tool_cost: 72
-    max_tokens: 58000
-retrieval_weights:
-  semantic: 1.0
-  lexical: 1.0
-  topology: 0.8
-  rrf_k: 60
+retrieval_config:
+  semantic_top_k: 50
+  lexical_top_k: 50
+  topology_rerank_top_k: 20
+  causal_rerank_top_k: 20
+  final_top_k: 5
+  neural_reranker: true
 ranking_weights:
   evidence:
     deterministic: 0.70
@@ -48,3 +53,33 @@ ranking_weights:
   incident:
     deterministic: 0.45
     neural: 0.55
+evaluation:
+  strategies: [direct, rag, react, kubepilot]
+  causal_modes: [no-causal, static-causal, learned-causal, full]
+  split: test
+  seeds: [20260803, 20260804, 20260805]
+  repetitions: 1
+  parallelism: 4
+  model_concurrency: 4
+  shard_policy: case-seed-repetition-hash
+  worker_namespaces:
+    - kubepilot-benchmark-worker-01
+    - kubepilot-benchmark-worker-02
+    - kubepilot-benchmark-worker-03
+    - kubepilot-benchmark-worker-04
+  infrastructure_failure_limit: 0.02
+datasets:
+  diagnosis:
+    path: benchmark/incidents.yaml
+    size: 120
+    category_counts: {cpu: 20, memory: 20, database: 20, network: 20, deployment: 20, dependency: 20}
+    ground_truth: evaluator_only
+  log_retrieval:
+    path: benchmark/datasets/logs.yaml
+    size: 500000
+    ground_truth: template_ids
+  incident_retrieval:
+    path: benchmark/datasets/incidents/structured.yaml
+    size: 500
+    category_counts: {memory: 100, database: 100, network: 100, deployment: 100, cpu: 100}
+    ground_truth: related_incidents

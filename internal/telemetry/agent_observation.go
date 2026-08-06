@@ -10,6 +10,7 @@ import (
 // Incident's Agent runtime behavior. Benchmark code consumes this projection;
 // it does not reconstruct Agent semantics from persistence internals.
 type AgentObservation struct {
+	Architecture            string
 	Iterations              int
 	ToolUses                int
 	ToolCost                int
@@ -25,6 +26,14 @@ type AgentObservation struct {
 	ConfidenceUpdates       int
 	AttributedEvidence      int
 	TopologyCandidates      int
+	PlannerTasks            int
+	WorkerFindings          int
+	DebateRounds            int
+	MemoryReads             int
+	InputTokens             int
+	OutputTokens            int
+	ReasoningTokens         int
+	EstimatedModelCost      float64
 }
 
 // ObserveAgent projects auditable runtime state without reading evaluator
@@ -41,6 +50,24 @@ func ObserveAgent(incident *domain.Incident) AgentObservation {
 		for _, usage := range incident.AgentBudget.Usage {
 			observation.Iterations += usage.Iterations
 			observation.Corrections += usage.Corrections
+		}
+	}
+	if incident.Investigation != nil {
+		observation.Architecture = incident.Investigation.Architecture
+		observation.PlannerTasks = len(incident.Investigation.Plan.Tasks)
+		observation.WorkerFindings = len(incident.Investigation.Findings)
+		observation.DebateRounds = len(incident.Investigation.Debate)
+		observation.MemoryReads = len(incident.Investigation.MemoryReads)
+		// Hierarchical workers call their scoped collectors through the server,
+		// not through the legacy Diagnosis ReAct decision ledger. Count each
+		// completed worker query so evidence-efficiency ablations do not collapse
+		// to zero for the hierarchical strategy.
+		observation.EvidenceQueries += len(incident.Investigation.Findings)
+		for _, usage := range incident.Investigation.ModelUsage {
+			observation.InputTokens += usage.InputTokens
+			observation.OutputTokens += usage.OutputTokens
+			observation.ReasoningTokens += usage.ReasoningTokens
+			observation.EstimatedModelCost += usage.EstimatedCost
 		}
 	}
 	ledger := incident.DiagnosisLedger

@@ -122,10 +122,10 @@ func causalPaths(graph IncidentCausalGraph, maxLength int) [][]string {
 	}
 	adj := map[string][]string{}
 	for _, edge := range graph.Edges {
-		if edge.Relation != "causes" || names[edge.Source] == "" || names[edge.Target] == "" {
+		if (edge.Relation != "causes" && edge.Relation != "manifests_as") || names[edge.From] == "" || names[edge.To] == "" {
 			continue
 		}
-		adj[edge.Source] = append(adj[edge.Source], edge.Target)
+		adj[edge.From] = append(adj[edge.From], edge.To)
 	}
 	for key := range adj {
 		sort.Strings(adj[key])
@@ -176,11 +176,11 @@ func pathEvidenceConfidence(graph IncidentCausalGraph, path []string) float64 {
 		names[node.ID] = normalizeName(node.Name)
 	}
 	for _, edge := range graph.Edges {
-		if edge.Relation != "causes" {
+		if edge.Relation != "causes" && edge.Relation != "manifests_as" {
 			continue
 		}
 		for index := 0; index+1 < len(path); index++ {
-			if names[edge.Source] == path[index] && names[edge.Target] == path[index+1] {
+			if names[edge.From] == path[index] && names[edge.To] == path[index+1] {
 				confidence = append(confidence, clamp(edge.Confidence))
 				break
 			}

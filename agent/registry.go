@@ -17,23 +17,46 @@ import (
 )
 
 const (
-	SupervisorAgentName = "supervisor_agent"
-	DiagnosisAgentName  = "diagnosis_agent"
-	RecoveryAgentName   = "recovery_agent"
+	SupervisorAgentName  = "supervisor_agent"
+	PlannerAgentName     = "planner_agent"
+	MetricWorkerName     = "metric_worker"
+	LogWorkerName        = "log_worker"
+	TraceWorkerName      = "trace_worker"
+	TopologyWorkerName   = "topology_worker"
+	DiagnosisAgentName   = "diagnosis_agent"
+	AlternativeAgentName = "alternative_agent"
+	CriticAgentName      = "critic_agent"
+	RecoveryAgentName    = "recovery_agent"
 )
 
-// AgentRegistry is the single registration point for KubePilot's three ADK agents.
+// AgentRegistry is the single registration point for KubePilot's bounded roles.
 type AgentRegistry struct {
-	chat             model.BaseChatModel
-	skills           map[string]agentSkill
-	limits           map[string]domain.AgentBudget
-	toolCosts        map[string]int
-	requestMaxTokens int
-	modelMaxRetries  int
+	chat                     model.BaseChatModel
+	skills                   map[string]agentSkill
+	limits                   map[string]domain.AgentBudget
+	toolCosts                map[string]int
+	requestMaxTokens         int
+	modelMaxRetries          int
+	inputPricePerMillion     float64
+	outputPricePerMillion    float64
+	reasoningPricePerMillion float64
 }
 
 func (r *AgentRegistry) Names() []string {
-	return []string{SupervisorAgentName, DiagnosisAgentName, RecoveryAgentName}
+	return []string{SupervisorAgentName, PlannerAgentName, MetricWorkerName, LogWorkerName, TraceWorkerName, TopologyWorkerName, DiagnosisAgentName, AlternativeAgentName, CriticAgentName, RecoveryAgentName}
+}
+
+func (r *AgentRegistry) ProceduralMemories() []domain.MemoryResult {
+	names := r.Names()
+	results := make([]domain.MemoryResult, 0, len(names))
+	for _, name := range names {
+		skill, ok := r.skills[name]
+		if !ok {
+			continue
+		}
+		results = append(results, domain.MemoryResult{ID: name, Kind: domain.MemoryProcedural, Summary: skill.FrontMatter.Description, Score: 1, Version: skill.Hash, Provenance: map[string]any{"skill_hash": skill.Hash}})
+	}
+	return results
 }
 
 type agentCallbacksKey struct{}
@@ -90,8 +113,6 @@ func (r *AgentRegistry) CorrelateWithCandidateCapability(ctx context.Context, al
 	}
 	payload, _ := json.Marshal(map[string]any{"alert": map[string]any{"name": alert.Name, "starts_at": alert.StartsAt, "labels": alert.Labels}, "service": service, "namespace": namespace, "resource": resource, "candidate_query_constraints": map[string]any{"namespace": namespace, "limit": 100}})
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agentInstance, EnableStreaming: true})
-	modelCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
 	options := make([]adk.AgentRunOption, 0, 1)
 	if r.requestMaxTokens > 0 {
 		options = append(options, adk.WithChatModelOptions([]model.Option{model.WithMaxTokens(r.requestMaxTokens)}))
@@ -99,7 +120,9 @@ func (r *AgentRegistry) CorrelateWithCandidateCapability(ctx context.Context, al
 	if handlers, ok := ctx.Value(agentCallbacksKey{}).([]callbacks.Handler); ok && len(handlers) > 0 {
 		options = append(options, adk.WithCallbacks(handlers...))
 	}
-	iter := runner.Query(modelCtx, string(payload), options...)
+	// The Agent run has no role-level wall-clock deadline. Individual model
+	// requests and capabilities retain their own transport/operation timeouts.
+	iter := runner.Query(ctx, string(payload), options...)
 	var raw string
 	for {
 		event, ok := iter.Next()

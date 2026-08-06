@@ -43,3 +43,38 @@ func TestHypothesisTransitionServiceRejectsStaleAndRefutedReuse(t *testing.T) {
 		t.Fatalf("unexpected lifecycle status: %s", got)
 	}
 }
+
+func TestTransitionVerifiedIsAtomicAndCompatibilityHelperIsBounded(t *testing.T) {
+	ledger := &domain.DiagnosisLedger{}
+	items := []domain.VerifiedHypothesis{{Draft: domain.HypothesisDraft{ID: "h1"}, Status: domain.HypothesisSupported}}
+	service := NewHypothesisTransitionService(ledger, items)
+	if err := service.TransitionVerified(&items, "h1", domain.HypothesisSupported, domain.HypothesisAccepted, "accepted", "call", []string{"e1"}); err != nil {
+		t.Fatal(err)
+	}
+	if items[0].Status != domain.HypothesisAccepted || service.Status("h1") != domain.HypothesisAccepted || len(ledger.HypothesisTransitions) != 1 {
+		t.Fatalf("verified transition was not materialized: items=%+v ledger=%+v", items, ledger)
+	}
+	before := len(ledger.HypothesisTransitions)
+	if err := service.TransitionVerified(&items, "missing", "", domain.HypothesisCreated, "invalid", "", nil); err == nil {
+		t.Fatal("missing materialized hypothesis was accepted")
+	}
+	if len(ledger.HypothesisTransitions) != before || service.Status("missing") != "" {
+		t.Fatal("failed verified transition changed lifecycle state")
+	}
+	compatibility := &domain.DiagnosisLedger{}
+	if err := TransitionHypothesis(compatibility, "legacy", "", domain.HypothesisCreated, "created", "", nil); err != nil || len(compatibility.HypothesisTransitions) != 1 {
+		t.Fatalf("compatibility transition failed: %v %+v", err, compatibility)
+	}
+	if err := TransitionHypothesis(nil, "legacy", "", domain.HypothesisCreated, "created", "", nil); err == nil {
+		t.Fatal("nil compatibility ledger was accepted")
+	}
+}
+
+func TestConfidenceIsClampedToPolicyRange(t *testing.T) {
+	if score := Confidence(domain.VerifiedHypothesis{Draft: domain.HypothesisDraft{PriorProbability: 20}, SupportingScore: 20, CausalPathCoverage: 20, HistoricalRelevance: 20, TopologyRelevance: 20}, 0); score != 1 {
+		t.Fatalf("upper confidence clamp=%f", score)
+	}
+	if score := Confidence(domain.VerifiedHypothesis{ContradictionScore: 20}, 0); score != 0 {
+		t.Fatalf("lower confidence clamp=%f", score)
+	}
+}

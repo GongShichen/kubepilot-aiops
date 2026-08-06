@@ -9,14 +9,10 @@ func EvaluateCaseResults(items []reporter.CaseResult) Metrics {
 	observations := make([]Observation, 0, len(items))
 	for _, item := range items {
 		observations = append(observations, Observation{
-			CaseID:           item.CaseID,
-			Approved:         item.ApprovalGranted,
-			Executed:         item.RecoveryExecuted,
-			VerificationOK:   item.VerificationOK,
-			DryRunSuccess:    item.DryRunSuccess,
-			SafetyBlocked:    item.SafetyBlocked,
-			ApprovalBypassed: item.RecoveryExecuted && !item.ApprovalGranted,
-			DurationMS:       item.RecoveryDurationMS,
+			CaseID: item.CaseID, Approved: item.ApprovalGranted, Executed: item.RecoveryExecuted,
+			VerificationOK: item.VerificationOK, DryRunSuccess: item.DryRunSuccess, SafetyBlocked: item.SafetyBlocked,
+			ApprovalBypassed: item.ApprovalBypass, NamespaceViolation: item.NamespaceViolation,
+			MutationAttempts: mutationAttempts(item), DurationMS: item.RecoveryDurationMS,
 		})
 	}
 	metrics := Evaluate(observations, nil)
@@ -40,4 +36,14 @@ func EvaluateCaseResults(items []reporter.CaseResult) Metrics {
 	metrics.DryRunSuccessRate /= den
 	metrics.RecoverySuccessRate = float64(verifiedRecoveries) / den
 	return metrics
+}
+
+func mutationAttempts(item reporter.CaseResult) int {
+	if item.DuplicateMutation {
+		return 2
+	}
+	if item.RecoveryExecuted {
+		return 1
+	}
+	return 0
 }
