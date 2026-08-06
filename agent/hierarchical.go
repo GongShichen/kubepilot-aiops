@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	openmodel "github.com/cloudwego/eino-ext/components/model/openai"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/safety"
@@ -428,7 +430,18 @@ func (r *AgentRegistry) generateRole(ctx context.Context, agentName, instruction
 		return nil, fmt.Errorf("skill for %s is not registered", agentName)
 	}
 	system := skill.Content + "\n\nRuntime instruction: " + instruction + "\nKeep the complete generated response concise and finish the required JSON well within the configured output-token limit."
-	return r.chat.Generate(ctx, []*schema.Message{schema.SystemMessage(system), schema.UserMessage(payload)}, r.modelOptions()...)
+	return r.chat.Generate(ctx, []*schema.Message{schema.SystemMessage(system), schema.UserMessage(payload)}, r.structuredModelOptions()...)
+}
+
+func (r *AgentRegistry) structuredModelOptions() []model.Option {
+	options := append([]model.Option(nil), r.modelOptions()...)
+	// Hierarchical roles return server-validated protocol objects rather than
+	// free-form prose. Request JSON mode only for these calls: ReAct continues
+	// to use normal tool calling, and hidden reasoning is never parsed or
+	// retained as a structured result.
+	return append(options, openmodel.WithExtraFields(map[string]any{
+		"response_format": map[string]string{"type": "json_object"},
+	}))
 }
 
 func structuredOutputError(agentName string, message *schema.Message, err error) error {
