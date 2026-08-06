@@ -12,6 +12,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scorer"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	"github.com/kubepilot-aiops/kubepilot/internal/evaluation"
 	"github.com/kubepilot-aiops/kubepilot/internal/telemetry"
 )
 
@@ -45,6 +46,7 @@ type Runner struct {
 	CausalMode      string
 	WorkerID        string
 	Gate            *ConcurrencyGate
+	SemanticJudge   evaluation.RootCauseJudge
 }
 
 const cleanupTimeout = 2 * time.Minute
@@ -192,6 +194,19 @@ func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter
 		return res
 	}
 	res.Score = scorer.Incident(s, in)
+	if r.SemanticJudge != nil {
+		verdict, judgeErr := r.SemanticJudge.Judge(ctx,
+			evaluation.RootCause{Category: s.GroundTruth.RootCauseCategory, Variant: s.Variant, Service: s.GroundTruth.Service, Resource: s.GroundTruth.Resource},
+			evaluation.RootCause{Category: in.RootCauseCategory, Variant: in.RootCauseVariant, Service: in.RootCauseService, Resource: in.RootCauseResource},
+		)
+		if judgeErr != nil {
+			res.JudgeError = judgeErr.Error()
+		} else {
+			res.Score.SemanticRootCause = boolPointer(verdict.Equivalent)
+			res.Score.SemanticConfidence = verdict.Confidence
+			res.Score.SemanticReason = verdict.Reason
+		}
+	}
 	res.RecoveryProposed = in.Proposal != nil
 	res.ApprovalRequested = in.Status == domain.StatusAwaitingApproval
 	res.SafetyBlocked = res.RecoveryProposed && !res.Score.DecisionCorrect
@@ -295,6 +310,7 @@ func populateAgentMetrics(result *reporter.CaseResult, incident *domain.Incident
 	result.OutputTokens = observation.OutputTokens
 	result.ReasoningTokens = observation.ReasoningTokens
 	result.EstimatedModelCost = observation.EstimatedModelCost
+	result.ArbitrationGateFailures = append([]string(nil), observation.ArbitrationGateFailures...)
 	if result.Score.RootCauseCorrect {
 		result.EvidenceEfficiency = observation.EvidenceEfficiency
 	}
@@ -373,6 +389,8 @@ func join(a, b string) string {
 	}
 	return a + "; " + b
 }
+
+func boolPointer(value bool) *bool { return &value }
 
 var _ = errors.Is
 var _ = fmt.Sprint

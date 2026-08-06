@@ -141,11 +141,30 @@ type InvestigationPlan struct {
 }
 
 type WorkerTask struct {
-	ID            string   `json:"id"`
-	Source        string   `json:"source"`
-	Question      string   `json:"question"`
-	HypothesisIDs []string `json:"hypothesis_ids,omitempty"`
-	Required      bool     `json:"required"`
+	ID            string          `json:"id"`
+	Source        string          `json:"source"`
+	Question      string          `json:"question"`
+	HypothesisIDs []string        `json:"hypothesis_ids,omitempty"`
+	Request       EvidenceRequest `json:"request"`
+	Required      bool            `json:"required"`
+}
+
+type ResourceRef struct {
+	Namespace string `json:"namespace"`
+	Service   string `json:"service,omitempty"`
+	Resource  string `json:"resource,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+}
+
+// EvidenceRequest is a server-validated collection request. Free-form worker
+// questions are never used as collector input or as an authorization boundary.
+type EvidenceRequest struct {
+	Source        string        `json:"source"`
+	Targets       []ResourceRef `json:"targets"`
+	SignalKinds   []string      `json:"signal_kinds,omitempty"`
+	WindowStart   time.Time     `json:"window_start"`
+	WindowEnd     time.Time     `json:"window_end"`
+	HypothesisIDs []string      `json:"hypothesis_ids,omitempty"`
 }
 
 type WorkerFinding struct {
@@ -184,13 +203,20 @@ type DebateRound struct {
 }
 
 type ArbitrationResult struct {
-	SelectedHypothesisID string   `json:"selected_hypothesis_id,omitempty"`
-	RankedHypothesisIDs  []string `json:"ranked_hypothesis_ids,omitempty"`
-	SelectedScore        float64  `json:"selected_score"`
-	ScoreMargin          float64  `json:"score_margin"`
-	Accepted             bool     `json:"accepted"`
-	NeedsMoreEvidence    bool     `json:"needs_more_evidence"`
-	Reason               string   `json:"reason"`
+	SelectedHypothesisID string                 `json:"selected_hypothesis_id,omitempty"`
+	RankedHypothesisIDs  []string               `json:"ranked_hypothesis_ids,omitempty"`
+	SelectedScore        float64                `json:"selected_score"`
+	ScoreMargin          float64                `json:"score_margin"`
+	Accepted             bool                   `json:"accepted"`
+	NeedsMoreEvidence    bool                   `json:"needs_more_evidence"`
+	Reason               string                 `json:"reason"`
+	GateResults          []HypothesisGateResult `json:"gate_results,omitempty"`
+}
+
+type HypothesisGateResult struct {
+	HypothesisID   string                     `json:"hypothesis_id"`
+	ScoreBreakdown HypothesisConfidenceRecord `json:"score_breakdown"`
+	FailedGates    []string                   `json:"failed_gates,omitempty"`
 }
 
 type MemoryKind string
@@ -277,31 +303,52 @@ type EvidenceSource = string
 type EvidenceType = string
 
 type Evidence struct {
-	ID             string                 `json:"id"`
-	Source         EvidenceSource         `json:"source"`
-	Type           EvidenceType           `json:"type,omitempty"`
-	Kind           string                 `json:"kind,omitempty"` // backward-compatible alias for Type
-	Timestamp      time.Time              `json:"timestamp,omitempty"`
-	WindowStart    time.Time              `json:"window_start,omitempty"`
-	WindowEnd      time.Time              `json:"window_end,omitempty"`
-	Namespace      string                 `json:"namespace,omitempty"`
-	Service        string                 `json:"service,omitempty"`
-	Resource       string                 `json:"resource,omitempty"`
-	Content        map[string]any         `json:"content,omitempty"`
-	Data           map[string]any         `json:"data,omitempty"` // backward-compatible alias for Content
-	Summary        string                 `json:"summary"`
-	Confidence     float64                `json:"confidence,omitempty"`
-	TraceID        string                 `json:"trace_id,omitempty"`
-	TemplateID     string                 `json:"template_id,omitempty"`
-	CollectedAt    time.Time              `json:"collected_at,omitempty"`
-	ObservedAt     time.Time              `json:"observed_at,omitempty"` // backward-compatible alias for Timestamp
-	RelevanceScore float64                `json:"relevance_score,omitempty"`
-	NeuralScore    float64                `json:"neural_score,omitempty"`
-	NeuralRanked   bool                   `json:"neural_ranked,omitempty"`
-	RankBreakdown  *EvidenceRankBreakdown `json:"rank_breakdown,omitempty"`
-	Attribution    *EvidenceAttribution   `json:"attribution,omitempty"`
-	RankingReasons []string               `json:"ranking_reasons,omitempty"`
-	CausalNodeIDs  []string               `json:"causal_node_ids,omitempty"`
+	ID              string                 `json:"id"`
+	Source          EvidenceSource         `json:"source"`
+	Type            EvidenceType           `json:"type,omitempty"`
+	Kind            string                 `json:"kind,omitempty"` // backward-compatible alias for Type
+	Timestamp       time.Time              `json:"timestamp,omitempty"`
+	WindowStart     time.Time              `json:"window_start,omitempty"`
+	WindowEnd       time.Time              `json:"window_end,omitempty"`
+	Namespace       string                 `json:"namespace,omitempty"`
+	Service         string                 `json:"service,omitempty"`
+	Resource        string                 `json:"resource,omitempty"`
+	Content         map[string]any         `json:"content,omitempty"`
+	Data            map[string]any         `json:"data,omitempty"` // backward-compatible alias for Content
+	Facts           map[string]any         `json:"facts,omitempty"`
+	TruncatedFields []string               `json:"truncated_fields,omitempty"`
+	Summary         string                 `json:"summary"`
+	Confidence      float64                `json:"confidence,omitempty"`
+	TraceID         string                 `json:"trace_id,omitempty"`
+	TemplateID      string                 `json:"template_id,omitempty"`
+	CollectedAt     time.Time              `json:"collected_at,omitempty"`
+	ObservedAt      time.Time              `json:"observed_at,omitempty"` // backward-compatible alias for Timestamp
+	RelevanceScore  float64                `json:"relevance_score,omitempty"`
+	NeuralScore     float64                `json:"neural_score,omitempty"`
+	NeuralRanked    bool                   `json:"neural_ranked,omitempty"`
+	RankBreakdown   *EvidenceRankBreakdown `json:"rank_breakdown,omitempty"`
+	Attribution     *EvidenceAttribution   `json:"attribution,omitempty"`
+	RankingReasons  []string               `json:"ranking_reasons,omitempty"`
+	CausalNodeIDs   []string               `json:"causal_node_ids,omitempty"`
+	AnomalyScore    float64                `json:"anomaly_score,omitempty"`
+}
+
+// EvidenceView is the bounded model-facing representation shared by workers,
+// diagnosis and critic roles. It never has a separate Data/Content alias.
+type EvidenceView struct {
+	ID               string         `json:"id"`
+	Source           string         `json:"source"`
+	Kind             string         `json:"kind"`
+	Namespace        string         `json:"namespace,omitempty"`
+	Service          string         `json:"service,omitempty"`
+	Resource         string         `json:"resource,omitempty"`
+	ObservedAt       time.Time      `json:"observed_at,omitempty"`
+	Summary          string         `json:"summary"`
+	Facts            map[string]any `json:"facts,omitempty"`
+	TruncatedFields  []string       `json:"truncated_fields,omitempty"`
+	CausalNodeIDs    []string       `json:"causal_node_ids,omitempty"`
+	ContextRelevance float64        `json:"context_relevance,omitempty"`
+	AnomalyScore     float64        `json:"anomaly_score,omitempty"`
 }
 
 type EvidenceRankBreakdown struct {
@@ -478,7 +525,8 @@ type HypothesisDraft struct {
 	PriorProbability         float64  `json:"prior_probability" jsonschema:"required,minimum=0,maximum=1"`
 	SupportingEvidenceIDs    []string `json:"supporting_evidence_ids" jsonschema:"required,minItems=1"`
 	ContradictingEvidenceIDs []string `json:"contradicting_evidence_ids,omitempty"`
-	ExpectedCausalPath       []string `json:"expected_causal_path" jsonschema:"required,minItems=1"`
+	ExpectedCausalPath       []string `json:"expected_causal_path,omitempty"`
+	ExpectedCausalNodeIDs    []string `json:"expected_causal_node_ids,omitempty" jsonschema:"required,minItems=1"`
 	FalsificationConditions  []string `json:"falsification_conditions,omitempty"`
 }
 
@@ -602,6 +650,7 @@ type HypothesisConfidenceRecord struct {
 	HypothesisID        string    `json:"hypothesis_id"`
 	Sequence            int       `json:"sequence"`
 	Score               float64   `json:"score"`
+	ModelPrior          float64   `json:"model_prior"`
 	SupportingScore     float64   `json:"supporting_score"`
 	ContradictionScore  float64   `json:"contradiction_score"`
 	CausalPathCoverage  float64   `json:"causal_path_coverage"`

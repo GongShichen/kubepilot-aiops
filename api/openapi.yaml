@@ -331,7 +331,26 @@ components:
         source: {type: string, enum: [metric, log, trace, topology]}
         question: {type: string}
         hypothesis_ids: {type: array, items: {type: string}}
+        request: {$ref: '#/components/schemas/EvidenceRequest'}
         required: {type: boolean}
+    ResourceRef:
+      type: object
+      required: [namespace]
+      properties:
+        namespace: {type: string}
+        service: {type: string}
+        resource: {type: string}
+        kind: {type: string}
+    EvidenceRequest:
+      type: object
+      required: [source, targets, window_start, window_end]
+      properties:
+        source: {type: string, enum: [metric, log, trace, topology]}
+        targets: {type: array, minItems: 1, items: {$ref: '#/components/schemas/ResourceRef'}}
+        signal_kinds: {type: array, items: {type: string}}
+        window_start: {type: string, format: date-time}
+        window_end: {type: string, format: date-time}
+        hypothesis_ids: {type: array, items: {type: string}}
     WorkerFinding:
       type: object
       required: [task_id, worker, source, summary, evidence_ids, completed_at]
@@ -365,6 +384,18 @@ components:
         accepted: {type: boolean}
         needs_more_evidence: {type: boolean}
         reason: {type: string}
+        gate_results: {type: array, items: {$ref: '#/components/schemas/HypothesisGateResult'}}
+    HypothesisGateResult:
+      type: object
+      required: [hypothesis_id, score_breakdown]
+      properties:
+        hypothesis_id: {type: string}
+        score_breakdown:
+          type: object
+          description: Deterministic Supporting, Causal, Topology, History, Prior/score, Contradiction and source-count audit record
+        failed_gates:
+          type: array
+          items: {type: string, enum: [supported_status, supporting_score, causal_coverage, final_score, contradiction, evidence_count, independent_sources, kubernetes_evidence, score_margin]}
     MemoryAccessEvent:
       type: object
       required: [incident_id, agent, kind, scope, query_hash, created_at]

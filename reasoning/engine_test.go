@@ -36,9 +36,20 @@ func TestCandidateGenerationUsesSemanticAndLexicalOnly(t *testing.T) {
 
 func TestAnnotateCausalNodesFromActivePatterns(t *testing.T) {
 	e := New(DefaultConfig())
-	items := e.AnnotateCausalNodes([]domain.Evidence{{ID: "e", Summary: "connection refused from downstream endpoint"}}, []domain.CausalPattern{{ID: "p", Status: "active", Nodes: []domain.CausalNode{{ID: "connection_failure", Match: []string{"connection refused"}}, {ID: "network_config", Match: []string{"endpoint"}}}}})
+	items := e.AnnotateCausalNodes([]domain.Evidence{{ID: "e", Summary: "connection refused from downstream endpoint", AnomalyScore: .9}}, []domain.CausalPattern{{ID: "p", Status: "active", Nodes: []domain.CausalNode{{ID: "connection_failure", Match: []string{"connection refused"}}, {ID: "network_config", Match: []string{"endpoint"}}}}})
 	if len(items) != 1 || strings.Join(items[0].CausalNodeIDs, ",") != "connection_failure,network_config" {
 		t.Fatalf("causal node annotation=%#v", items)
+	}
+}
+
+func TestAnnotateCausalNodesNormalizesStructuredTelemetryTokens(t *testing.T) {
+	e := New(DefaultConfig())
+	items := e.AnnotateCausalNodes([]domain.Evidence{{
+		ID: "policy", Source: "kubernetes", AnomalyScore: 1,
+		Facts: map[string]any{"network_policies": []any{map[string]any{"policy_types": []any{"Egress"}, "egress": nil}}},
+	}}, []domain.CausalPattern{{ID: "network", Status: "active", Nodes: []domain.CausalNode{{ID: "network_config", Match: []string{"networkpolicy"}}}}})
+	if len(items) != 1 || strings.Join(items[0].CausalNodeIDs, ",") != "network_config" {
+		t.Fatalf("structured causal token was not matched: %#v", items)
 	}
 }
 
@@ -136,12 +147,12 @@ func TestHypothesisUnknownEvidenceRejected(t *testing.T) {
 func TestHypothesisVerificationCausalPathAndContradiction(t *testing.T) {
 	engine := New(DefaultConfig())
 	evidence := []domain.Evidence{
-		{ID: "e1", Source: "kubernetes", RelevanceScore: .9, CausalNodeIDs: []string{"network_config"}},
-		{ID: "e2", Source: "loki", RelevanceScore: .8, CausalNodeIDs: []string{"connection_failure"}},
+		{ID: "e1", Source: "kubernetes", RelevanceScore: .9, AnomalyScore: .9, CausalNodeIDs: []string{"network_config"}},
+		{ID: "e2", Source: "loki", RelevanceScore: .8, AnomalyScore: .8, CausalNodeIDs: []string{"connection_failure"}},
 	}
-	pattern := domain.CausalPattern{Category: "network", Status: "active", Nodes: []domain.CausalNode{{ID: "network_config", Match: []string{"selector"}}, {ID: "connection_failure", Match: []string{"connection refused"}}, {ID: "trace_gap", Match: []string{"missing span"}}}}
-	complete := domain.HypothesisDraft{ID: "complete", Category: "network", PriorProbability: .9, SupportingEvidenceIDs: []string{"e1", "e2"}, ExpectedCausalPath: []string{"network_config", "connection_failure"}}
-	conflicted := domain.HypothesisDraft{ID: "conflict", Category: "network", PriorProbability: .9, SupportingEvidenceIDs: []string{"e1", "e2"}, ContradictingEvidenceIDs: []string{"e1"}, ExpectedCausalPath: []string{"network_config", "connection_failure", "trace_gap"}}
+	pattern := domain.CausalPattern{Category: "network", Status: "active", Nodes: []domain.CausalNode{{ID: "network_config", Match: []string{"selector"}}, {ID: "connection_failure", Match: []string{"connection refused"}}, {ID: "trace_gap", Match: []string{"missing span"}}}, Edges: []domain.CausalEdge{{From: "network_config", To: "connection_failure"}, {From: "connection_failure", To: "trace_gap"}}}
+	complete := domain.HypothesisDraft{ID: "complete", Category: "network", PriorProbability: .9, SupportingEvidenceIDs: []string{"e1", "e2"}, ExpectedCausalNodeIDs: []string{"network_config", "connection_failure"}}
+	conflicted := domain.HypothesisDraft{ID: "conflict", Category: "network", PriorProbability: .9, SupportingEvidenceIDs: []string{"e1", "e2"}, ContradictingEvidenceIDs: []string{"e1"}, ExpectedCausalNodeIDs: []string{"network_config", "connection_failure", "trace_gap"}}
 	verified, err := engine.VerifyHypotheses([]domain.HypothesisDraft{conflicted, complete}, evidence, nil, []domain.CausalPattern{pattern})
 	if err != nil {
 		t.Fatal(err)
@@ -157,16 +168,34 @@ func TestHypothesisVerificationCausalPathAndContradiction(t *testing.T) {
 func TestHypothesisVerificationCreditsCurrentKubernetesTopology(t *testing.T) {
 	engine := New(DefaultConfig())
 	evidence := []domain.Evidence{
-		{ID: "kube", Source: "kubernetes", Service: "payment-service", Resource: "payment-pod", RelevanceScore: .9, Summary: "payment pod memory leak"},
-		{ID: "metric", Source: "prometheus", Service: "payment-service", Resource: "payment-pod", RelevanceScore: .9, Summary: "payment pod memory leak"},
+		{ID: "kube", Source: "kubernetes", Service: "payment-service", Resource: "payment-pod", RelevanceScore: .9, Summary: "payment pod identity", CausalNodeIDs: []string{"obs:kube"}},
+		{ID: "metric", Source: "prometheus", Service: "payment-service", Resource: "payment-pod", RelevanceScore: .9, AnomalyScore: 1, Summary: "payment pod memory growth", CausalNodeIDs: []string{"obs:metric"}},
 	}
-	draft := domain.HypothesisDraft{ID: "memory", Category: "memory", Service: "payment-service", Resource: "payment-pod", PriorProbability: 1, SupportingEvidenceIDs: []string{"kube", "metric"}, ExpectedCausalPath: []string{"memory leak"}}
+	draft := domain.HypothesisDraft{ID: "memory", Category: "memory", Service: "payment-service", Resource: "payment-pod", PriorProbability: 1, SupportingEvidenceIDs: []string{"metric"}, ExpectedCausalNodeIDs: []string{"obs:metric"}}
 	verified, err := engine.VerifyHypotheses([]domain.HypothesisDraft{draft}, evidence, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(verified) != 1 || verified[0].TopologyRelevance != 1 || verified[0].FinalScore < .80 {
+	if len(verified) != 1 || verified[0].TopologyRelevance != 1 || verified[0].FinalScore < .80 || !containsString(verified[0].VerifiedEvidenceIDs, "kube") {
 		t.Fatalf("current topology evidence was not credited: %+v", verified)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func TestHypothesisCausalCoverageRejectsUnknownServerNode(t *testing.T) {
+	engine := New(DefaultConfig())
+	evidence := []domain.Evidence{{ID: "metric", Source: "prometheus", AnomalyScore: 1, CausalNodeIDs: []string{"obs:metric"}}}
+	draft := domain.HypothesisDraft{ID: "unknown-node", SupportingEvidenceIDs: []string{"metric"}, ExpectedCausalNodeIDs: []string{"model-invented-node"}}
+	if _, err := engine.VerifyHypotheses([]domain.HypothesisDraft{draft}, evidence, nil, nil); err == nil || !strings.Contains(err.Error(), "unknown node ID") {
+		t.Fatalf("unknown causal node was accepted: %v", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -85,12 +86,16 @@ func modelPayloadEvidenceIDs(raw string) []string {
 	return ids
 }
 
-func modelArgumentJSON(id, category, variant, cause string, prior float64, evidenceIDs, path []string) string {
+func modelArgumentJSON(id, category, variant, cause string, prior float64, evidenceIDs, _ []string) string {
+	nodeIDs := []string(nil)
+	if len(evidenceIDs) > 0 {
+		nodeIDs = []string{"obs:" + evidenceIDs[0]}
+	}
 	raw, _ := json.Marshal(map[string]any{
 		"hypotheses": []map[string]any{{
 			"id": id, "category": category, "variant": variant, "cause": cause,
 			"service": "gateway-service", "resource": "gateway-service", "prior_probability": prior,
-			"supporting_evidence_ids": evidenceIDs, "expected_causal_path": path,
+			"supporting_evidence_ids": evidenceIDs, "expected_causal_node_ids": nodeIDs,
 			"falsification_conditions": []string{"current evidence no longer reproduces"},
 		}},
 		"evidence_ids": evidenceIDs,
@@ -102,7 +107,8 @@ func modelArgumentJSON(id, category, variant, cause string, prior float64, evide
 func TestEvidenceWorkersRecordPartialInfrastructureFailure(t *testing.T) {
 	registry := &AgentRegistry{}
 	plan := domain.InvestigationPlan{Tasks: []domain.WorkerTask{{ID: "metric", Source: "metric"}, {ID: "topology", Source: "topology"}}}
-	findings, evidence, usage, infrastructure := registry.runEvidenceWorkers(context.Background(), &domain.Incident{ID: "incident"}, plan, []string{"metric", "topology"}, map[string]Collector{}, nil)
+	incident := &domain.Incident{ID: "incident", Namespace: "test", Service: "service", Resource: "service"}
+	findings, evidence, usage, infrastructure := registry.runEvidenceWorkers(context.Background(), incident, plan, planRequests(plan, incident), map[string]Collector{}, nil, allowedEvidenceTargets(incident, nil), nil)
 	if len(findings) != 0 || len(evidence) != 0 || len(usage) != 0 || len(infrastructure) != 2 {
 		t.Fatalf("partial worker failure was not isolated: findings=%+v evidence=%+v usage=%+v infrastructure=%+v", findings, evidence, usage, infrastructure)
 	}
@@ -180,15 +186,37 @@ func TestAlternativeIDsCritiqueSourcesAndMemoryScopeAreDeterministic(t *testing.
 	}
 }
 
+func TestCriticGapCreatesTargetedOneHopRequestAndStableFingerprint(t *testing.T) {
+	incident := &domain.Incident{Namespace: "team-a", Service: "checkout", Resource: "checkout", CreatedAt: time.Now().Add(-time.Minute)}
+	plan := attachPlanRequests(domain.InvestigationPlan{Tasks: []domain.WorkerTask{{ID: "metric", Source: "metric"}, {ID: "topology", Source: "topology"}}}, incident)
+	evidence := []domain.Evidence{{ID: "topology", Source: "kubernetes", Facts: map[string]any{"discovered_dependencies": []string{"redis"}}}}
+	hypotheses := []domain.HypothesisDraft{{ID: "dependency", Service: "redis", Resource: "redis"}}
+	critiques := []domain.Critique{{HypothesisID: "dependency", MissingEvidence: []string{"dependency memory saturation"}, RecommendedSources: []string{"metric"}}}
+	requests := critiqueEvidenceRequests(incident, plan, critiques, hypotheses, evidence)
+	if len(requests) != 2 || requests[1].Targets[0].Service != "redis" || !slices.Contains(requests[0].SignalKinds, "memory") || !slices.Contains(requests[0].SignalKinds, "dependency") {
+		t.Fatalf("critic gap was not converted to targeted evidence requests: %+v", requests)
+	}
+	reordered := requests[0]
+	reordered.SignalKinds = slices.Clone(requests[0].SignalKinds)
+	slices.Reverse(reordered.SignalKinds)
+	if evidenceRequestFingerprint(requests[0]) != evidenceRequestFingerprint(reordered) {
+		t.Fatal("request fingerprint is not stable")
+	}
+	allowed := allowedEvidenceTargets(incident, evidence)
+	if _, err := validateEvidenceRequest(incident, requests[1], "metric", allowed); err != nil {
+		t.Fatalf("one-hop target was rejected: %v", err)
+	}
+}
+
 func TestHierarchicalDiagnosisFiltersUngroundedModelDraftsBeforeVerification(t *testing.T) {
-	evidence := []domain.Evidence{{ID: "metric", Source: "prometheus"}, {ID: "topology", Source: "kubernetes"}}
-	valid := domain.HypothesisDraft{ID: "valid", SupportingEvidenceIDs: []string{"metric", "topology"}, ExpectedCausalPath: []string{"resource pressure", "latency"}}
+	evidence := []domain.Evidence{{ID: "metric", Source: "prometheus", CausalNodeIDs: []string{"obs:metric"}}, {ID: "topology", Source: "kubernetes", CausalNodeIDs: []string{"obs:topology"}}}
+	valid := domain.HypothesisDraft{ID: "valid", SupportingEvidenceIDs: []string{"metric", "topology"}, ExpectedCausalNodeIDs: []string{"obs:metric"}}
 	drafts := []domain.HypothesisDraft{
 		valid,
-		{ID: "missing-support", ExpectedCausalPath: []string{"latency"}},
-		{ID: "unknown-evidence", SupportingEvidenceIDs: []string{"not-in-ledger"}, ExpectedCausalPath: []string{"latency"}},
+		{ID: "missing-support", ExpectedCausalNodeIDs: []string{"obs:metric"}},
+		{ID: "unknown-evidence", SupportingEvidenceIDs: []string{"not-in-ledger"}, ExpectedCausalNodeIDs: []string{"obs:metric"}},
 		{ID: "missing-path", SupportingEvidenceIDs: []string{"metric"}},
-		{ID: "unknown-contradiction", SupportingEvidenceIDs: []string{"metric"}, ContradictingEvidenceIDs: []string{"not-in-ledger"}, ExpectedCausalPath: []string{"latency"}},
+		{ID: "unknown-contradiction", SupportingEvidenceIDs: []string{"metric"}, ContradictingEvidenceIDs: []string{"not-in-ledger"}, ExpectedCausalNodeIDs: []string{"obs:metric"}},
 	}
 	grounded := filterGroundedHypothesisDrafts(drafts, evidence)
 	if len(grounded) != 1 || grounded[0].ID != valid.ID {
@@ -196,6 +224,56 @@ func TestHierarchicalDiagnosisFiltersUngroundedModelDraftsBeforeVerification(t *
 	}
 	if _, err := reasoning.New(reasoning.DefaultConfig()).VerifyHypotheses(grounded, evidence, nil, nil); err != nil {
 		t.Fatalf("server-filtered drafts did not verify: %v", err)
+	}
+}
+
+func TestMergeHypothesisDraftsRemovesWordingDuplicatesButKeepsDistinctMechanisms(t *testing.T) {
+	base := domain.HypothesisDraft{
+		ID: "primary", Category: "memory", Service: "checkout", Resource: "checkout",
+		Cause: "memory leak in application", Variant: "memory_leak",
+		SupportingEvidenceIDs: []string{"metric", "topology"}, ExpectedCausalNodeIDs: []string{"memory_growth", "memory_limit"},
+	}
+	wordingDuplicate := base
+	wordingDuplicate.ID = "alternative"
+	wordingDuplicate.Cause = "slow application memory leak"
+	wordingDuplicate.Variant = "memory_pressure"
+	distinct := base
+	distinct.ID = "limit"
+	distinct.Cause = "configured resource limit is too low"
+	distinct.Variant = "limit_low"
+	merged := mergeHypothesisDrafts([]domain.HypothesisDraft{base}, []domain.HypothesisDraft{wordingDuplicate, distinct})
+	if len(merged) != 2 || merged[0].ID != "primary" || merged[1].ID != "limit" {
+		t.Fatalf("unexpected semantic duplicate merge: %+v", merged)
+	}
+}
+
+func TestCausalAllowlistOnlyExposesObservedPatternGraph(t *testing.T) {
+	patterns := []domain.CausalPattern{{
+		ID: "cpu", Status: "active",
+		Nodes: []domain.CausalNode{{ID: "cpu_demand"}, {ID: "cpu_saturation"}, {ID: "latency_error"}},
+		Edges: []domain.CausalEdge{{From: "cpu_demand", To: "cpu_saturation"}, {From: "cpu_saturation", To: "latency_error"}},
+	}}
+	evidence := []domain.Evidence{
+		{ID: "metric", CausalNodeIDs: []string{"obs:metric", "cpu_demand", "signal:prometheus:cpu"}},
+		{ID: "trace", CausalNodeIDs: []string{"obs:trace", "cpu_saturation"}},
+	}
+	nodes := causalNodeAllowlist(evidence, patterns)
+	for _, nodeID := range []string{"obs:metric", "obs:trace", "cpu_demand", "cpu_saturation"} {
+		if _, ok := nodes[nodeID]; !ok {
+			t.Fatalf("observed node missing from allowlist: %s", nodeID)
+		}
+	}
+	for _, nodeID := range []string{"signal:prometheus:cpu", "latency_error"} {
+		if _, ok := nodes[nodeID]; ok {
+			t.Fatalf("unobserved or non-graph node exposed to model: %s", nodeID)
+		}
+	}
+	edges := causalEdgeAllowlist(evidence, patterns)
+	if !causalPathIsServerValid([]string{"cpu_demand", "cpu_saturation"}, []string{"metric", "trace"}, edges) {
+		t.Fatal("observed directed graph path was rejected")
+	}
+	if causalPathIsServerValid([]string{"cpu_saturation", "cpu_demand"}, []string{"metric", "trace"}, edges) {
+		t.Fatal("reversed graph path was accepted")
 	}
 }
 

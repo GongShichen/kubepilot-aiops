@@ -71,6 +71,12 @@ func (k *KubernetesClient) Service(ctx context.Context, ns, name string) (*corev
 	}
 	return k.client.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
 }
+func (k *KubernetesClient) Services(ctx context.Context, ns string) (*corev1.ServiceList, error) {
+	if err := k.namespace(ns); err != nil {
+		return nil, err
+	}
+	return k.client.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
+}
 func (k *KubernetesClient) Endpoints(ctx context.Context, ns, name string) (*corev1.Endpoints, error) {
 	if err := k.namespace(ns); err != nil {
 		return nil, err

@@ -82,7 +82,11 @@ func (m scriptedEinoModel) Generate(_ context.Context, messages []*schema.Messag
 		arguments = map[string]any{"merge": false, "confidence": .4, "reason": "insufficient operational linkage"}
 	case "submit_hypotheses":
 		evidenceIDs := firstEvidenceIDs(messages, 2)
-		arguments = map[string]any{"reasoning_type": "hypothesis_verification", "hypotheses": []map[string]any{{"id": "h1", "category": "cpu", "variant": "busy_loop", "cause": "CPU saturation", "service": "gateway-service", "resource": "gateway-service", "prior_probability": 1.0, "supporting_evidence_ids": evidenceIDs, "expected_causal_path": []string{"cpu"}, "falsification_conditions": []string{"CPU is normal"}}}}
+		nodeIDs := []string(nil)
+		if len(evidenceIDs) > 0 {
+			nodeIDs = []string{"obs:" + evidenceIDs[0]}
+		}
+		arguments = map[string]any{"reasoning_type": "hypothesis_verification", "hypotheses": []map[string]any{{"id": "h1", "category": "cpu", "variant": "busy_loop", "cause": "CPU saturation", "service": "gateway-service", "resource": "gateway-service", "prior_probability": 1.0, "supporting_evidence_ids": evidenceIDs, "expected_causal_node_ids": nodeIDs, "falsification_conditions": []string{"CPU is normal"}}}}
 	case "submit_diagnosis":
 		arguments = map[string]any{"hypothesis_id": "h1"}
 	case "submit_recovery_proposal":
@@ -132,12 +136,12 @@ type supplementalCollector struct {
 	calls  *atomic.Int32
 }
 
-func (c supplementalCollector) Collect(_ context.Context, in *domain.Incident) ([]domain.Evidence, error) {
+func (c supplementalCollector) Collect(_ context.Context, in *domain.Incident, _ domain.EvidenceRequest) ([]domain.Evidence, error) {
 	summary := c.source + " evidence CPU throttling timeout"
 	if c.calls.Add(1) > 4 {
 		summary += " supplemental_signal"
 	}
-	return []domain.Evidence{{Source: c.source, Kind: c.source + "_evidence", Summary: summary, ObservedAt: time.Now().UTC(), Namespace: in.Namespace, Service: in.Service, Resource: in.Resource}}, nil
+	return []domain.Evidence{{Source: c.source, Kind: c.source + "_evidence", Summary: summary, Content: anomalousFixtureFacts(c.source), ObservedAt: time.Now().UTC(), Namespace: in.Namespace, Service: in.Service, Resource: in.Resource}}, nil
 }
 
 func (m scriptedEinoModel) Stream(ctx context.Context, messages []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
@@ -171,8 +175,23 @@ func firstEvidenceIDs(messages []*schema.Message, limit int) []string {
 
 type fixedCollector struct{ source string }
 
-func (c fixedCollector) Collect(_ context.Context, in *domain.Incident) ([]domain.Evidence, error) {
-	return []domain.Evidence{{Source: c.source, Kind: c.source + "_evidence", Summary: c.source + " evidence CPU throttling timeout", ObservedAt: time.Now().UTC(), Namespace: in.Namespace, Service: in.Service, Resource: in.Resource}}, nil
+func (c fixedCollector) Collect(_ context.Context, in *domain.Incident, _ domain.EvidenceRequest) ([]domain.Evidence, error) {
+	return []domain.Evidence{{Source: c.source, Kind: c.source + "_evidence", Summary: c.source + " evidence CPU throttling timeout", Content: anomalousFixtureFacts(c.source), ObservedAt: time.Now().UTC(), Namespace: in.Namespace, Service: in.Service, Resource: in.Resource}}, nil
+}
+
+func anomalousFixtureFacts(source string) map[string]any {
+	switch source {
+	case "prometheus":
+		return map[string]any{"current_value": .99, "baseline_value": .20}
+	case "loki":
+		return map[string]any{"level": "error", "occurrence_count": 8}
+	case "jaeger":
+		return map[string]any{"error_service": "gateway-service", "failed_operation": "GET /"}
+	case "kubernetes":
+		return map[string]any{"pods": []any{map[string]any{"ready": false, "restart_count": 2}}}
+	default:
+		return map[string]any{"status": "failed"}
+	}
 }
 
 type fixedHistoricalRetriever struct{}
@@ -198,13 +217,13 @@ type parallelCollector struct {
 	group  *parallelCollectorGroup
 }
 
-func (c parallelCollector) Collect(ctx context.Context, in *domain.Incident) ([]domain.Evidence, error) {
+func (c parallelCollector) Collect(ctx context.Context, in *domain.Incident, request domain.EvidenceRequest) ([]domain.Evidence, error) {
 	if c.group.count.Add(1) == 4 {
 		c.group.once.Do(func() { close(c.group.release) })
 	}
 	select {
 	case <-c.group.release:
-		return fixedCollector{source: c.source}.Collect(ctx, in)
+		return fixedCollector{source: c.source}.Collect(ctx, in, request)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

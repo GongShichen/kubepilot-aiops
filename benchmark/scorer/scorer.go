@@ -10,6 +10,9 @@ import (
 type Score struct {
 	RootCauseCorrect     bool    `json:"root_cause_correct"`
 	StrictRootCause      bool    `json:"strict_root_cause"`
+	SemanticRootCause    *bool   `json:"semantic_root_cause,omitempty"`
+	SemanticConfidence   float64 `json:"semantic_confidence,omitempty"`
+	SemanticReason       string  `json:"semantic_reason,omitempty"`
 	CategoryCorrect      bool    `json:"category_correct"`
 	VariantCorrect       bool    `json:"variant_correct"`
 	ServiceCorrect       bool    `json:"service_correct"`

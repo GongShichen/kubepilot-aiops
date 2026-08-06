@@ -14,6 +14,7 @@ import (
 	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
 	causalvalidator "github.com/kubepilot-aiops/kubepilot/internal/causal/validator"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	evidencenorm "github.com/kubepilot-aiops/kubepilot/internal/evidence"
 	rankpolicy "github.com/kubepilot-aiops/kubepilot/internal/reasoning/evidence"
 	"github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
 	"github.com/kubepilot-aiops/kubepilot/internal/safety"
@@ -682,7 +683,9 @@ func collectConstrainedEvidence(ctx context.Context, deps constrainedToolDeps, s
 	if collector == nil {
 		return constrainedToolOutput{OK: false, Message: source + " evidence source unavailable"}, nil
 	}
-	items, collectErr := collector.Collect(ctx, &incident)
+	request := defaultEvidenceRequest(&incident, source)
+	request.Targets = []domain.ResourceRef{{Namespace: incident.Namespace, Service: incident.Service, Resource: incident.Resource}}
+	items, collectErr := collector.Collect(ctx, &incident, request)
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	if collectErr != nil {
@@ -788,28 +791,35 @@ func effectiveRankingPolicy(policy *rankpolicy.Policy) rankpolicy.Policy {
 }
 
 func compactToolEvidence(items []domain.Evidence, maximumBytes int) []domain.Evidence {
-	out := make([]domain.Evidence, 0, min(len(items), 12))
-	for _, item := range items {
-		candidate := item
-		candidate.Data = nil
-		candidate.Summary = truncateText(candidate.Summary, 512)
-		if len(candidate.RankingReasons) > 4 {
-			candidate.RankingReasons = append([]string(nil), candidate.RankingReasons[:4]...)
-		}
-		if raw, err := json.Marshal(candidate.Content); err == nil && len(raw) > 2048 {
-			candidate.Content = map[string]any{"bounded_preview": truncateText(string(raw), 2048)}
+	views := evidencenorm.Views(items, 0, 2048, 12)
+	out := make([]domain.Evidence, 0, len(views))
+	for _, view := range views {
+		candidate := domain.Evidence{
+			ID: view.ID, Source: view.Source, Type: view.Kind, Kind: view.Kind,
+			Namespace: view.Namespace, Service: view.Service, Resource: view.Resource,
+			Timestamp: view.ObservedAt, ObservedAt: view.ObservedAt, Summary: view.Summary,
+			Facts: view.Facts, TruncatedFields: view.TruncatedFields,
+			CausalNodeIDs: view.CausalNodeIDs, RelevanceScore: view.ContextRelevance,
+			AnomalyScore: view.AnomalyScore,
 		}
 		trial := append(append([]domain.Evidence(nil), out...), candidate)
 		raw, _ := json.Marshal(trial)
 		if maximumBytes > 0 && len(raw) > maximumBytes {
-			break
+			candidate.Facts = nil
+			candidate.TruncatedFields = append(candidate.TruncatedFields, "facts")
+			trial = append(append([]domain.Evidence(nil), out...), candidate)
+			raw, _ = json.Marshal(trial)
+			if len(raw) > maximumBytes {
+				continue
+			}
 		}
 		out = append(out, candidate)
-		if len(out) == 12 {
-			break
-		}
 	}
 	return out
+}
+
+func compactEvidenceViews(items []domain.Evidence, maximumBytes int) []domain.EvidenceView {
+	return evidencenorm.Views(items, maximumBytes, 2048, 12)
 }
 
 func compactToolCandidates(items []domain.RetrievalCandidate, limit int) []domain.RetrievalCandidate {
@@ -852,18 +862,34 @@ func recordHypotheses(ctx context.Context, in HypothesisSubmission) (constrained
 	if in.ReasoningType != "hypothesis_verification" || len(in.Hypotheses) == 0 || len(in.Hypotheses) > 3 {
 		missing = append(missing, "one to three falsifiable hypothesis drafts are required")
 	}
+	evidence := runtime.state.Incident.Evidence
 	allowed := map[string]bool{}
-	for _, item := range runtime.state.Incident.Evidence {
+	for _, item := range evidence {
 		allowed[item.ID] = true
 	}
-	for _, draft := range in.Hypotheses {
-		if draft.ID == "" || len(draft.SupportingEvidenceIDs) == 0 || len(draft.ExpectedCausalPath) == 0 {
-			missing = append(missing, "each hypothesis requires identity, supporting evidence, and an expected causal path")
+	allowedNodes := causalNodeAllowlist(evidence, runtime.state.CausalPatterns)
+	allowedEdges := causalEdgeAllowlist(evidence, runtime.state.CausalPatterns)
+	for index := range in.Hypotheses {
+		draft := &in.Hypotheses[index]
+		if len(draft.ExpectedCausalNodeIDs) == 0 && len(draft.SupportingEvidenceIDs) > 0 {
+			draft.ExpectedCausalNodeIDs = []string{"obs:" + strongestSupportingEvidenceID(draft.SupportingEvidenceIDs, evidence)}
+			draft.ExpectedCausalPath = append([]string(nil), draft.ExpectedCausalNodeIDs...)
+		}
+		if draft.ID == "" || len(draft.SupportingEvidenceIDs) == 0 || len(draft.ExpectedCausalNodeIDs) == 0 {
+			missing = append(missing, "each hypothesis requires identity, supporting evidence, and server-owned causal node IDs")
 		}
 		for _, id := range append(append([]string{}, draft.SupportingEvidenceIDs...), draft.ContradictingEvidenceIDs...) {
 			if !allowed[id] {
 				missing = append(missing, "a hypothesis references evidence outside the current allowlist")
 			}
+		}
+		for _, nodeID := range draft.ExpectedCausalNodeIDs {
+			if _, ok := allowedNodes[nodeID]; !ok {
+				missing = append(missing, "a hypothesis references a causal node outside the current server allowlist")
+			}
+		}
+		if !causalPathIsServerValid(draft.ExpectedCausalNodeIDs, draft.SupportingEvidenceIDs, allowedEdges) {
+			missing = append(missing, "a causal path must be one cited observation or a directed path through observed server graph edges")
 		}
 		if hypothesisLifecycleStatus(runtime, draft.ID) == domain.HypothesisRefuted {
 			missing = append(missing, "a refuted hypothesis identity cannot be reused; reconsideration requires a new version")
@@ -900,6 +926,29 @@ func recordHypotheses(ctx context.Context, in HypothesisSubmission) (constrained
 		}
 	}
 	return constrainedToolOutput{OK: true, Message: "hypothesis ledger updated"}, nil
+}
+
+func strongestSupportingEvidenceID(ids []string, evidence []domain.Evidence) string {
+	byID := make(map[string]domain.Evidence, len(evidence))
+	for _, item := range evidence {
+		byID[item.ID] = item
+	}
+	best := ""
+	for _, id := range ids {
+		item, ok := byID[id]
+		if !ok {
+			continue
+		}
+		if best == "" {
+			best = id
+			continue
+		}
+		current := byID[best]
+		if item.AnomalyScore > current.AnomalyScore || (item.AnomalyScore == current.AnomalyScore && (item.RelevanceScore > current.RelevanceScore || (item.RelevanceScore == current.RelevanceScore && item.ID < current.ID))) {
+			best = id
+		}
+	}
+	return best
 }
 
 func hypothesisLifecycleStatus(runtime *constrainedRuntime, id string) domain.HypothesisStatus {

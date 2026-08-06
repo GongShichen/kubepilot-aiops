@@ -10,6 +10,7 @@ import (
 
 	"github.com/kubepilot-aiops/kubepilot/benchmark/history"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/reporter"
+	"github.com/kubepilot-aiops/kubepilot/internal/config"
 )
 
 func TestSeparatedBenchmarkCommandsDoNotExposeLegacyRetrieval(t *testing.T) {
@@ -17,6 +18,21 @@ func TestSeparatedBenchmarkCommandsDoNotExposeLegacyRetrieval(t *testing.T) {
 		if command == "retrieval" {
 			t.Fatal("legacy mixed retrieval command must not be exposed")
 		}
+	}
+}
+
+func TestSemanticJudgeChatConfigDefaultsAndOverrides(t *testing.T) {
+	base := config.ChatConfig{Protocol: "openai-compatible", BaseURL: "https://chat.example", APIPath: "/chat/completions", APIKey: "chat-key", Model: "chat-model", Timeout: time.Minute, MaxTokens: 8192, Temperature: 0, MaxRetries: 3}
+	judge, err := semanticJudgeChatConfig(base)
+	if err != nil || judge != base {
+		t.Fatalf("default judge config=%+v err=%v", judge, err)
+	}
+	t.Setenv("JUDGE_CHAT_MODEL", "judge-model")
+	t.Setenv("JUDGE_CHAT_MAX_TOKENS", "1024")
+	t.Setenv("JUDGE_CHAT_TIMEOUT", "90s")
+	judge, err = semanticJudgeChatConfig(base)
+	if err != nil || judge.Model != "judge-model" || judge.MaxTokens != 1024 || judge.Timeout != 90*time.Second || judge.APIKey != "chat-key" {
+		t.Fatalf("override judge config=%+v err=%v", judge, err)
 	}
 }
 

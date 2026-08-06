@@ -196,9 +196,15 @@ func main() {
 		}
 		return components
 	}, BenchmarkReadiness: func(readinessCtx context.Context) map[string]string {
+		lokiStatus := endpointReadiness(readinessCtx, strings.TrimRight(cfg.LokiURL, "/")+"/ready")
+		if lokiStatus == "ready" {
+			if probeErr := loki.ProbeIngestion(readinessCtx); probeErr != nil {
+				lokiStatus = "not_ready"
+			}
+		}
 		components := map[string]string{
 			"prometheus": endpointReadiness(readinessCtx, strings.TrimRight(cfg.PrometheusURL, "/")+"/-/ready"),
-			"loki":       endpointReadiness(readinessCtx, strings.TrimRight(cfg.LokiURL, "/")+"/ready"),
+			"loki":       lokiStatus,
 			"jaeger":     endpointReadiness(readinessCtx, strings.TrimRight(cfg.JaegerURL, "/")+"/api/services"),
 			"kubernetes": "not_ready",
 			"embedding":  "not_ready",

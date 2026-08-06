@@ -17,7 +17,7 @@ type BusinessProbeCollector struct {
 	Client *http.Client
 }
 
-func (c BusinessProbeCollector) Collect(ctx context.Context, in *domain.Incident) ([]domain.Evidence, error) {
+func (c BusinessProbeCollector) Collect(ctx context.Context, in *domain.Incident, _ domain.EvidenceRequest) ([]domain.Evidence, error) {
 	if c.URL == "" {
 		return nil, nil
 	}

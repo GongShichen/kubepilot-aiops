@@ -106,6 +106,7 @@ func Attribute(incident *domain.Incident, item domain.Evidence, causalContributi
 func Rank(policy Policy, incident *domain.Incident, items []domain.Evidence) []domain.Evidence {
 	out := append([]domain.Evidence(nil), items...)
 	for index := range out {
+		out[index] = AnalyzeEvidence(out[index])
 		attribution := Attribute(incident, out[index], causalValue(out[index]), anomalyValue(out[index]))
 		out[index].Attribution = &attribution
 		values := map[string]float64{
@@ -114,12 +115,12 @@ func Rank(policy Policy, incident *domain.Incident, items []domain.Evidence) []d
 			"service_resource_attribution":  attribution.ServiceResourceMatch,
 			"trace_request_pod_attribution": attribution.TraceRequestPodMatch,
 			"causal_contribution":           attribution.CausalContribution,
-			"source_quality_and_rarity":     (sourceQuality(out[index]) + attribution.AnomalySpecificity) / 2,
+			"source_quality_and_rarity":     .35*sourceQuality(out[index]) + .65*attribution.AnomalySpecificity,
 		}
 		// The policy controls the deterministic feature composition. Neural
 		// reranking is fused separately so an unavailable API can never be
 		// mistaken for a zero-valued model score.
-		deterministic := weighted(values, withoutAndNormalize(policy.Evidence, "neural_similarity"))
+		deterministic := weighted(values, applicableEvidenceWeights(policy.Evidence, out[index]))
 		final := deterministic
 		if out[index].NeuralRanked {
 			final = clamp(.70*deterministic + .30*clamp(out[index].NeuralScore))
@@ -256,16 +257,53 @@ func tracePodMatch(incident *domain.Incident, item domain.Evidence) float64 {
 }
 
 func causalValue(item domain.Evidence) float64 {
-	if len(item.CausalNodeIDs) == 0 {
+	count := 0
+	for _, nodeID := range item.CausalNodeIDs {
+		if !strings.HasPrefix(nodeID, "obs:") && !strings.HasPrefix(nodeID, "signal:") {
+			count++
+		}
+	}
+	if count == 0 {
 		return 0
 	}
-	return clamp(float64(len(item.CausalNodeIDs)) / 3)
+	return clamp(float64(count) / 3)
 }
 func anomalyValue(item domain.Evidence) float64 {
-	if item.Confidence > 0 {
-		return clamp(item.Confidence)
+	if item.AnomalyScore > 0 {
+		return clamp(item.AnomalyScore)
 	}
-	return .5
+	if item.Confidence > 0 {
+		// Confidence describes observation quality, not abnormality. Preserve it
+		// only for non-operational legacy sources.
+		if item.Source != "prometheus" && item.Source != "loki" && item.Source != "jaeger" && item.Source != "kubernetes" {
+			return clamp(item.Confidence)
+		}
+	}
+	return 0
+}
+
+func applicableEvidenceWeights(weights map[string]float64, item domain.Evidence) map[string]float64 {
+	excluded := map[string]bool{"neural_similarity": true}
+	if item.Source != "jaeger" && item.Source != "trace" {
+		excluded["trace_request_pod_attribution"] = true
+	}
+	if causalValue(item) == 0 {
+		excluded["causal_contribution"] = true
+	}
+	total := 0.0
+	out := map[string]float64{}
+	for key, value := range weights {
+		if !excluded[key] {
+			out[key] = value
+			total += value
+		}
+	}
+	if total > 0 {
+		for key := range out {
+			out[key] /= total
+		}
+	}
+	return out
 }
 func sourceQuality(item domain.Evidence) float64 {
 	if item.Source == "kubernetes" {

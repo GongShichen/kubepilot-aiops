@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -70,10 +71,33 @@ func (r *AgentRegistry) runHierarchicalDiagnosis(ctx context.Context, incident *
 	var finalHypotheses []domain.HypothesisDraft
 	var selectedID string
 	var finalArbitration domain.ArbitrationResult
-	requestedSources := planSources(plan)
+	requests := planRequests(plan, incident)
+	executedRequests := map[string]bool{}
+	existingEvidenceIDs := map[string]bool{}
+	for _, item := range incident.Evidence {
+		existingEvidenceIDs[item.ID] = true
+	}
 
 	for round := 1; round <= plan.RoundLimit; round++ {
-		findings, evidence, usages, infrastructure := r.runEvidenceWorkers(ctx, incident, plan, requestedSources, deps.Collectors, budgets)
+		uniqueRequests := make([]domain.EvidenceRequest, 0, len(requests))
+		for _, request := range requests {
+			fingerprint := evidenceRequestFingerprint(request)
+			if executedRequests[fingerprint] {
+				workerRequestDuplicate.Inc()
+				continue
+			}
+			executedRequests[fingerprint] = true
+			uniqueRequests = append(uniqueRequests, request)
+		}
+		if len(uniqueRequests) == 0 {
+			debateWithoutNewEvidence.Inc()
+			if finalArbitration.Reason == "" {
+				finalArbitration = domain.ArbitrationResult{NeedsMoreEvidence: true, Reason: "supplemental evidence request duplicated the completed collection"}
+			}
+			break
+		}
+		allowedTargets := allowedEvidenceTargets(incident, allEvidence)
+		findings, collected, usages, infrastructure := r.runEvidenceWorkers(ctx, incident, plan, uniqueRequests, deps.Collectors, budgets, allowedTargets, existingEvidenceIDs)
 		investigation.Findings = append(investigation.Findings, findings...)
 		investigation.ModelUsage = append(investigation.ModelUsage, usages...)
 		for _, workerUsage := range usages {
@@ -82,7 +106,17 @@ func (r *AgentRegistry) runHierarchicalDiagnosis(ctx context.Context, incident *
 				return DiagnosisResult{}, err
 			}
 		}
-		allEvidence = mergeEvidence(allEvidence, evidence)
+		if round > 1 && len(collected) == 0 {
+			debateWithoutNewEvidence.Inc()
+			finalArbitration.NeedsMoreEvidence = true
+			finalArbitration.Accepted = false
+			finalArbitration.Reason = "supplemental collection produced no new logical evidence"
+			break
+		}
+		for _, item := range collected {
+			existingEvidenceIDs[item.ID] = true
+		}
+		allEvidence = mergeEvidence(allEvidence, collected)
 		if incident.DiagnosisLedger == nil {
 			incident.DiagnosisLedger = &domain.DiagnosisLedger{}
 		}
@@ -104,8 +138,9 @@ func (r *AgentRegistry) runHierarchicalDiagnosis(ctx context.Context, incident *
 			}
 		}
 
-		primary, primaryUsage, primaryErr := r.generateArgument(ctx, DiagnosisAgentName, incident, findings, allEvidence, candidates)
-		alternative, alternativeUsage, alternativeErr := r.generateArgument(ctx, AlternativeAgentName, incident, findings, allEvidence, candidates)
+		allEvidence = deps.Reasoning.AnnotateCausalNodes(allEvidence, activePatterns)
+		primary, primaryUsage, primaryErr := r.generateArgument(ctx, DiagnosisAgentName, incident, findings, allEvidence, candidates, activePatterns)
+		alternative, alternativeUsage, alternativeErr := r.generateArgument(ctx, AlternativeAgentName, incident, findings, allEvidence, candidates, activePatterns)
 		if err = chargeAgentUsage(budgets, primaryUsage); err != nil {
 			incident.AgentBudget = budgets.State()
 			return DiagnosisResult{}, err
@@ -138,7 +173,7 @@ func (r *AgentRegistry) runHierarchicalDiagnosis(ctx context.Context, incident *
 		// A malformed proposal is an evidence gap, not a workflow failure: the
 		// arbiter can request another bounded evidence round or safely leave the
 		// incident unresolved.
-		finalHypotheses = filterGroundedHypothesisDrafts(mergeHypothesisDrafts(primary.Hypotheses, alternative.Hypotheses), allEvidence)
+		finalHypotheses = filterGroundedHypothesisDrafts(mergeHypothesisDrafts(primary.Hypotheses, alternative.Hypotheses), allEvidence, activePatterns)
 		verified, verifyErr := deps.Reasoning.VerifyHypotheses(finalHypotheses, allEvidence, candidates, activePatterns)
 		if verifyErr != nil {
 			return DiagnosisResult{}, verifyErr
@@ -148,9 +183,10 @@ func (r *AgentRegistry) runHierarchicalDiagnosis(ctx context.Context, incident *
 			selectedID = finalArbitration.SelectedHypothesisID
 			break
 		}
-		requestedSources = critiqueSources(critique)
-		if len(requestedSources) == 0 {
-			requestedSources = planSources(plan)
+		requests = critiqueEvidenceRequests(incident, plan, critique, finalHypotheses, allEvidence)
+		if len(requests) == 0 {
+			finalArbitration.Reason = "critic identified no server-actionable evidence gap"
+			break
 		}
 	}
 
@@ -202,6 +238,9 @@ func (r *AgentRegistry) createInvestigationPlan(ctx context.Context, incident *d
 		return domain.InvestigationPlan{}, usage, structuredOutputError(PlannerAgentName, message, err)
 	}
 	plan, err := validateInvestigationPlan(response)
+	if err == nil {
+		plan = attachPlanRequests(plan, incident)
+	}
 	return plan, usage, err
 }
 
@@ -286,10 +325,35 @@ func validateInvestigationPlan(response plannerResponse) (domain.InvestigationPl
 	return domain.InvestigationPlan{Objective: objective, Tasks: tasks, StopConditions: response.StopConditions, RoundLimit: 2, CreatedAt: time.Now().UTC()}, nil
 }
 
-func (r *AgentRegistry) runEvidenceWorkers(ctx context.Context, incident *domain.Incident, plan domain.InvestigationPlan, sources []string, collectors map[string]Collector, budgets *safety.BudgetController) ([]domain.WorkerFinding, []domain.Evidence, []domain.ModelUsageEvent, []string) {
-	requested := map[string]bool{}
-	for _, source := range sources {
-		requested[source] = true
+func attachPlanRequests(plan domain.InvestigationPlan, incident *domain.Incident) domain.InvestigationPlan {
+	for index := range plan.Tasks {
+		request := defaultEvidenceRequest(incident, plan.Tasks[index].Source)
+		request.HypothesisIDs = append([]string(nil), plan.Tasks[index].HypothesisIDs...)
+		plan.Tasks[index].Request = request
+	}
+	return plan
+}
+
+func planRequests(plan domain.InvestigationPlan, incident *domain.Incident) []domain.EvidenceRequest {
+	out := make([]domain.EvidenceRequest, 0, len(plan.Tasks))
+	for _, task := range plan.Tasks {
+		request := task.Request
+		if request.Source == "" {
+			request = defaultEvidenceRequest(incident, task.Source)
+		}
+		request.HypothesisIDs = append([]string(nil), task.HypothesisIDs...)
+		out = append(out, request)
+	}
+	return out
+}
+
+func (r *AgentRegistry) runEvidenceWorkers(ctx context.Context, incident *domain.Incident, plan domain.InvestigationPlan, requests []domain.EvidenceRequest, collectors map[string]Collector, budgets *safety.BudgetController, allowedTargets, existingIDs map[string]bool) ([]domain.WorkerFinding, []domain.Evidence, []domain.ModelUsageEvent, []string) {
+	if len(requests) == 0 {
+		requests = planRequests(plan, incident)
+	}
+	tasks := map[string]domain.WorkerTask{}
+	for _, task := range plan.Tasks {
+		tasks[canonicalWorkerSource(task.Source)] = task
 	}
 	type workerResult struct {
 		finding  domain.WorkerFinding
@@ -297,16 +361,28 @@ func (r *AgentRegistry) runEvidenceWorkers(ctx context.Context, incident *domain
 		usage    domain.ModelUsageEvent
 		err      error
 	}
-	results := make(chan workerResult, len(plan.Tasks))
+	results := make(chan workerResult, len(requests))
 	var group sync.WaitGroup
-	for _, task := range plan.Tasks {
-		if !requested[task.Source] {
+	for requestIndex, rawRequest := range requests {
+		request, requestErr := validateEvidenceRequest(incident, rawRequest, rawRequest.Source, allowedTargets)
+		if requestErr != nil {
+			results <- workerResult{err: requestErr}
 			continue
 		}
-		task := task
+		task, ok := tasks[canonicalWorkerSource(request.Source)]
+		if !ok {
+			results <- workerResult{err: fmt.Errorf("no worker task for evidence source %q", request.Source)}
+			continue
+		}
+		if requestIndex > 0 || len(requests) > len(plan.Tasks) {
+			task.ID = fmt.Sprintf("%s-%d", task.ID, requestIndex+1)
+		}
+		task.Request = request
+		capturedTask := task
+		capturedRequest := request
 		if budgets != nil {
-			toolName := map[string]string{"metric": "query_prometheus_evidence", "log": "query_loki_evidence", "trace": "query_trace_evidence", "topology": "query_kubernetes_evidence"}[task.Source]
-			if _, err := budgets.ReserveTool(workerName(task.Source), toolName); err != nil {
+			toolName := map[string]string{"metric": "query_prometheus_evidence", "log": "query_loki_evidence", "trace": "query_trace_evidence", "topology": "query_kubernetes_evidence"}[capturedTask.Source]
+			if _, err := budgets.ReserveTool(workerName(capturedTask.Source), toolName); err != nil {
 				results <- workerResult{err: err}
 				continue
 			}
@@ -314,21 +390,34 @@ func (r *AgentRegistry) runEvidenceWorkers(ctx context.Context, incident *domain
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			collectorSource := task.Source
+			collectorSource := capturedTask.Source
 			if collectorSource == "topology" {
 				collectorSource = "kubernetes"
 			}
 			collector := collectors[collectorSource]
 			if collector == nil {
-				results <- workerResult{err: fmt.Errorf("%s collector unavailable", task.Source)}
+				results <- workerResult{err: fmt.Errorf("%s collector unavailable", capturedTask.Source)}
 				return
 			}
-			items, err := collector.Collect(ctx, incident)
+			items, err := collector.Collect(ctx, incident, capturedRequest)
 			if err != nil {
-				results <- workerResult{err: fmt.Errorf("%s evidence unavailable: %w", task.Source, err)}
+				results <- workerResult{err: fmt.Errorf("%s evidence unavailable: %w", capturedTask.Source, err)}
 				return
 			}
-			finding, usage, err := r.summarizeWorkerEvidence(ctx, incident, task, items)
+			if len(existingIDs) > 0 {
+				fresh := items[:0]
+				for _, item := range items {
+					if !existingIDs[item.ID] {
+						fresh = append(fresh, item)
+					}
+				}
+				items = fresh
+				if len(items) == 0 {
+					results <- workerResult{}
+					return
+				}
+			}
+			finding, usage, err := r.summarizeWorkerEvidence(ctx, incident, capturedTask, items)
 			results <- workerResult{finding: finding, evidence: items, usage: usage, err: err}
 		}()
 	}
@@ -371,9 +460,9 @@ func chargeAgentUsage(budgets *safety.BudgetController, usage domain.ModelUsageE
 
 func (r *AgentRegistry) summarizeWorkerEvidence(ctx context.Context, incident *domain.Incident, task domain.WorkerTask, evidence []domain.Evidence) (domain.WorkerFinding, domain.ModelUsageEvent, error) {
 	agentName := workerName(task.Source)
-	payload, _ := json.Marshal(map[string]any{"task": task, "incident": safeIncident(incident), "evidence": compactToolEvidence(evidence, 24<<10)})
+	payload, _ := json.Marshal(map[string]any{"task": task, "incident": safeIncident(incident), "evidence": compactEvidenceViews(evidence, 24<<10)})
 	started := time.Now()
-	message, err := r.generateRole(ctx, agentName, `Summarize the supplied evidence. Return exactly one JSON object with this shape and no wrapper: {"summary":"...","evidence_ids":["supplied-id"],"supporting_hypothesis_ids":[],"contradicting_hypothesis_ids":[],"unknowns":["..."]}.`, string(payload))
+	message, err := r.generateRole(ctx, agentName, `Summarize the supplied evidence. Return exactly one JSON object with this shape and no wrapper: {"summary":"...","evidence_ids":["supplied-id"],"supporting_hypothesis_ids":[],"contradicting_hypothesis_ids":[],"unknowns":["..."]}. Facts and anomaly_score are server-derived observations: state explicit policy effects, endpoint state, and runtime-concurrency changes exactly as supplied. Do not call a workload healthy when facts report an isolation effect or other anomaly. A request-rate change alone does not establish external demand; distinguish it from concurrent internal runtime pressure when the evidence permits.`, string(payload))
 	usage := r.modelUsage(incident.ID, agentName, message, time.Since(started))
 	if err != nil {
 		return domain.WorkerFinding{}, usage, err
@@ -390,11 +479,11 @@ func (r *AgentRegistry) summarizeWorkerEvidence(ctx context.Context, incident *d
 	return domain.WorkerFinding{TaskID: task.ID, Worker: agentName, Source: task.Source, Summary: response.Summary, EvidenceIDs: ids, SupportingHypothesisIDs: response.SupportingHypothesisIDs, ContradictingHypothesisIDs: response.ContradictingHypothesisIDs, Unknowns: response.Unknowns, CompletedAt: time.Now().UTC()}, usage, nil
 }
 
-func (r *AgentRegistry) generateArgument(ctx context.Context, agentName string, incident *domain.Incident, findings []domain.WorkerFinding, evidence []domain.Evidence, candidates []domain.RetrievalCandidate) (domain.HypothesisArgument, domain.ModelUsageEvent, error) {
-	payload := map[string]any{"incident": safeIncident(incident), "worker_findings": findings, "evidence": compactToolEvidence(evidence, 36<<10), "episodic_memory": compactToolCandidates(candidates, 5), "maximum_hypotheses": 3}
+func (r *AgentRegistry) generateArgument(ctx context.Context, agentName string, incident *domain.Incident, findings []domain.WorkerFinding, evidence []domain.Evidence, candidates []domain.RetrievalCandidate, patterns []domain.CausalPattern) (domain.HypothesisArgument, domain.ModelUsageEvent, error) {
+	payload := map[string]any{"incident": safeIncident(incident), "worker_findings": findings, "evidence": compactEvidenceViews(evidence, 36<<10), "episodic_memory": compactToolCandidates(candidates, 5), "allowed_causal_nodes": allowedCausalNodes(evidence, patterns), "allowed_causal_edges": allowedCausalEdges(evidence, patterns), "maximum_hypotheses": 3}
 	raw, _ := json.Marshal(payload)
 	started := time.Now()
-	message, err := r.generateRole(ctx, agentName, `Return exactly one JSON object with no wrapper: {"hypotheses":[{"id":"...","category":"cpu|memory|database|network|deployment|dependency","variant":"...","cause":"...","service":"...","resource":"...","prior_probability":0.0,"supporting_evidence_ids":["supplied-id"],"contradicting_evidence_ids":[],"expected_causal_path":["cause","mechanism","symptom"],"falsification_conditions":["..."]}],"evidence_ids":["supplied-id"],"uncertainty":"..."}. Return at most three falsifiable hypotheses and cite only supplied evidence IDs.`, string(raw))
+	message, err := r.generateRole(ctx, agentName, `Return exactly one JSON object with no wrapper: {"hypotheses":[{"id":"...","category":"cpu|memory|database|network|deployment|dependency","variant":"...","cause":"...","service":"...","resource":"...","prior_probability":0.0,"supporting_evidence_ids":["supplied-id"],"contradicting_evidence_ids":[],"expected_causal_node_ids":["supplied-node-id"],"falsification_conditions":["..."]}],"evidence_ids":["supplied-id"],"uncertainty":"..."}. Return at most three falsifiable hypotheses. The variant must be a concise stable snake_case mechanism, rather than a prose restatement of a symptom; use the same mechanism label when the current evidence supports the same explanation. Cite only supplied evidence IDs and allowed causal node IDs; never invent causal nodes. A causal sequence must be either one observation node belonging to cited supporting evidence, one observed pattern node, or a directed path listed by allowed_causal_edges. Do not append signal IDs or disconnected nodes.`, string(raw))
 	usage := r.modelUsage(incident.ID, agentName, message, time.Since(started))
 	if err != nil {
 		return domain.HypothesisArgument{}, usage, err
@@ -410,7 +499,7 @@ func (r *AgentRegistry) generateArgument(ctx context.Context, agentName string, 
 }
 
 func (r *AgentRegistry) generateCritique(ctx context.Context, incident *domain.Incident, primary, alternative domain.HypothesisArgument, evidence []domain.Evidence) ([]domain.Critique, domain.ModelUsageEvent, error) {
-	payload, _ := json.Marshal(map[string]any{"incident": safeIncident(incident), "primary": primary, "alternative": alternative, "evidence": compactToolEvidence(evidence, 32<<10)})
+	payload, _ := json.Marshal(map[string]any{"incident": safeIncident(incident), "primary": primary, "alternative": alternative, "evidence": compactEvidenceViews(evidence, 32<<10)})
 	started := time.Now()
 	message, err := r.generateRole(ctx, CriticAgentName, `Challenge the competing hypotheses. Return exactly one JSON object with this shape and no wrapper: {"critiques":[{"hypothesis_id":"...","challenge":"...","missing_evidence":["..."],"contradicting_evidence_ids":["supplied-id"],"recommended_sources":["metric|log|trace|topology"]}]}.`, string(payload))
 	usage := r.modelUsage(incident.ID, CriticAgentName, message, time.Since(started))
@@ -559,6 +648,27 @@ func arbitrateHypotheses(verified []domain.VerifiedHypothesis, evidence []domain
 	} else {
 		result.ScoreMargin = ordered[0].FinalScore - ordered[1].FinalScore
 	}
+	for index, item := range ordered {
+		failed := hypothesisGateFailures(item, evidence)
+		if index == 0 && result.ScoreMargin < .15 {
+			failed = append(failed, "score_margin")
+		}
+		for _, gate := range failed {
+			arbitrationGateFailure.WithLabelValues(gate).Inc()
+		}
+		breakdown := domain.HypothesisConfidenceRecord{
+			HypothesisID: item.Draft.ID, Score: item.FinalScore,
+			ModelPrior:      item.Draft.PriorProbability,
+			SupportingScore: item.SupportingScore, ContradictionScore: item.ContradictionScore,
+			CausalPathCoverage: item.CausalPathCoverage, HistoricalRelevance: item.HistoricalRelevance,
+			TopologyRelevance: item.TopologyRelevance, ComputedAt: time.Now().UTC(),
+			EvidenceSourceCount: evidenceSourceCount(item.VerifiedEvidenceIDs, evidence),
+		}
+		if len(item.ConfidenceHistory) > 0 {
+			breakdown = item.ConfidenceHistory[len(item.ConfidenceHistory)-1]
+		}
+		result.GateResults = append(result.GateResults, domain.HypothesisGateResult{HypothesisID: item.Draft.ID, ScoreBreakdown: breakdown, FailedGates: failed})
+	}
 	ranked := rankRootCause(rootRankInput{Verified: ordered, Evidence: evidence})
 	result.Accepted = ranked.Selected != nil && ranked.Selected.Draft.ID == ordered[0].Draft.ID && result.ScoreMargin >= .15
 	result.NeedsMoreEvidence = !result.Accepted
@@ -566,6 +676,57 @@ func arbitrateHypotheses(verified []domain.VerifiedHypothesis, evidence []domain
 		result.Reason = "highest-ranked hypothesis passed evidence, contradiction, confidence, and margin gates"
 	}
 	return result
+}
+
+func hypothesisGateFailures(item domain.VerifiedHypothesis, evidence []domain.Evidence) []string {
+	var failed []string
+	if item.Status != domain.HypothesisSupported && item.Status != domain.HypothesisAccepted {
+		failed = append(failed, "supported_status")
+	}
+	if item.SupportingScore < .65 {
+		failed = append(failed, "supporting_score")
+	}
+	if len(item.MissingCausalNodes) > 0 || item.CausalPathCoverage < 1 {
+		failed = append(failed, "causal_coverage")
+	}
+	if item.FinalScore < .80 {
+		failed = append(failed, "final_score")
+	}
+	if item.ContradictionScore > .10 {
+		failed = append(failed, "contradiction")
+	}
+	if len(item.VerifiedEvidenceIDs) < 2 {
+		failed = append(failed, "evidence_count")
+	}
+	sources, hasKubernetes := evidenceSources(item.VerifiedEvidenceIDs, evidence)
+	if len(sources) < 2 {
+		failed = append(failed, "independent_sources")
+	}
+	if !hasKubernetes {
+		failed = append(failed, "kubernetes_evidence")
+	}
+	return failed
+}
+
+func evidenceSources(ids []string, evidence []domain.Evidence) (map[string]bool, bool) {
+	allowed := map[string]domain.Evidence{}
+	for _, item := range evidence {
+		allowed[item.ID] = item
+	}
+	sources := map[string]bool{}
+	hasKubernetes := false
+	for _, id := range ids {
+		if item, ok := allowed[id]; ok {
+			sources[item.Source] = true
+			hasKubernetes = hasKubernetes || item.Source == "kubernetes"
+		}
+	}
+	return sources, hasKubernetes
+}
+
+func evidenceSourceCount(ids []string, evidence []domain.Evidence) int {
+	sources, _ := evidenceSources(ids, evidence)
+	return len(sources)
 }
 
 func planSources(plan domain.InvestigationPlan) []string {
@@ -594,6 +755,104 @@ func critiqueSources(items []domain.Critique) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func critiqueEvidenceRequests(incident *domain.Incident, plan domain.InvestigationPlan, critiques []domain.Critique, hypotheses []domain.HypothesisDraft, evidence []domain.Evidence) []domain.EvidenceRequest {
+	sources := critiqueSources(critiques)
+	if len(sources) == 0 {
+		return nil
+	}
+	baseBySource := map[string]domain.EvidenceRequest{}
+	for _, request := range planRequests(plan, incident) {
+		baseBySource[canonicalWorkerSource(request.Source)] = request
+	}
+	allowed := allowedEvidenceTargets(incident, evidence)
+	targets := []domain.ResourceRef{{Namespace: incident.Namespace, Service: incident.Service, Resource: incident.Resource}}
+	for _, hypothesis := range hypotheses {
+		identity := resourceIdentity(hypothesis.Service, hypothesis.Resource)
+		if identity == "" || !allowed[identity] || identity == resourceIdentity(incident.Service, incident.Resource) {
+			continue
+		}
+		targets = append(targets, domain.ResourceRef{Namespace: incident.Namespace, Service: hypothesis.Service, Resource: hypothesis.Service, Kind: "service"})
+	}
+	missing := make([]string, 0)
+	hypothesisIDs := make([]string, 0)
+	for _, critique := range critiques {
+		missing = append(missing, critique.MissingEvidence...)
+		if critique.HypothesisID != "" {
+			hypothesisIDs = append(hypothesisIDs, critique.HypothesisID)
+		}
+	}
+	signals := signalKindsFromMissingEvidence(missing)
+	requests := make([]domain.EvidenceRequest, 0, len(sources)*len(targets))
+	for _, source := range sources {
+		base := baseBySource[source]
+		if base.Source == "" {
+			base = defaultEvidenceRequest(incident, source)
+		}
+		base.Source = source
+		base.SignalKinds = signals
+		base.HypothesisIDs = normalizeStrings(hypothesisIDs)
+		for _, target := range targets {
+			request := base
+			request.Targets = []domain.ResourceRef{target}
+			requests = append(requests, request)
+		}
+	}
+	return requests
+}
+
+func signalKindsFromMissingEvidence(items []string) []string {
+	text := strings.ToLower(strings.Join(items, " "))
+	// This is a source-agnostic observation vocabulary, not a fault or case
+	// classifier. It only narrows collectors to facts explicitly requested by
+	// the critic.
+	vocabulary := []string{"cpu", "memory", "latency", "error", "throughput", "restart", "ready", "replica", "endpoint", "probe", "resource", "config", "network", "dependency", "connection", "saturation", "trace", "log"}
+	var out []string
+	for _, signal := range vocabulary {
+		if strings.Contains(text, signal) {
+			out = append(out, signal)
+		}
+	}
+	return out
+}
+
+func allowedEvidenceTargets(incident *domain.Incident, evidence []domain.Evidence) map[string]bool {
+	allowed := map[string]bool{resourceIdentity(incident.Service, incident.Resource): true}
+	for _, item := range evidence {
+		facts := item.Facts
+		if len(facts) == 0 {
+			facts = item.Content
+		}
+		for _, key := range []string{"discovered_dependencies", "dependencies"} {
+			for _, dependency := range stringSlice(facts[key]) {
+				allowed[resourceIdentity(dependency, dependency)] = true
+			}
+		}
+		for _, key := range []string{"slow_service", "error_service", "dependency"} {
+			if value, ok := facts[key].(string); ok && value != "" {
+				allowed[resourceIdentity(value, value)] = true
+			}
+		}
+	}
+	return allowed
+}
+
+func stringSlice(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if value, ok := item.(string); ok {
+				out = append(out, value)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func workerName(source string) string {
@@ -643,7 +902,7 @@ func mergeHypothesisDrafts(groups ...[]domain.HypothesisDraft) []domain.Hypothes
 	for _, group := range groups {
 		for _, item := range group {
 			key := strings.ToLower(strings.Join([]string{item.Cause, item.Category, item.Variant, item.Service, item.Resource}, "|"))
-			if item.ID == "" || seen[key] {
+			if item.ID == "" || seen[key] || containsEquivalentHypothesis(out, item) {
 				continue
 			}
 			seen[key] = true
@@ -656,11 +915,96 @@ func mergeHypothesisDrafts(groups ...[]domain.HypothesisDraft) []domain.Hypothes
 	return out
 }
 
+// containsEquivalentHypothesis removes duplicate wording from the blind
+// alternative pass before arbitration. It requires the same target, causal
+// mechanism, and overlapping evidence as well as a shared specific mechanism
+// token; superficially similar resource hypotheses (for example load versus a
+// configured limit) remain separate alternatives.
+func containsEquivalentHypothesis(existing []domain.HypothesisDraft, candidate domain.HypothesisDraft) bool {
+	for _, item := range existing {
+		if !sameHypothesisTarget(item, candidate) || !sameStringSet(item.ExpectedCausalNodeIDs, candidate.ExpectedCausalNodeIDs) {
+			continue
+		}
+		if stringSetJaccard(item.SupportingEvidenceIDs, candidate.SupportingEvidenceIDs) < .5 {
+			continue
+		}
+		if stringSetJaccard(specificMechanismTokens(item), specificMechanismTokens(candidate)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func sameHypothesisTarget(left, right domain.HypothesisDraft) bool {
+	return strings.EqualFold(strings.TrimSpace(left.Category), strings.TrimSpace(right.Category)) &&
+		strings.EqualFold(strings.TrimSpace(left.Service), strings.TrimSpace(right.Service)) &&
+		strings.EqualFold(strings.TrimSpace(left.Resource), strings.TrimSpace(right.Resource))
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) == 0 || len(left) != len(right) {
+		return false
+	}
+	return stringSetJaccard(left, right) == 1
+}
+
+func stringSetJaccard(left, right []string) float64 {
+	leftSet, rightSet := map[string]bool{}, map[string]bool{}
+	for _, value := range left {
+		if value = strings.ToLower(strings.TrimSpace(value)); value != "" {
+			leftSet[value] = true
+		}
+	}
+	for _, value := range right {
+		if value = strings.ToLower(strings.TrimSpace(value)); value != "" {
+			rightSet[value] = true
+		}
+	}
+	if len(leftSet) == 0 || len(rightSet) == 0 {
+		return 0
+	}
+	intersection := 0
+	for value := range leftSet {
+		if rightSet[value] {
+			intersection++
+		}
+	}
+	return float64(intersection) / float64(len(leftSet)+len(rightSet)-intersection)
+}
+
+func specificMechanismTokens(item domain.HypothesisDraft) []string {
+	ignored := map[string]bool{
+		"a": true, "an": true, "and": true, "cause": true, "caused": true,
+		"cpu": true, "memory": true, "network": true, "database": true,
+		"error": true, "failure": true, "high": true, "latency": true,
+		"low": true, "pressure": true, "resource": true, "root": true,
+		"saturation": true, "service": true, "the": true, "to": true,
+	}
+	values := strings.FieldsFunc(strings.ToLower(item.Cause+" "+item.Variant), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+	seen := map[string]bool{}
+	for _, value := range values {
+		if len(value) >= 3 && !ignored[value] {
+			seen[value] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // filterGroundedHypothesisDrafts enforces the server-owned evidence boundary
 // for untrusted model output. It deliberately does not alter the original
 // arguments, which remain available in Investigation.Debate for audit.
-func filterGroundedHypothesisDrafts(drafts []domain.HypothesisDraft, evidence []domain.Evidence) []domain.HypothesisDraft {
+func filterGroundedHypothesisDrafts(drafts []domain.HypothesisDraft, evidence []domain.Evidence, patternSets ...[]domain.CausalPattern) []domain.HypothesisDraft {
 	allowed := make(map[string]struct{}, len(evidence))
+	patterns := flattenCausalPatterns(patternSets...)
+	allowedNodes := causalNodeAllowlist(evidence, patterns)
+	allowedEdges := causalEdgeAllowlist(evidence, patterns)
 	for _, item := range evidence {
 		if item.ID != "" {
 			allowed[item.ID] = struct{}{}
@@ -668,15 +1012,131 @@ func filterGroundedHypothesisDrafts(drafts []domain.HypothesisDraft, evidence []
 	}
 	out := make([]domain.HypothesisDraft, 0, len(drafts))
 	for _, draft := range drafts {
-		if draft.ID == "" || len(draft.SupportingEvidenceIDs) == 0 || len(draft.ExpectedCausalPath) == 0 {
+		if draft.ID == "" || len(draft.SupportingEvidenceIDs) == 0 || len(draft.ExpectedCausalNodeIDs) == 0 {
 			continue
 		}
 		if !allEvidenceReferencesKnown(draft.SupportingEvidenceIDs, allowed) || !allEvidenceReferencesKnown(draft.ContradictingEvidenceIDs, allowed) {
 			continue
 		}
+		if !allEvidenceReferencesKnown(draft.ExpectedCausalNodeIDs, allowedNodes) || !causalPathIsServerValid(draft.ExpectedCausalNodeIDs, draft.SupportingEvidenceIDs, allowedEdges) {
+			continue
+		}
+		// Downstream causal learning keeps the legacy storage field for schema
+		// compatibility, but it now contains canonical server node IDs only.
+		draft.ExpectedCausalPath = append([]string(nil), draft.ExpectedCausalNodeIDs...)
 		out = append(out, draft)
 	}
 	return out
+}
+
+func allowedCausalNodes(evidence []domain.Evidence, patterns []domain.CausalPattern) []map[string]string {
+	values := causalNodeAllowlist(evidence, patterns)
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]map[string]string, 0, len(keys))
+	for _, key := range keys {
+		value := map[string]string{"id": key, "type": "observed_pattern_node"}
+		if strings.HasPrefix(key, "obs:") {
+			value["type"] = "observation"
+			value["evidence_id"] = strings.TrimPrefix(key, "obs:")
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func allowedCausalEdges(evidence []domain.Evidence, patterns []domain.CausalPattern) []map[string]string {
+	edges := causalEdgeAllowlist(evidence, patterns)
+	keys := make([]string, 0, len(edges))
+	for key := range edges {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]map[string]string, 0, len(keys))
+	for _, key := range keys {
+		parts := strings.SplitN(key, "\x00", 2)
+		out = append(out, map[string]string{"from": parts[0], "to": parts[1]})
+	}
+	return out
+}
+
+func flattenCausalPatterns(groups ...[]domain.CausalPattern) []domain.CausalPattern {
+	var out []domain.CausalPattern
+	for _, group := range groups {
+		out = append(out, group...)
+	}
+	return out
+}
+
+func causalNodeAllowlist(evidence []domain.Evidence, patterns []domain.CausalPattern) map[string]struct{} {
+	patternNodes := map[string]struct{}{}
+	for _, pattern := range patterns {
+		if pattern.Status != "active" {
+			continue
+		}
+		for _, node := range pattern.Nodes {
+			patternNodes[node.ID] = struct{}{}
+		}
+	}
+	allowed := map[string]struct{}{}
+	for _, item := range evidence {
+		if item.ID == "" {
+			continue
+		}
+		allowed["obs:"+item.ID] = struct{}{}
+		for _, nodeID := range item.CausalNodeIDs {
+			if _, isPatternNode := patternNodes[nodeID]; isPatternNode {
+				allowed[nodeID] = struct{}{}
+			}
+		}
+	}
+	return allowed
+}
+
+func causalEdgeAllowlist(evidence []domain.Evidence, patterns []domain.CausalPattern) map[string]struct{} {
+	nodes := causalNodeAllowlist(evidence, patterns)
+	edges := map[string]struct{}{}
+	for _, pattern := range patterns {
+		if pattern.Status != "active" {
+			continue
+		}
+		for _, edge := range pattern.Edges {
+			if _, fromObserved := nodes[edge.From]; !fromObserved {
+				continue
+			}
+			if _, toObserved := nodes[edge.To]; !toObserved {
+				continue
+			}
+			edges[edge.From+"\x00"+edge.To] = struct{}{}
+		}
+	}
+	return edges
+}
+
+func causalPathIsServerValid(expected, supporting []string, edges map[string]struct{}) bool {
+	if len(expected) == 0 {
+		return false
+	}
+	if len(expected) == 1 {
+		if !strings.HasPrefix(expected[0], "obs:") {
+			return true
+		}
+		return slices.Contains(supporting, strings.TrimPrefix(expected[0], "obs:"))
+	}
+	for _, nodeID := range expected {
+		if strings.HasPrefix(nodeID, "obs:") {
+			return false
+		}
+	}
+	for index := 0; index < len(expected)-1; index++ {
+		if _, ok := edges[expected[index]+"\x00"+expected[index+1]]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func allEvidenceReferencesKnown(ids []string, allowed map[string]struct{}) bool {

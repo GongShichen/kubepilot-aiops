@@ -12,7 +12,7 @@ import (
 
 func TestMetricQueriesCoverRecoverySignals(t *testing.T) {
 	queries := MetricQueries("kubepilot-benchmark", "gateway-service")
-	for _, name := range []string{"cpu", "cpu_current", "cpu_throttling", "cpu_throttling_current", "memory", "qps", "qps_current", "error_rate", "error_rate_current", "p95_latency", "p95_latency_current", "restarts", "deployment_availability"} {
+	for _, name := range []string{"cpu", "cpu_current", "cpu_throttling", "cpu_throttling_current", "runtime_goroutines", "runtime_goroutines_current", "memory", "qps", "qps_current", "error_rate", "error_rate_current", "p95_latency", "p95_latency_current", "restarts", "deployment_availability"} {
 		query, ok := queries[name]
 		if !ok || query == "" {
 			t.Fatalf("missing query %s", name)

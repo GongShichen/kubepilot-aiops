@@ -11,7 +11,7 @@ import (
 )
 
 type Collector interface {
-	Collect(context.Context, *domain.Incident) ([]domain.Evidence, error)
+	Collect(context.Context, *domain.Incident, domain.EvidenceRequest) ([]domain.Evidence, error)
 }
 type WorkflowState struct {
 	Workflow           string                                 `json:"workflow"`

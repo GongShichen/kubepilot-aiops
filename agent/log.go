@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	evidencenorm "github.com/kubepilot-aiops/kubepilot/internal/evidence"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
 	"github.com/kubepilot-aiops/kubepilot/tools"
 )
@@ -22,12 +23,14 @@ type LogCollector struct {
 	Indexed indexedLogSearch
 }
 
-func (a LogCollector) Collect(ctx context.Context, in *domain.Incident) ([]domain.Evidence, error) {
-	end := time.Now().UTC()
-	start := in.EvidenceStartAt
-	if start.IsZero() {
-		start = in.CreatedAt.Add(-5 * time.Minute)
+func (a LogCollector) Collect(ctx context.Context, in *domain.Incident, request domain.EvidenceRequest) ([]domain.Evidence, error) {
+	request, err := validateEvidenceRequest(in, request, "log", nil)
+	if err != nil {
+		return nil, err
 	}
+	in = requestTargetIncident(in, request)
+	end := time.Now().UTC()
+	start := request.WindowStart
 	entries, err := a.Loki.QueryRange(ctx, incidentLogQuery(in.Namespace, in.Service), start, end, 200)
 	if err != nil {
 		return nil, err
@@ -43,12 +46,12 @@ func (a LogCollector) Collect(ctx context.Context, in *domain.Incident) ([]domai
 		}
 	}
 	if a.Indexed == nil {
-		return out, nil
+		return evidencenorm.Normalize(in, request, out), nil
 	}
 	docs, freshness, indexErr := a.Indexed.Search(ctx, strings.Join(queryParts, "\n"), in.Service, in.Namespace)
 	if indexErr != nil {
 		// Loki is the authoritative fallback when the optional index is stale or unavailable.
-		return out, nil
+		return evidencenorm.Normalize(in, request, out), nil
 	}
 	stale := freshness == 0 || freshness > 30*time.Second
 	for _, doc := range docs {
@@ -58,7 +61,7 @@ func (a LogCollector) Collect(ctx context.Context, in *domain.Incident) ([]domai
 		}
 		out = append(out, domain.Evidence{Source: "loki", Type: "indexed_log_template", Timestamp: end, WindowStart: start, WindowEnd: end, Namespace: in.Namespace, Service: in.Service, Resource: in.Resource, Summary: doc.Template, Confidence: map[bool]float64{true: .5, false: .9}[stale], TemplateID: doc.ID, Content: map[string]any{"index_freshness_ms": freshness.Milliseconds(), "stale": stale, "index_metadata": doc.RootCause, "level": level, "occurrence_count": doc.OccurrenceCount, "semantic_score": doc.Score}})
 	}
-	return out, nil
+	return evidencenorm.Normalize(in, request, out), nil
 }
 
 func templateLevel(template string) string {

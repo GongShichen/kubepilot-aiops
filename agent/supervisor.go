@@ -381,7 +381,7 @@ func collectVerificationRound(ctx context.Context, incident *domain.Incident, de
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			evidence, err := collector.Collect(ctx, incident)
+			evidence, err := collector.Collect(ctx, incident, defaultEvidenceRequest(incident, source))
 			result := verificationRoundResult{source: source, err: err}
 			if err == nil {
 				result.probe = evaluateVerificationEvidence(source, evidence)

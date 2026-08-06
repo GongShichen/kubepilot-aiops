@@ -16,12 +16,16 @@ type singlePassDiagnosisModel struct{}
 
 func (singlePassDiagnosisModel) Generate(_ context.Context, messages []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	ids := modelPayloadEvidenceIDs(messages[len(messages)-1].Content)
+	nodeIDs := []string(nil)
+	if len(ids) > 0 {
+		nodeIDs = []string{"obs:" + ids[0]}
+	}
 	raw, _ := json.Marshal(map[string]any{
 		"hypotheses": []map[string]any{{
 			"id": "root", "category": "cpu", "variant": "busy_loop", "cause": "CPU saturation",
 			"service": "gateway-service", "resource": "gateway-service", "prior_probability": 1.0,
 			"description":             "Provider-added explanation that is not part of the server contract",
-			"supporting_evidence_ids": ids, "expected_causal_path": []string{"CPU saturation", "timeout"},
+			"supporting_evidence_ids": ids, "expected_causal_node_ids": nodeIDs,
 			"falsification_conditions": []string{"CPU is normal"},
 		}},
 		"selected_hypothesis_id": "root",
@@ -60,7 +64,7 @@ type strategyCollector struct {
 	source, evidenceType string
 }
 
-func (collector strategyCollector) Collect(_ context.Context, incident *domain.Incident) ([]domain.Evidence, error) {
+func (collector strategyCollector) Collect(_ context.Context, incident *domain.Incident, _ domain.EvidenceRequest) ([]domain.Evidence, error) {
 	return []domain.Evidence{{ID: incident.ID + "-" + collector.source, Source: collector.source, Type: collector.evidenceType, Summary: incident.Service + " CPU saturation throttling timeout error", Content: map[string]any{"level": "error", "result": "throttling timeout error"}, Timestamp: time.Now().UTC(), Namespace: incident.Namespace, Service: incident.Service, Resource: incident.Resource, Confidence: .9}}, nil
 }
 

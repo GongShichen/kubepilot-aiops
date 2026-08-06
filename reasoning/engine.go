@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	evidencenorm "github.com/kubepilot-aiops/kubepilot/internal/evidence"
 	evidencepolicy "github.com/kubepilot-aiops/kubepilot/internal/reasoning/evidence"
 	"github.com/kubepilot-aiops/kubepilot/internal/safety"
 	topologyretrieval "github.com/kubepilot-aiops/kubepilot/retrieval/topology"
@@ -81,6 +82,8 @@ func (e *Engine) RankEvidence(incident *domain.Incident, input []domain.Evidence
 	if incident == nil {
 		return RankedEvidence{}, fmt.Errorf("incident is required")
 	}
+	request := domain.EvidenceRequest{Source: "mixed", Targets: []domain.ResourceRef{{Namespace: incident.Namespace, Service: incident.Service, Resource: incident.Resource}}, WindowStart: incident.EvidenceStartAt, WindowEnd: time.Now().UTC()}
+	input = evidencenorm.Normalize(incident, request, input)
 	ledger := domain.DiagnosisLedger{EvidenceOriginalCount: len(input)}
 	original, _ := json.Marshal(input)
 	ledger.EvidenceOriginalBytes = len(original)
@@ -100,6 +103,7 @@ func (e *Engine) RankEvidence(incident *domain.Incident, input []domain.Evidence
 		if !insideWindow(item, start, end) {
 			continue
 		}
+		item = evidencepolicy.AnalyzeEvidence(item)
 		item.RelevanceScore, item.RankingReasons = evidenceScore(incident, item, start, end)
 		if previous, exists := dedup[item.ID]; !exists || item.RelevanceScore > previous.RelevanceScore {
 			dedup[item.ID] = item
@@ -139,7 +143,10 @@ func (e *Engine) RankEvidence(incident *domain.Incident, input []domain.Evidence
 }
 
 func evidenceForModelContext(item domain.Evidence) domain.Evidence {
-	content := item.Content
+	content := item.Facts
+	if content == nil {
+		content = item.Content
+	}
 	if content == nil {
 		content = item.Data
 	}
@@ -156,7 +163,8 @@ func evidenceForModelContext(item domain.Evidence) domain.Evidence {
 		}
 		content = clean
 	}
-	item.Content = content
+	item.Facts = content
+	item.Content = nil
 	item.Data = nil
 	return item
 }
@@ -205,7 +213,8 @@ func evidenceScore(in *domain.Incident, e domain.Evidence, start, end time.Time)
 	if e.TraceID != "" && (in.TraceID == "" || e.TraceID == in.TraceID) {
 		correlation += .4
 	}
-	text := strings.ToLower(e.Summary + " " + stringify(e.Content) + " " + stringify(e.Data))
+	facts := evidenceFacts(e)
+	text := strings.ToLower(e.Summary + " " + stringify(facts))
 	if in.Resource != "" && strings.Contains(text, strings.ToLower(in.Resource)) {
 		correlation += .3
 	}
@@ -218,7 +227,7 @@ func evidenceScore(in *domain.Incident, e domain.Evidence, start, end time.Time)
 		// only the returned value prevents a healthy throttling query from being
 		// treated as throttling evidence merely because its PromQL contains that
 		// word.
-		observationText = strings.ToLower(stringify(observedResult(e.Content, e.Data)))
+		observationText = strings.ToLower(stringify(observedResult(facts)))
 	}
 	discriminative := discriminativeness(observationText)
 	quality := map[string]float64{"kubernetes": 1, "prometheus": .95, "metric": .95, "jaeger": .9, "trace": .9, "loki": .85, "log": .85, "historical": .65}[strings.ToLower(e.Source)]
@@ -255,11 +264,19 @@ func observedResult(maps ...map[string]any) any {
 	return nil
 }
 
-func severityRarity(e domain.Evidence, text string) float64 {
-	level := strings.ToLower(findString(e.Content, "level", "severity"))
-	if level == "" {
-		level = strings.ToLower(findString(e.Data, "level", "severity"))
+func evidenceFacts(item domain.Evidence) map[string]any {
+	if item.Facts != nil {
+		return item.Facts
 	}
+	if item.Content != nil {
+		return item.Content
+	}
+	return item.Data
+}
+
+func severityRarity(e domain.Evidence, text string) float64 {
+	facts := evidenceFacts(e)
+	level := strings.ToLower(findString(facts, "level", "severity"))
 	if level == "" {
 		for _, candidate := range []string{"critical", "fatal", "error", "warn", "info", "debug"} {
 			if strings.Contains(text, `"level":"`+candidate+`"`) || strings.Contains(text, "level="+candidate) {
@@ -272,7 +289,7 @@ func severityRarity(e domain.Evidence, text string) float64 {
 	if level == "" {
 		score = .3
 	}
-	if count, ok := numeric(firstValue(e.Content, "occurrence_count")); ok {
+	if count, ok := numeric(firstValue(facts, "occurrence_count")); ok {
 		switch {
 		case count <= 2:
 			score = math.Max(score, .9)
@@ -534,6 +551,7 @@ func (e *Engine) BuildFeatures(incident *domain.Incident, evidence []domain.Evid
 	f := domain.IncidentFeatures{IncidentID: incident.ID, Cluster: incident.Cluster, Namespace: incident.Namespace, Service: incident.Service, Resource: incident.Resource, WindowStart: incident.EvidenceStartAt, WindowEnd: time.Now().UTC(), Observed: map[string]float64{}}
 	terms, types, traces, templates, topology, causal := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, item := range evidence {
+		facts := evidenceFacts(item)
 		types[firstNonEmpty(item.Type, item.Kind)] = true
 		if item.TraceID != "" {
 			traces[item.TraceID] = true
@@ -544,20 +562,20 @@ func (e *Engine) BuildFeatures(incident *domain.Incident, evidence []domain.Evid
 		if item.Service != "" {
 			topology[item.Service] = true
 		}
-		for _, service := range InferTopologyServices(item.Summary, stringify(item.Content), stringify(item.Data)) {
+		for _, service := range InferTopologyServices(item.Summary, stringify(facts)) {
 			topology[service] = true
 		}
 		for _, id := range item.CausalNodeIDs {
 			causal[id] = true
 		}
-		featureText := item.Summary + " " + stringify(item.Content) + " " + stringify(item.Data)
+		featureText := item.Summary + " " + stringify(facts)
 		if sourceIn(item.Source, "metric", "prometheus") {
-			featureText = item.Summary + " " + stringify(observedResult(item.Content, item.Data))
+			featureText = item.Summary + " " + stringify(observedResult(facts))
 		}
 		for _, term := range tokenize(featureText) {
 			terms[term] = true
 		}
-		for _, values := range []map[string]any{item.Content, item.Data} {
+		for _, values := range []map[string]any{facts} {
 			for key, value := range values {
 				if key == "query" {
 					continue
@@ -567,9 +585,7 @@ func (e *Engine) BuildFeatures(incident *domain.Incident, evidence []domain.Evid
 				}
 			}
 		}
-		if revision := findString(item.Content, "revision", "deployment_revision"); revision != "" {
-			f.Revision = revision
-		} else if revision = findString(item.Data, "revision", "deployment_revision"); revision != "" {
+		if revision := findString(facts, "revision", "deployment_revision"); revision != "" {
 			f.Revision = revision
 		}
 	}
@@ -615,18 +631,20 @@ func BuildIncidentDependencyGraph(incident *domain.Incident, evidence []domain.E
 		}
 		key := from + ">" + to + ":" + kind
 		edge := domain.DependencyEdge{From: from, To: to, Kind: kind}
-		if value, ok := numeric(evidence.Content["latency_ms"]); ok {
+		facts := evidenceFacts(evidence)
+		if value, ok := numeric(facts["latency_ms"]); ok {
 			edge.LatencyMS = value
 		}
-		if value, ok := numeric(evidence.Content["error_rate"]); ok {
+		if value, ok := numeric(facts["error_rate"]); ok {
 			edge.ErrorRate = value
 		}
 		edges[key] = edge
 		paths[from+">"+to] = []string{from, to}
 	}
 	for _, item := range evidence {
-		text := strings.ToLower(item.Summary + " " + stringify(item.Content) + " " + stringify(item.Data))
-		observed := InferTopologyServices(item.Summary, stringify(item.Content), stringify(item.Data))
+		facts := evidenceFacts(item)
+		text := strings.ToLower(item.Summary + " " + stringify(facts))
+		observed := InferTopologyServices(item.Summary, stringify(facts))
 		from := firstNonEmpty(item.Service, incident.Service)
 		for _, dependency := range observed {
 			if dependency == from {
@@ -644,10 +662,7 @@ func BuildIncidentDependencyGraph(incident *domain.Incident, evidence []domain.E
 			}
 		}
 		for _, key := range []string{"upstream_service", "downstream_service", "dependency", "target_service", "endpoint_service"} {
-			dependency := findString(item.Content, key)
-			if dependency == "" {
-				dependency = findString(item.Data, key)
-			}
+			dependency := findString(facts, key)
 			if dependency != "" {
 				addNode(dependency, "service", dependency, "dependency")
 				addEdge(from, dependency, key, item)
@@ -702,14 +717,22 @@ func (e *Engine) AnnotateCausalNodes(evidence []domain.Evidence, patterns []doma
 		for _, id := range out[index].CausalNodeIDs {
 			matched[id] = true
 		}
-		text := strings.ToLower(out[index].Summary + " " + stringify(out[index].Content) + " " + stringify(out[index].Data))
+		// A healthy configuration still identifies workload scope, but it is
+		// not evidence that a causal mechanism was observed. Pattern nodes are
+		// therefore attached only to an observation with deterministic anomaly
+		// support; the observation node itself remains available for audit.
+		if out[index].AnomalyScore <= 0 {
+			out[index].CausalNodeIDs = keys(matched)
+			continue
+		}
+		text := strings.ToLower(out[index].Summary + " " + stringify(evidenceFacts(out[index])))
 		for _, pattern := range patterns {
 			if pattern.Status != "active" {
 				continue
 			}
 			for _, node := range pattern.Nodes {
 				for _, token := range node.Match {
-					if strings.Contains(text, strings.ToLower(token)) {
+					if causalTokenMatches(text, token) {
 						matched[node.ID] = true
 						break
 					}
@@ -719,6 +742,40 @@ func (e *Engine) AnnotateCausalNodes(evidence []domain.Evidence, patterns []doma
 		out[index].CausalNodeIDs = keys(matched)
 	}
 	return out
+}
+
+// causalTokenMatches accepts the structured spellings emitted by telemetry
+// (for example `network_policies`) as well as prose (`network policy`). This
+// is only a representation normalization; nodes are still attached solely to
+// anomalous observations and active server-owned patterns.
+func causalTokenMatches(text, token string) bool {
+	needle := strings.ToLower(strings.TrimSpace(token))
+	if needle == "" {
+		return false
+	}
+	if strings.Contains(text, needle) {
+		return true
+	}
+	compactText := compactCausalToken(text)
+	compactNeedle := compactCausalToken(needle)
+	if len(compactNeedle) < 4 {
+		return false
+	}
+	if strings.Contains(compactText, compactNeedle) {
+		return true
+	}
+	// Structured field names often use plural nouns (`network_policies`).
+	// Normalize the ordinary plural spelling before comparing the compact form.
+	return strings.Contains(strings.ReplaceAll(compactText, "ies", "y"), compactNeedle)
+}
+
+func compactCausalToken(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return unicode.ToLower(r)
+		}
+		return -1
+	}, value)
 }
 
 type CandidateLists struct {
@@ -963,7 +1020,7 @@ func hasTopologyGraph(graph domain.IncidentDependencyGraph) bool {
 func (e *Engine) MatchCausalPatterns(features domain.IncidentFeatures, evidence []domain.Evidence, patterns []domain.CausalPattern) []domain.CausalPattern {
 	text := strings.Join(features.Terms, " ")
 	for _, item := range evidence {
-		text += " " + strings.ToLower(item.Summary+" "+stringify(item.Content)+" "+stringify(item.Data))
+		text += " " + strings.ToLower(item.Summary+" "+stringify(evidenceFacts(item)))
 	}
 	type scored struct {
 		pattern  domain.CausalPattern
@@ -1019,14 +1076,38 @@ func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []do
 		}
 		verified := domain.VerifiedHypothesis{Draft: draft}
 		seenSource := map[string]bool{}
-		for _, id := range draft.SupportingEvidenceIDs {
+		sourceSupport := map[string]float64{}
+		supportingIDs := append([]string(nil), draft.SupportingEvidenceIDs...)
+		// Kubernetes scope evidence is server-attributed rather than model
+		// asserted. It establishes the exact workload/topology for a candidate
+		// but is deliberately not treated as anomalous support unless the
+		// hypothesis also cites a matching abnormal Kubernetes observation.
+		for _, id := range scopedKubernetesEvidenceIDs(draft, supportingIDs, allowed) {
+			if !containsEvidenceID(supportingIDs, id) {
+				supportingIDs = append(supportingIDs, id)
+			}
+		}
+		expectedNodeIDs := draft.ExpectedCausalNodeIDs
+		if len(expectedNodeIDs) == 0 {
+			// Compatibility for pre-node-ID clients: legacy natural-language paths
+			// are not matched. The server deterministically projects cited current
+			// observations to canonical nodes instead.
+			for _, evidenceID := range draft.SupportingEvidenceIDs {
+				expectedNodeIDs = append(expectedNodeIDs, "obs:"+evidenceID)
+			}
+			verified.Draft.ExpectedCausalNodeIDs = append([]string(nil), expectedNodeIDs...)
+			verified.Draft.ExpectedCausalPath = append([]string(nil), expectedNodeIDs...)
+		}
+		for _, id := range supportingIDs {
 			item, ok := allowed[id]
 			if !ok {
 				return nil, fmt.Errorf("hypothesis %s references unknown or expired evidence ID %s", draft.ID, id)
 			}
 			verified.VerifiedEvidenceIDs = append(verified.VerifiedEvidenceIDs, id)
 			seenSource[item.Source] = true
-			verified.SupportingScore += item.RelevanceScore
+			if evidenceSupportsExpectedNode(item, expectedNodeIDs) {
+				sourceSupport[item.Source] = math.Max(sourceSupport[item.Source], item.AnomalyScore)
+			}
 			if strings.EqualFold(item.Source, "kubernetes") {
 				// Topology confidence is primarily a property of the current
 				// incident. Historical candidates may strengthen it below, but a
@@ -1042,7 +1123,16 @@ func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []do
 				verified.TopologyRelevance = math.Max(verified.TopologyRelevance, clamp(topologyScore))
 			}
 		}
-		verified.SupportingScore = clamp(verified.SupportingScore / float64(len(draft.SupportingEvidenceIDs)))
+		contributors := 0
+		for _, score := range sourceSupport {
+			if score > 0 {
+				verified.SupportingScore += score
+				contributors++
+			}
+		}
+		if contributors > 0 {
+			verified.SupportingScore = clamp(verified.SupportingScore / float64(contributors))
+		}
 		for _, id := range draft.ContradictingEvidenceIDs {
 			if _, ok := allowed[id]; !ok {
 				return nil, fmt.Errorf("hypothesis %s references unknown or expired contradiction evidence ID %s", draft.ID, id)
@@ -1050,29 +1140,12 @@ func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []do
 			verified.ContradictionScore += .25
 		}
 		verified.ContradictionScore = clamp(verified.ContradictionScore)
-		matchedNodes := map[string]bool{}
-		for _, item := range evidence {
-			for _, node := range item.CausalNodeIDs {
-				matchedNodes[node] = true
-			}
-			summary := strings.ToLower(item.Summary + " " + stringify(item.Content))
-			for _, node := range draft.ExpectedCausalPath {
-				if strings.Contains(summary, strings.ToLower(node)) || matchedNodes[normalizeCausalNodeID(node)] {
-					matchedNodes[node] = true
-				}
-			}
+		coverage, missing, coverageErr := canonicalCausalCoverage(expectedNodeIDs, evidence, patterns)
+		if coverageErr != nil {
+			return nil, fmt.Errorf("hypothesis %s causal nodes: %w", draft.ID, coverageErr)
 		}
-		for _, node := range draft.ExpectedCausalPath {
-			if matchedNodes[node] || matchedNodes[normalizeCausalNodeID(node)] || expectedNodeObserved(node, draft.Category, matchedNodes, patterns) {
-				continue
-			}
-			if !matchedNodes[node] {
-				verified.MissingCausalNodes = append(verified.MissingCausalNodes, node)
-			}
-		}
-		if len(draft.ExpectedCausalPath) > 0 {
-			verified.CausalPathCoverage = 1 - float64(len(verified.MissingCausalNodes))/float64(len(draft.ExpectedCausalPath))
-		}
+		verified.CausalPathCoverage = coverage
+		verified.MissingCausalNodes = missing
 		for _, candidate := range candidates {
 			if candidate.Category == draft.Category {
 				verified.HistoricalRelevance = math.Max(verified.HistoricalRelevance, candidate.Rank.FinalScore)
@@ -1097,6 +1170,7 @@ func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []do
 			HypothesisID:        draft.ID,
 			Sequence:            1,
 			Score:               verified.FinalScore,
+			ModelPrior:          draft.PriorProbability,
 			SupportingScore:     verified.SupportingScore,
 			ContradictionScore:  verified.ContradictionScore,
 			CausalPathCoverage:  verified.CausalPathCoverage,
@@ -1119,6 +1193,64 @@ func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []do
 		return out[i].FinalScore > out[j].FinalScore
 	})
 	return out, nil
+}
+
+func scopedKubernetesEvidenceIDs(draft domain.HypothesisDraft, supporting []string, evidence map[string]domain.Evidence) []string {
+	namespace, service, resource := "", draft.Service, draft.Resource
+	for _, id := range supporting {
+		item, ok := evidence[id]
+		if !ok {
+			continue
+		}
+		if namespace == "" {
+			namespace = item.Namespace
+		}
+		if service == "" {
+			service = item.Service
+		}
+		if resource == "" {
+			resource = item.Resource
+		}
+	}
+	var candidates []domain.Evidence
+	for _, item := range evidence {
+		if !strings.EqualFold(item.Source, "kubernetes") || !sameEvidenceScope(item, namespace, service, resource) {
+			continue
+		}
+		candidates = append(candidates, item)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].RelevanceScore == candidates[j].RelevanceScore {
+			return candidates[i].ID < candidates[j].ID
+		}
+		return candidates[i].RelevanceScore > candidates[j].RelevanceScore
+	})
+	if len(candidates) == 0 {
+		return nil
+	}
+	return []string{candidates[0].ID}
+}
+
+func sameEvidenceScope(item domain.Evidence, namespace, service, resource string) bool {
+	if namespace != "" && item.Namespace != "" && item.Namespace != namespace {
+		return false
+	}
+	if service != "" && item.Service != "" && item.Service != service {
+		return false
+	}
+	if resource != "" && item.Resource != "" && item.Resource != resource {
+		return false
+	}
+	return true
+}
+
+func containsEvidenceID(ids []string, target string) bool {
+	for _, id := range ids {
+		if id == target {
+			return true
+		}
+	}
+	return false
 }
 
 func hypothesisTemporalConsistency(ids []string, evidence map[string]domain.Evidence) float64 {
@@ -1148,6 +1280,94 @@ func hypothesisTemporalConsistency(ids []string, evidence map[string]domain.Evid
 func normalizeCausalNodeID(value string) string {
 	parts := strings.FieldsFunc(strings.ToLower(value), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
 	return strings.Join(parts, "_")
+}
+
+func evidenceSupportsExpectedNode(item domain.Evidence, expected []string) bool {
+	allowed := map[string]bool{"obs:" + item.ID: true}
+	for _, nodeID := range item.CausalNodeIDs {
+		allowed[nodeID] = true
+	}
+	for _, nodeID := range expected {
+		if allowed[nodeID] {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalCausalCoverage accepts only IDs supplied by the server. Coverage
+// requires an evidence support relation; pattern membership or textual
+// similarity alone never marks a node as observed.
+func canonicalCausalCoverage(expected []string, evidence []domain.Evidence, patterns []domain.CausalPattern) (float64, []string, error) {
+	if len(expected) == 0 {
+		return 0, nil, fmt.Errorf("at least one causal node ID is required")
+	}
+	patternNodes := map[string]bool{}
+	for _, pattern := range patterns {
+		if pattern.Status != "active" {
+			continue
+		}
+		for _, node := range pattern.Nodes {
+			patternNodes[node.ID] = true
+		}
+	}
+	allowed := map[string]bool{}
+	observed := map[string]bool{}
+	edges := map[string]bool{}
+	for _, item := range evidence {
+		observationID := "obs:" + item.ID
+		allowed[observationID] = true
+		observed[observationID] = true
+		for _, nodeID := range item.CausalNodeIDs {
+			if patternNodes[nodeID] {
+				allowed[nodeID] = true
+				observed[nodeID] = true
+			}
+		}
+	}
+	for _, pattern := range patterns {
+		if pattern.Status != "active" {
+			continue
+		}
+		for _, node := range pattern.Nodes {
+			allowed[node.ID] = true
+			if len(node.SourceEvidenceIDs) > 0 {
+				for _, evidenceID := range node.SourceEvidenceIDs {
+					if observed["obs:"+evidenceID] {
+						observed[node.ID] = true
+					}
+				}
+			}
+		}
+		for _, edge := range pattern.Edges {
+			edges[edge.From+"\x00"+edge.To] = true
+		}
+	}
+	missing := make([]string, 0)
+	covered := 0
+	for _, nodeID := range expected {
+		if !allowed[nodeID] {
+			return 0, nil, fmt.Errorf("unknown node ID %q", nodeID)
+		}
+		if observed[nodeID] {
+			covered++
+		} else {
+			missing = append(missing, nodeID)
+		}
+	}
+	nodeCoverage := float64(covered) / float64(len(expected))
+	if len(expected) == 1 {
+		return nodeCoverage, missing, nil
+	}
+	validEdges := 0
+	for index := 0; index < len(expected)-1; index++ {
+		from, to := expected[index], expected[index+1]
+		if edges[from+"\x00"+to] {
+			validEdges++
+		}
+	}
+	pathCoverage := float64(validEdges) / float64(len(expected)-1)
+	return clamp(nodeCoverage * pathCoverage), missing, nil
 }
 
 func expectedNodeObserved(expected, category string, observed map[string]bool, patterns []domain.CausalPattern) bool {

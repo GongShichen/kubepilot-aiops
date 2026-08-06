@@ -2,6 +2,7 @@
 PLAN.md
 .runtime/
 artifacts/
+deploy/docker/loki/runtime/
 benchmark/reports/*.json
 benchmark/reports/*.md
 benchmark/reports/*.csv

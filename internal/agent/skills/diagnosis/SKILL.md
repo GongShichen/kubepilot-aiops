@@ -19,10 +19,10 @@ Determine the most defensible root cause by forming falsifiable hypotheses, gath
 # Decision criteria
 
 - Select evidence that can distinguish competing explanations, rather than collecting every source mechanically.
-- Maintain no more than three hypotheses. Each hypothesis needs supporting evidence, possible contradiction, a falsification condition, and an expected causal path.
+- Maintain no more than three hypotheses. Each hypothesis needs supporting evidence, possible contradiction, a falsification condition, and `expected_causal_node_ids` selected only from server-provided observation or observed active-pattern node IDs. A causal sequence is either one cited observation node or a directed path in the supplied server graph; do not join independent observations or append signal identifiers.
 - Revise or replace a hypothesis when new evidence contradicts it. A refuted hypothesis is not silently revived; create a new version if reconsideration is justified.
 - Historical similarity is supporting context, not proof. Topology and causal matches must be checked against current evidence.
-- Accepted causal patterns discovered from independent resolved incidents are read-only historical context. Use the discovered-pattern capability when it can help compare a causal path, and treat it as a hypothesis aid rather than proof.
+- Accepted causal patterns discovered from independent resolved incidents are read-only historical context. Use the discovered-pattern capability when it can help compare a canonical causal path, and treat it as a hypothesis aid rather than proof. Never invent or submit free-form causal nodes.
 - Use reranking only when semantic discrimination can materially change which evidence or historical candidates deserve attention.
 - If safety feedback identifies missing capability, choose how to satisfy the capability; do not assume a particular tool is required.
 

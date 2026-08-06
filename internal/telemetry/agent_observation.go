@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
@@ -34,6 +35,7 @@ type AgentObservation struct {
 	OutputTokens            int
 	ReasoningTokens         int
 	EstimatedModelCost      float64
+	ArbitrationGateFailures []string
 }
 
 // ObserveAgent projects auditable runtime state without reading evaluator
@@ -68,6 +70,18 @@ func ObserveAgent(incident *domain.Incident) AgentObservation {
 			observation.OutputTokens += usage.OutputTokens
 			observation.ReasoningTokens += usage.ReasoningTokens
 			observation.EstimatedModelCost += usage.EstimatedCost
+		}
+		if incident.Investigation.Arbitration != nil {
+			seenGates := map[string]bool{}
+			for _, result := range incident.Investigation.Arbitration.GateResults {
+				for _, gate := range result.FailedGates {
+					if !seenGates[gate] {
+						seenGates[gate] = true
+						observation.ArbitrationGateFailures = append(observation.ArbitrationGateFailures, gate)
+					}
+				}
+			}
+			sort.Strings(observation.ArbitrationGateFailures)
 		}
 	}
 	ledger := incident.DiagnosisLedger

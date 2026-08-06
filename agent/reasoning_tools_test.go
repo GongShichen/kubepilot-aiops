@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -68,6 +69,21 @@ func TestRootCauseRankerUsesDeterministicGates(t *testing.T) {
 	result = rankRootCause(rootRankInput{Verified: []domain.VerifiedHypothesis{strong}, Evidence: evidence})
 	if !result.NeedsAttention {
 		t.Fatalf("single-source evidence passed root-cause gate: %#v", result)
+	}
+}
+
+func TestArbitrationReturnsAuditableGateFailuresWithoutLoweringThresholds(t *testing.T) {
+	evidence := []domain.Evidence{{ID: "kube", Source: "kubernetes"}, {ID: "metric", Source: "prometheus"}}
+	weak := domain.VerifiedHypothesis{Draft: domain.HypothesisDraft{ID: "weak"}, Status: domain.HypothesisEvidenceSearching, SupportingScore: .64, CausalPathCoverage: .5, MissingCausalNodes: []string{"missing"}, FinalScore: .79, ContradictionScore: .11, VerifiedEvidenceIDs: []string{"kube", "metric"}}
+	result := arbitrateHypotheses([]domain.VerifiedHypothesis{weak}, evidence)
+	if result.Accepted || len(result.GateResults) != 1 {
+		t.Fatalf("weak hypothesis passed or gate audit missing: %+v", result)
+	}
+	failed := result.GateResults[0].FailedGates
+	for _, gate := range []string{"supported_status", "supporting_score", "causal_coverage", "final_score", "contradiction"} {
+		if !slices.Contains(failed, gate) {
+			t.Fatalf("gate %q missing from audit: %+v", gate, result)
+		}
 	}
 }
 

@@ -39,6 +39,16 @@ func (c *LokiClient) Push(ctx context.Context, streams []map[string]any) error {
 	return nil
 }
 
+// ProbeIngestion verifies that Loki can accept a log write, not merely answer
+// its HTTP readiness endpoint. A storage-constrained ingester can otherwise
+// look healthy while dropping the diagnostic logs the Agent needs.
+func (c *LokiClient) ProbeIngestion(ctx context.Context) error {
+	return c.Push(ctx, []map[string]any{{
+		"stream": map[string]string{"component": "kubepilot", "signal": "readiness"},
+		"values": [][]string{{strconv.FormatInt(time.Now().UTC().UnixNano(), 10), "kubepilot telemetry readiness probe"}},
+	}})
+}
+
 func NewLoki(base string) *LokiClient {
 	return &LokiClient{base: base, http: httpx.NewClient(20 * time.Second)}
 }

@@ -24,6 +24,9 @@ type Manifest struct {
 	Protocol            string             `json:"chat_protocol"`
 	Model               string             `json:"chat_model"`
 	ModelProfile        string             `json:"model_profile,omitempty"`
+	SemanticJudge       bool               `json:"semantic_judge,omitempty"`
+	SemanticJudgeModel  string             `json:"semantic_judge_model,omitempty"`
+	SemanticJudgeConfig string             `json:"semantic_judge_config_hash,omitempty"`
 	EndpointHash        string             `json:"endpoint_hash"`
 	ModelConfigHash     string             `json:"model_config_hash"`
 	SkillSnapshotHash   string             `json:"skill_snapshot_hash,omitempty"`
@@ -122,6 +125,8 @@ type CaseResult struct {
 	NamespaceViolation      bool          `json:"namespace_violation"`
 	DuplicateMutation       bool          `json:"duplicate_mutation"`
 	InfrastructureFailure   bool          `json:"infrastructure_failure"`
+	ArbitrationGateFailures []string      `json:"arbitration_gate_failures,omitempty"`
+	JudgeError              string        `json:"judge_error,omitempty"`
 }
 type Summary struct {
 	Total                         int     `json:"total"`
@@ -130,6 +135,9 @@ type Summary struct {
 	DiagnosisFailures             int     `json:"diagnosis_failures"`
 	InfrastructureFailures        int     `json:"infrastructure_failures"`
 	InfrastructureFailureRate     float64 `json:"infrastructure_failure_rate"`
+	SemanticJudgedCases           int     `json:"semantic_judged_cases"`
+	SemanticJudgeFailures         int     `json:"semantic_judge_failures"`
+	SemanticRootCauseAccuracy     float64 `json:"semantic_root_cause_accuracy"`
 	Valid                         bool    `json:"valid"`
 	RootCauseAccuracy             float64 `json:"root_cause_accuracy"`
 	RootCauseLocalizationAccuracy float64 `json:"root_cause_localization_accuracy"`
@@ -192,6 +200,7 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 	var sum Summary
 	sum.Total = len(items)
 	var strict, localized, category, variant, service, resource, decision int
+	var semanticCorrect int
 	var evidencePrecision, evidenceRecall, evidenceGroundedness float64
 	var duration time.Duration
 	var iterations, toolUses, toolCost, tokens, corrections, confidenceUpdates int
@@ -228,6 +237,14 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 		}
 		if item.Score.StrictRootCause {
 			strict++
+		}
+		if item.Score.SemanticRootCause != nil {
+			sum.SemanticJudgedCases++
+			if *item.Score.SemanticRootCause {
+				semanticCorrect++
+			}
+		} else if item.JudgeError != "" {
+			sum.SemanticJudgeFailures++
 		}
 		if item.Score.RootCauseCorrect {
 			localized++
@@ -285,6 +302,9 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 	if evaluationTotal > 0 {
 		denominator := float64(evaluationTotal)
 		sum.RootCauseAccuracy = float64(strict) / denominator
+		if sum.SemanticJudgedCases > 0 {
+			sum.SemanticRootCauseAccuracy = float64(semanticCorrect) / float64(sum.SemanticJudgedCases)
+		}
 		sum.RootCauseLocalizationAccuracy = float64(localized) / denominator
 		sum.CategoryAccuracy = float64(category) / denominator
 		sum.VariantAccuracy = float64(variant) / denominator
@@ -352,7 +372,7 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 	if err = os.MkdirAll(filepath.Join(dir, "traces"), 0o750); err != nil {
 		return sum, err
 	}
-	report := fmt.Sprintf("# KubePilot Diagnosis Benchmark Report\n\n- Run: `%s`\n- Profile: `%s`\n- Dataset split: `%s`\n- Strategy: `%s`\n- Cases: %d\n- Infrastructure failures: %d (%.2f%%)\n- Valid run: %t\n- Strict Diagnosis Accuracy: %.2f%%\n- Recovery Success: %.2f%%\n- Safety Violations: %d\n- Mean Model Cost: %.6f\n- P95 Latency: %.3fs\n- Root Cause Localization Accuracy: %.2f%%\n- Fault Category Accuracy: %.2f%%\n- Root Cause Variant Accuracy: %.2f%%\n- Category Macro F1: %.2f%%\n- Evidence Precision: %.2f%%\n- Evidence Recall: %.2f%%\n- Evidence Groundedness: %.2f%%\n- Confidence Brier Score: %.4f\n- Confidence ECE: %.4f\n- Mean Input / Output / Reasoning Tokens: %.2f / %.2f / %.2f\n- Mean Agent Iterations: %.2f\n- Mean Agent Tool Uses: %.2f\n- Mean Tool Complexity Cost: %.2f\n- Mean Safety Corrections: %.2f\n\nInfrastructure failures are excluded from model metrics. A run with more than 2%% infrastructure failures is invalid. Tool complexity cost is not a monetary metric.\n", m.RunID, m.Profile, m.DatasetSplit, m.DiagnosisMethod, sum.Total, sum.InfrastructureFailures, sum.InfrastructureFailureRate*100, sum.Valid, sum.RootCauseAccuracy*100, sum.RecoverySuccess*100, sum.SafetyViolations, sum.MeanModelCost, sum.P95LatencySeconds, sum.RootCauseLocalizationAccuracy*100, sum.CategoryAccuracy*100, sum.VariantAccuracy*100, sum.CategoryMacroF1*100, sum.EvidencePrecision*100, sum.EvidenceRecall*100, sum.EvidenceGroundedness*100, sum.ConfidenceBrierScore, sum.ConfidenceECE, sum.MeanInputTokens, sum.MeanOutputTokens, sum.MeanReasoningTokens, sum.MeanAgentIterations, sum.MeanAgentToolUses, sum.MeanAgentToolCost, sum.MeanAgentCorrections)
+	report := fmt.Sprintf("# KubePilot Diagnosis Benchmark Report\n\n- Run: `%s`\n- Profile: `%s`\n- Dataset split: `%s`\n- Strategy: `%s`\n- Cases: %d\n- Infrastructure failures: %d (%.2f%%)\n- Valid run: %t\n- Strict Diagnosis Accuracy: %.2f%%\n- LLM-Judged Semantic RCA Accuracy: %.2f%% (%d judged; %d judge failures)\n- Recovery Success: %.2f%%\n- Safety Violations: %d\n- Mean Model Cost: %.6f\n- P95 Latency: %.3fs\n- Root Cause Localization Accuracy: %.2f%%\n- Fault Category Accuracy: %.2f%%\n- Root Cause Variant Accuracy: %.2f%%\n- Category Macro F1: %.2f%%\n- Evidence Precision: %.2f%%\n- Evidence Recall: %.2f%%\n- Evidence Groundedness: %.2f%%\n- Confidence Brier Score: %.4f\n- Confidence ECE: %.4f\n- Mean Input / Output / Reasoning Tokens: %.2f / %.2f / %.2f\n- Mean Agent Iterations: %.2f\n- Mean Agent Tool Uses: %.2f\n- Mean Tool Complexity Cost: %.2f\n- Mean Safety Corrections: %.2f\n\nStrict Diagnosis Accuracy remains an exact, evidence-grounded metric. The LLM-judged semantic metric is reported separately and fails closed when a verdict is unavailable. Infrastructure failures are excluded from model metrics. A run with more than 2%% infrastructure failures is invalid. Tool complexity cost is not a monetary metric.\n", m.RunID, m.Profile, m.DatasetSplit, m.DiagnosisMethod, sum.Total, sum.InfrastructureFailures, sum.InfrastructureFailureRate*100, sum.Valid, sum.RootCauseAccuracy*100, sum.SemanticRootCauseAccuracy*100, sum.SemanticJudgedCases, sum.SemanticJudgeFailures, sum.RecoverySuccess*100, sum.SafetyViolations, sum.MeanModelCost, sum.P95LatencySeconds, sum.RootCauseLocalizationAccuracy*100, sum.CategoryAccuracy*100, sum.VariantAccuracy*100, sum.CategoryMacroF1*100, sum.EvidencePrecision*100, sum.EvidenceRecall*100, sum.EvidenceGroundedness*100, sum.ConfidenceBrierScore, sum.ConfidenceECE, sum.MeanInputTokens, sum.MeanOutputTokens, sum.MeanReasoningTokens, sum.MeanAgentIterations, sum.MeanAgentToolUses, sum.MeanAgentToolCost, sum.MeanAgentCorrections)
 	err = os.WriteFile(filepath.Join(dir, "report.md"), []byte(report), 0o640)
 	return sum, err
 }
@@ -535,9 +555,13 @@ func writeCSV(path string, items []CaseResult) error {
 	defer f.Close()
 	w := csv.NewWriter(f)
 	defer w.Flush()
-	_ = w.Write([]string{"case_id", "seed", "repetition", "split", "incident_id", "strategy", "causal_mode", "architecture", "category", "predicted_category", "predicted_variant", "status", "infrastructure_failure", "root_cause_correct", "strict_root_cause", "recovery_success", "safety_violation", "approval_bypass", "namespace_violation", "duplicate_mutation", "evidence_precision", "evidence_recall", "confidence", "input_tokens", "output_tokens", "reasoning_tokens", "estimated_model_cost", "agent_tool_uses", "tool_complexity_cost", "planner_tasks", "worker_findings", "debate_rounds", "memory_reads", "duration_seconds", "error"})
+	_ = w.Write([]string{"case_id", "seed", "repetition", "split", "incident_id", "strategy", "causal_mode", "architecture", "category", "predicted_category", "predicted_variant", "status", "infrastructure_failure", "root_cause_correct", "strict_root_cause", "semantic_root_cause", "semantic_confidence", "recovery_success", "safety_violation", "approval_bypass", "namespace_violation", "duplicate_mutation", "evidence_precision", "evidence_recall", "confidence", "input_tokens", "output_tokens", "reasoning_tokens", "estimated_model_cost", "agent_tool_uses", "tool_complexity_cost", "planner_tasks", "worker_findings", "debate_rounds", "memory_reads", "duration_seconds", "error", "judge_error"})
 	for _, v := range items {
-		_ = w.Write([]string{v.CaseID, strconv.FormatInt(v.Seed, 10), strconv.Itoa(v.Repetition), v.DatasetSplit, v.IncidentID, v.DiagnosisMethod, v.CausalMode, v.Architecture, v.Category, v.RootCauseCategory, v.RootCauseVariant, v.Status, strconv.FormatBool(v.InfrastructureFailure), strconv.FormatBool(v.Score.RootCauseCorrect), strconv.FormatBool(v.Score.StrictRootCause), strconv.FormatBool(v.VerificationOK), strconv.FormatBool(v.SafetyViolation), strconv.FormatBool(v.ApprovalBypass), strconv.FormatBool(v.NamespaceViolation), strconv.FormatBool(v.DuplicateMutation), strconv.FormatFloat(v.Score.EvidencePrecision, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceRecall, 'f', 4, 64), strconv.FormatFloat(v.Confidence, 'f', 4, 64), strconv.Itoa(v.InputTokens), strconv.Itoa(v.OutputTokens), strconv.Itoa(v.ReasoningTokens), strconv.FormatFloat(v.EstimatedModelCost, 'f', 8, 64), strconv.Itoa(v.AgentToolUses), strconv.Itoa(v.AgentToolCost), strconv.Itoa(v.PlannerTasks), strconv.Itoa(v.WorkerFindings), strconv.Itoa(v.DebateRounds), strconv.Itoa(v.MemoryReads), strconv.FormatFloat(v.Duration.Seconds(), 'f', 3, 64), v.Error})
+		semantic := ""
+		if v.Score.SemanticRootCause != nil {
+			semantic = strconv.FormatBool(*v.Score.SemanticRootCause)
+		}
+		_ = w.Write([]string{v.CaseID, strconv.FormatInt(v.Seed, 10), strconv.Itoa(v.Repetition), v.DatasetSplit, v.IncidentID, v.DiagnosisMethod, v.CausalMode, v.Architecture, v.Category, v.RootCauseCategory, v.RootCauseVariant, v.Status, strconv.FormatBool(v.InfrastructureFailure), strconv.FormatBool(v.Score.RootCauseCorrect), strconv.FormatBool(v.Score.StrictRootCause), semantic, strconv.FormatFloat(v.Score.SemanticConfidence, 'f', 4, 64), strconv.FormatBool(v.VerificationOK), strconv.FormatBool(v.SafetyViolation), strconv.FormatBool(v.ApprovalBypass), strconv.FormatBool(v.NamespaceViolation), strconv.FormatBool(v.DuplicateMutation), strconv.FormatFloat(v.Score.EvidencePrecision, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceRecall, 'f', 4, 64), strconv.FormatFloat(v.Confidence, 'f', 4, 64), strconv.Itoa(v.InputTokens), strconv.Itoa(v.OutputTokens), strconv.Itoa(v.ReasoningTokens), strconv.FormatFloat(v.EstimatedModelCost, 'f', 8, 64), strconv.Itoa(v.AgentToolUses), strconv.Itoa(v.AgentToolCost), strconv.Itoa(v.PlannerTasks), strconv.Itoa(v.WorkerFindings), strconv.Itoa(v.DebateRounds), strconv.Itoa(v.MemoryReads), strconv.FormatFloat(v.Duration.Seconds(), 'f', 3, 64), v.Error, v.JudgeError})
 	}
 	return w.Error()
 }

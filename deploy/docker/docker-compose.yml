@@ -130,7 +130,11 @@ services:
     command: [-config.file=/etc/loki/loki.yml]
     volumes:
       - ./loki/loki.yml:/etc/loki/loki.yml:ro
-      - loki-data:/loki
+      # Keep high-churn WAL data on the host-mounted workspace rather than
+      # Docker Desktop's shared virtual disk. Other local images can fill that
+      # disk independently and make Loki answer readiness checks while
+      # rejecting ingestion.
+      - ./loki/runtime:/loki
     ports: ["3100:3100"]
 
   jaeger:
@@ -244,7 +248,6 @@ volumes:
   drain3-data:
   prometheus-data:
   alertmanager-data:
-  loki-data:
   grafana-data:
   etcd-data:
   minio-data:

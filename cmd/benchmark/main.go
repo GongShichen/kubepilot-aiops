@@ -43,6 +43,7 @@ import (
 	artifactlayout "github.com/kubepilot-aiops/kubepilot/internal/artifacts"
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	"github.com/kubepilot-aiops/kubepilot/internal/evaluation"
 	llm "github.com/kubepilot-aiops/kubepilot/internal/model"
 	rerankerclient "github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
 	"github.com/kubepilot-aiops/kubepilot/retrieval"
@@ -174,6 +175,7 @@ func run(args []string) {
 	workers := fs.Int("workers", envInt("BENCHMARK_WORKERS", 1), "isolated namespace workers")
 	modelConcurrency := fs.Int("model-concurrency", envInt("BENCHMARK_MODEL_CONCURRENCY", 0), "maximum cases concurrently using the model; defaults to workers")
 	workerNamespaceList := fs.String("worker-namespaces", os.Getenv("BENCHMARK_WORKER_NAMESPACES"), "comma-separated explicit benchmark worker namespace pool")
+	semanticJudgeEnabled := fs.Bool("semantic-judge", envBool("BENCHMARK_SEMANTIC_JUDGE", false), "report a separate LLM-judged semantic RCA metric")
 	_ = fs.Parse(args)
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -221,7 +223,7 @@ func run(args []string) {
 			methods = randomizedStrategyOrder(methods, *runID)
 		}
 		for _, method := range methods {
-			run([]string{"--profile", *profile, "--run-id", *runID, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--artifact-dir", filepath.Join(comparisonDir, method), "--auto-approve=" + strconv.FormatBool(*autoApprove), "--dry-run-injector=" + strconv.FormatBool(*dryRun), "--resume=" + strconv.FormatBool(*resumeRun), "--diagnosis-method", method, "--causal-mode", *causalMode, "--model-profile", *modelProfile, "--dataset-split", *datasetSplit, "--seeds", *seedList, "--repetitions", strconv.Itoa(*repetitions), "--workers", strconv.Itoa(*workers), "--model-concurrency", strconv.Itoa(*modelConcurrency), "--worker-namespaces", *workerNamespaceList})
+			run([]string{"--profile", *profile, "--run-id", *runID, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--artifact-dir", filepath.Join(comparisonDir, method), "--auto-approve=" + strconv.FormatBool(*autoApprove), "--dry-run-injector=" + strconv.FormatBool(*dryRun), "--resume=" + strconv.FormatBool(*resumeRun), "--semantic-judge=" + strconv.FormatBool(*semanticJudgeEnabled), "--diagnosis-method", method, "--causal-mode", *causalMode, "--model-profile", *modelProfile, "--dataset-split", *datasetSplit, "--seeds", *seedList, "--repetitions", strconv.Itoa(*repetitions), "--workers", strconv.Itoa(*workers), "--model-concurrency", strconv.Itoa(*modelConcurrency), "--worker-namespaces", *workerNamespaceList})
 			if runCtx.Err() != nil {
 				fmt.Fprintln(os.Stderr, "benchmark interrupted after cleaning the active case")
 				return
@@ -241,7 +243,7 @@ func run(args []string) {
 			*runID = ulid.Make().String()
 		}
 		fullDir := artifactlayout.RunDirectory(*artifactRoot, "autonomous", "full", time.Now().UTC())
-		standardArgs := []string{"--profile", "standard", "--run-id", *runID, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--artifact-dir", filepath.Join(fullDir, "diagnosis"), "--auto-approve=" + strconv.FormatBool(*autoApprove), "--dry-run-injector=" + strconv.FormatBool(*dryRun), "--resume=" + strconv.FormatBool(*resumeRun), "--diagnosis-method", *diagnosisMethod, "--causal-mode", *causalMode, "--model-profile", *modelProfile, "--dataset-split", *datasetSplit, "--seeds", *seedList, "--repetitions", strconv.Itoa(*repetitions), "--workers", strconv.Itoa(*workers), "--model-concurrency", strconv.Itoa(*modelConcurrency), "--worker-namespaces", *workerNamespaceList}
+		standardArgs := []string{"--profile", "standard", "--run-id", *runID, "--catalog", *catalog, "--agent-url", *agentURL, "--token", *token, "--kubeconfig", *kubeconfig, "--artifacts", *artifactRoot, "--artifact-dir", filepath.Join(fullDir, "diagnosis"), "--auto-approve=" + strconv.FormatBool(*autoApprove), "--dry-run-injector=" + strconv.FormatBool(*dryRun), "--resume=" + strconv.FormatBool(*resumeRun), "--semantic-judge=" + strconv.FormatBool(*semanticJudgeEnabled), "--diagnosis-method", *diagnosisMethod, "--causal-mode", *causalMode, "--model-profile", *modelProfile, "--dataset-split", *datasetSplit, "--seeds", *seedList, "--repetitions", strconv.Itoa(*repetitions), "--workers", strconv.Itoa(*workers), "--model-concurrency", strconv.Itoa(*modelConcurrency), "--worker-namespaces", *workerNamespaceList}
 		run(standardArgs)
 		runCorrelation([]string{"--output", filepath.Join(fullDir, "correlation", "correlation-summary.json")})
 		return
@@ -298,6 +300,13 @@ func run(args []string) {
 	historyHash, _ := fileSHA256("benchmark/history.yaml")
 	sourceHash, _ := sourceTreeSHA256(".")
 	modelConfigHash := diagnosisModelConfigHash()
+	var judgeConfig config.ChatConfig
+	if *semanticJudgeEnabled {
+		loadedConfig, configErr := config.Load()
+		fatal(configErr)
+		judgeConfig, configErr = semanticJudgeChatConfig(loadedConfig.Chat)
+		fatal(configErr)
+	}
 	skillHash, err := diagnosisSkillSnapshotHash()
 	fatal(err)
 	rankingHash, err := fileSHA256(env("RANKING_POLICY_FILE", "knowledge/ranking_policy.yaml"))
@@ -307,7 +316,7 @@ func run(args []string) {
 	rerankerModel, rerankerHash := diagnosisRerankerIdentity()
 	manifestHash, manifestErr := fileSHA256("benchmark/manifests/default.yaml")
 	fatal(manifestErr)
-	manifest := reporter.Manifest{ManifestHash: manifestHash, RunID: *runID, Profile: *profile, CatalogHash: hash, Protocol: env("CHAT_PROTOCOL", "openai-compatible"), Model: os.Getenv("CHAT_MODEL"), ModelProfile: *modelProfile, EndpointHash: hex.EncodeToString(endpointHash[:]), ModelConfigHash: modelConfigHash, SkillSnapshotHash: skillHash, RankingPolicyHash: rankingHash, ToolCostPolicyHash: toolCostHash, BudgetConfigHash: diagnosisBudgetConfigHash(), RerankerModel: rerankerModel, RerankerConfigHash: rerankerHash, EmbeddingModel: os.Getenv("EMBEDDING_MODEL"), EmbeddingDimensions: env("EMBEDDING_DIMENSIONS", "1024"), DiagnosisMethod: *diagnosisMethod, CausalMode: *causalMode, Strategies: []string{*diagnosisMethod}, DatasetSplit: *datasetSplit, Seeds: seeds, Repetitions: *repetitions, Architecture: strategyArchitecture(*diagnosisMethod), Parallelism: workerCount, ModelConcurrency: effectiveModelConcurrency, WorkerNamespaces: workerNamespaces, ShardPolicy: runner.StableShardPolicy, PricingSnapshot: pricingSnapshot(), GitCommit: gitCommit(), SourceHash: sourceHash, HistoryDatasetHash: historyHash, HistoryCollection: env("HISTORY_COLLECTION", "kubepilot_history"), Seed: seeds[0], StartedAt: time.Now().UTC()}
+	manifest := reporter.Manifest{ManifestHash: manifestHash, RunID: *runID, Profile: *profile, CatalogHash: hash, Protocol: env("CHAT_PROTOCOL", "openai-compatible"), Model: os.Getenv("CHAT_MODEL"), ModelProfile: *modelProfile, SemanticJudge: *semanticJudgeEnabled, SemanticJudgeModel: judgeConfig.Model, SemanticJudgeConfig: semanticJudgeConfigHash(judgeConfig), EndpointHash: hex.EncodeToString(endpointHash[:]), ModelConfigHash: modelConfigHash, SkillSnapshotHash: skillHash, RankingPolicyHash: rankingHash, ToolCostPolicyHash: toolCostHash, BudgetConfigHash: diagnosisBudgetConfigHash(), RerankerModel: rerankerModel, RerankerConfigHash: rerankerHash, EmbeddingModel: os.Getenv("EMBEDDING_MODEL"), EmbeddingDimensions: env("EMBEDDING_DIMENSIONS", "1024"), DiagnosisMethod: *diagnosisMethod, CausalMode: *causalMode, Strategies: []string{*diagnosisMethod}, DatasetSplit: *datasetSplit, Seeds: seeds, Repetitions: *repetitions, Architecture: strategyArchitecture(*diagnosisMethod), Parallelism: workerCount, ModelConcurrency: effectiveModelConcurrency, WorkerNamespaces: workerNamespaces, ShardPolicy: runner.StableShardPolicy, PricingSnapshot: pricingSnapshot(), GitCommit: gitCommit(), SourceHash: sourceHash, HistoryDatasetHash: historyHash, HistoryCollection: env("HISTORY_COLLECTION", "kubepilot_history"), Seed: seeds[0], StartedAt: time.Now().UTC()}
 	var previous []reporter.CaseResult
 	if *resumeRun {
 		var existing reporter.Manifest
@@ -343,6 +352,12 @@ func run(args []string) {
 	client := runner.NewHTTPClient(*agentURL, *token)
 	client.DiagnosisMethod = *diagnosisMethod
 	client.CausalMode = *causalMode
+	var semanticJudge evaluation.RootCauseJudge
+	if *semanticJudgeEnabled {
+		chat, chatErr := llm.NewEinoChatModel(runCtx, judgeConfig)
+		fatal(chatErr)
+		semanticJudge = evaluation.ChatRootCauseJudge{Chat: chat}
+	}
 	preflightCtx, preflightCancel := context.WithTimeout(runCtx, 3*time.Minute)
 	fatal(client.Preflight(preflightCtx))
 	preflightCancel()
@@ -365,7 +380,7 @@ func run(args []string) {
 			reg.Register(name, inj)
 		}
 		workerID := fmt.Sprintf("worker-%02d", workerIndex+1)
-		workerRunner := &runner.Runner{Registry: reg, Client: client, AutoApprove: *autoApprove, PollInterval: time.Second, MaxCaseRestarts: 1, DiagnosisMethod: *diagnosisMethod, CausalMode: *causalMode, WorkerID: workerID, Gate: gate, OnResult: recorder.Record}
+		workerRunner := &runner.Runner{Registry: reg, Client: client, AutoApprove: *autoApprove, PollInterval: time.Second, MaxCaseRestarts: 1, DiagnosisMethod: *diagnosisMethod, CausalMode: *causalMode, WorkerID: workerID, Gate: gate, SemanticJudge: semanticJudge, OnResult: recorder.Record}
 		parallelWorkers[workerIndex] = runner.ParallelWorker{ID: workerID, Namespace: namespace, Runner: workerRunner}
 	}
 	current, runErr := (runner.ParallelRunner{Workers: parallelWorkers}).Run(executionCtx, items)
@@ -453,6 +468,64 @@ func diagnosisModelConfigHash() string {
 	return hex.EncodeToString(hash[:])
 }
 
+// semanticJudgeChatConfig starts from CHAT_* so evaluation is comparable by
+// default, then permits an explicitly configured independent judge model.
+func semanticJudgeChatConfig(base config.ChatConfig) (config.ChatConfig, error) {
+	judge := base
+	for key, destination := range map[string]*string{
+		"JUDGE_CHAT_PROTOCOL":         &judge.Protocol,
+		"JUDGE_CHAT_BASE_URL":         &judge.BaseURL,
+		"JUDGE_CHAT_API_PATH":         &judge.APIPath,
+		"JUDGE_CHAT_API_KEY":          &judge.APIKey,
+		"JUDGE_CHAT_MODEL":            &judge.Model,
+		"JUDGE_CHAT_REASONING_EFFORT": &judge.ReasoningEffort,
+	} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			*destination = value
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("JUDGE_CHAT_TIMEOUT")); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed <= 0 {
+			return config.ChatConfig{}, fmt.Errorf("JUDGE_CHAT_TIMEOUT must be a positive duration")
+		}
+		judge.Timeout = parsed
+	}
+	if value := strings.TrimSpace(os.Getenv("JUDGE_CHAT_MAX_TOKENS")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 {
+			return config.ChatConfig{}, fmt.Errorf("JUDGE_CHAT_MAX_TOKENS must be positive")
+		}
+		judge.MaxTokens = parsed
+	}
+	if value := strings.TrimSpace(os.Getenv("JUDGE_CHAT_TEMPERATURE")); value != "" {
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil || parsed < 0 || parsed > 2 {
+			return config.ChatConfig{}, fmt.Errorf("JUDGE_CHAT_TEMPERATURE must be between 0 and 2")
+		}
+		judge.Temperature = parsed
+	}
+	if value := strings.TrimSpace(os.Getenv("JUDGE_CHAT_MAX_RETRIES")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 || parsed > 3 {
+			return config.ChatConfig{}, fmt.Errorf("JUDGE_CHAT_MAX_RETRIES must be between 0 and 3")
+		}
+		judge.MaxRetries = parsed
+	}
+	return judge, nil
+}
+
+func semanticJudgeConfigHash(cfg config.ChatConfig) string {
+	configuration := map[string]any{
+		"protocol": cfg.Protocol, "endpoint": strings.TrimRight(cfg.BaseURL, "/") + "/" + strings.TrimLeft(cfg.APIPath, "/"),
+		"model": cfg.Model, "timeout": cfg.Timeout.String(), "max_tokens": cfg.MaxTokens,
+		"temperature": cfg.Temperature, "reasoning_effort": cfg.ReasoningEffort, "max_retries": cfg.MaxRetries,
+	}
+	encoded, _ := json.Marshal(configuration)
+	hash := sha256.Sum256(encoded)
+	return hex.EncodeToString(hash[:])
+}
+
 func diagnosisSkillSnapshotHash() (string, error) {
 	files := []struct{ agent, path string }{
 		{"planner_agent", "internal/agent/skills/planner/SKILL.md"},
@@ -505,6 +578,7 @@ func validateResumeManifest(existing, current reporter.Manifest) error {
 		{"profile", existing.Profile, current.Profile}, {"catalog_hash", existing.CatalogHash, current.CatalogHash},
 		{"manifest_hash", existing.ManifestHash, current.ManifestHash},
 		{"chat_protocol", existing.Protocol, current.Protocol}, {"chat_model", existing.Model, current.Model}, {"model_profile", existing.ModelProfile, current.ModelProfile},
+		{"semantic_judge", strconv.FormatBool(existing.SemanticJudge), strconv.FormatBool(current.SemanticJudge)}, {"semantic_judge_model", existing.SemanticJudgeModel, current.SemanticJudgeModel}, {"semantic_judge_config_hash", existing.SemanticJudgeConfig, current.SemanticJudgeConfig},
 		{"endpoint_hash", existing.EndpointHash, current.EndpointHash}, {"model_config_hash", existing.ModelConfigHash, current.ModelConfigHash},
 		{"skill_snapshot_hash", existing.SkillSnapshotHash, current.SkillSnapshotHash}, {"ranking_policy_hash", existing.RankingPolicyHash, current.RankingPolicyHash},
 		{"tool_cost_policy_hash", existing.ToolCostPolicyHash, current.ToolCostPolicyHash}, {"budget_config_hash", existing.BudgetConfigHash, current.BudgetConfigHash},
@@ -725,6 +799,9 @@ func validateComparisonManifest(parent, candidate reporter.Manifest) error {
 		{"chat_protocol", parent.Protocol, candidate.Protocol},
 		{"chat_model", parent.Model, candidate.Model},
 		{"model_profile", parent.ModelProfile, candidate.ModelProfile},
+		{"semantic_judge", strconv.FormatBool(parent.SemanticJudge), strconv.FormatBool(candidate.SemanticJudge)},
+		{"semantic_judge_model", parent.SemanticJudgeModel, candidate.SemanticJudgeModel},
+		{"semantic_judge_config_hash", parent.SemanticJudgeConfig, candidate.SemanticJudgeConfig},
 		{"endpoint_hash", parent.EndpointHash, candidate.EndpointHash},
 		{"model_config_hash", parent.ModelConfigHash, candidate.ModelConfigHash},
 		{"skill_snapshot_hash", parent.SkillSnapshotHash, candidate.SkillSnapshotHash},
@@ -1285,6 +1362,18 @@ func envInt(key string, fallback int) int {
 		return value
 	}
 	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {

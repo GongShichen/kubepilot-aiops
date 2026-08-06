@@ -174,7 +174,7 @@ type crossProcessCollector struct {
 	source     string
 }
 
-func (c crossProcessCollector) Collect(ctx context.Context, incident *domain.Incident) ([]domain.Evidence, error) {
+func (c crossProcessCollector) Collect(ctx context.Context, incident *domain.Incident, request domain.EvidenceRequest) ([]domain.Evidence, error) {
 	// Verification uses the same read-only collectors, but it is deliberately
 	// excluded from this counter: the test is proving Evidence was not
 	// recollected while post-approval health checks may still run.
@@ -185,7 +185,7 @@ func (c crossProcessCollector) Collect(ctx context.Context, incident *domain.Inc
 			return nil, err
 		}
 	}
-	return fixedCollector{source: c.source}.Collect(ctx, incident)
+	return fixedCollector{source: c.source}.Collect(ctx, incident, request)
 }
 
 func loadCount(ctx context.Context, store *checkpointstore.RedisStore, key string) int {

@@ -12,7 +12,7 @@ import (
 func TestBusinessProbeReportsApplicationFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
 	defer server.Close()
-	evidence, err := (BusinessProbeCollector{URL: server.URL}).Collect(context.Background(), &domain.Incident{Service: "gateway"})
+	evidence, err := (BusinessProbeCollector{URL: server.URL}).Collect(context.Background(), &domain.Incident{Service: "gateway"}, domain.EvidenceRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}

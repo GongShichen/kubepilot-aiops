@@ -1,6 +1,8 @@
 package telemetry
 
 import (
+	"context"
+	"slices"
 	"testing"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
@@ -45,5 +47,35 @@ func TestObserveAgentCountsHierarchicalWorkerFindings(t *testing.T) {
 	got := ObserveAgent(incident)
 	if got.EvidenceQueries != 3 || got.EvidenceEfficiency != 1.0/3.0 {
 		t.Fatalf("hierarchical evidence work was not observed: %+v", got)
+	}
+}
+
+func TestObserveAgentProjectsGateAuditAndModelUsage(t *testing.T) {
+	incident := &domain.Incident{Investigation: &domain.Investigation{
+		Architecture: "hierarchical-causal-react",
+		Plan:         domain.InvestigationPlan{Tasks: []domain.WorkerTask{{ID: "metric"}}},
+		Findings:     []domain.WorkerFinding{{Worker: "metric"}},
+		Debate:       []domain.DebateRound{{Round: 1}},
+		MemoryReads:  []domain.MemoryAccessEvent{{QueryHash: "memory"}},
+		ModelUsage:   []domain.ModelUsageEvent{{InputTokens: 10, OutputTokens: 20, ReasoningTokens: 5, EstimatedCost: .01}},
+		Arbitration: &domain.ArbitrationResult{GateResults: []domain.HypothesisGateResult{
+			{HypothesisID: "h1", FailedGates: []string{"final_score", "supporting_score"}},
+			{HypothesisID: "h2", FailedGates: []string{"final_score"}},
+		}},
+	}}
+	got := ObserveAgent(incident)
+	if got.Architecture == "" || got.PlannerTasks != 1 || got.DebateRounds != 1 || got.MemoryReads != 1 || got.InputTokens != 10 || got.OutputTokens != 20 || got.ReasoningTokens != 5 || got.EstimatedModelCost != .01 {
+		t.Fatalf("hierarchical model audit was not projected: %+v", got)
+	}
+	if len(got.ArbitrationGateFailures) != 2 || !slices.Contains(got.ArbitrationGateFailures, "final_score") || !slices.Contains(got.ArbitrationGateFailures, "supporting_score") {
+		t.Fatalf("gate failures were not deduplicated: %+v", got.ArbitrationGateFailures)
+	}
+}
+
+func TestInitWithoutExporterIsNoop(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	shutdown, err := Init(context.Background(), "test")
+	if err != nil || shutdown == nil || shutdown(context.Background()) != nil {
+		t.Fatalf("no-op telemetry initialization failed: shutdown_nil=%t err=%v", shutdown == nil, err)
 	}
 }

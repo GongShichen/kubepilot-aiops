@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,10 +45,11 @@ type BenchmarkManager struct {
 	mu                                                              sync.RWMutex
 	runs                                                            map[string]*BenchmarkRun
 	cancels                                                         map[string]context.CancelFunc
+	paused                                                          map[string]string
 }
 
 func NewBenchmarkManager(binary, agentURL, token, webhookToken, kubeconfig, artifactRoot string, hub *Hub, stores ...BenchmarkRunStore) *BenchmarkManager {
-	manager := &BenchmarkManager{Binary: binary, AgentURL: agentURL, Token: token, WebhookToken: webhookToken, Kubeconfig: kubeconfig, ArtifactRoot: artifactRoot, Hub: hub, runs: map[string]*BenchmarkRun{}, cancels: map[string]context.CancelFunc{}}
+	manager := &BenchmarkManager{Binary: binary, AgentURL: agentURL, Token: token, WebhookToken: webhookToken, Kubeconfig: kubeconfig, ArtifactRoot: artifactRoot, Hub: hub, runs: map[string]*BenchmarkRun{}, cancels: map[string]context.CancelFunc{}, paused: map[string]string{}}
 	if len(stores) > 0 {
 		manager.Store = stores[0]
 		manager.restorePersistedRuns()
@@ -108,6 +110,9 @@ func (m *BenchmarkManager) execute(id string, autoApprove, resume bool) {
 	run.UpdatedAt = time.Now().UTC()
 	m.persistLocked(run)
 	m.mu.Unlock()
+	if run.Profile == "smoke" || run.Profile == "ci" || run.Profile == "standard" || run.Profile == "robustness" || run.Profile == "full" {
+		go m.monitorArbitrationGateStreak(ctx, id, cancel)
+	}
 	var commands [][]string
 	switch run.Profile {
 	case "smoke", "ci", "standard", "robustness":
@@ -164,7 +169,11 @@ func (m *BenchmarkManager) execute(id string, autoApprove, resume bool) {
 	defer m.mu.Unlock()
 	delete(m.cancels, id)
 	run = m.runs[id]
-	if ctx.Err() != nil {
+	if reason := m.paused[id]; reason != "" {
+		run.Status = "paused"
+		run.Error = reason
+		delete(m.paused, id)
+	} else if ctx.Err() != nil {
 		run.Status = "cancelled"
 	} else if err != nil {
 		run.Status = "failed"
@@ -184,7 +193,7 @@ func (m *BenchmarkManager) Resume(id string) (*BenchmarkRun, error) {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("benchmark run not found")
 	}
-	if run.Status != "interrupted" && run.Status != "failed" && run.Status != "cancelled" {
+	if run.Status != "interrupted" && run.Status != "failed" && run.Status != "cancelled" && run.Status != "paused" {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("benchmark run is not resumable")
 	}
@@ -456,4 +465,139 @@ func (m *BenchmarkManager) persistCaseResults(run *BenchmarkRun) error {
 		}
 	}
 	return nil
+}
+
+type gateStreakState struct {
+	count      int
+	candidates map[string]bool
+}
+
+func (state *gateStreakState) Observe(gates []string, infrastructureFailure bool) (string, bool) {
+	if infrastructureFailure || len(gates) == 0 {
+		state.count = 0
+		state.candidates = nil
+		return "", false
+	}
+	current := map[string]bool{}
+	for _, gate := range gates {
+		if gate != "" {
+			current[gate] = true
+		}
+	}
+	if len(current) == 0 {
+		state.count = 0
+		state.candidates = nil
+		return "", false
+	}
+	if state.count == 0 {
+		state.candidates = current
+		state.count = 1
+	} else {
+		for gate := range state.candidates {
+			if !current[gate] {
+				delete(state.candidates, gate)
+			}
+		}
+		if len(state.candidates) == 0 {
+			state.candidates = current
+			state.count = 1
+		} else {
+			state.count++
+		}
+	}
+	if state.count < 4 {
+		return "", false
+	}
+	keys := make([]string, 0, len(state.candidates))
+	for gate := range state.candidates {
+		keys = append(keys, gate)
+	}
+	sort.Strings(keys)
+	return keys[0], true
+}
+
+func (m *BenchmarkManager) monitorArbitrationGateStreak(ctx context.Context, id string, cancel context.CancelFunc) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	processed := map[string]int{}
+	states := map[string]*gateStreakState{}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		m.mu.RLock()
+		run := cloneBenchmarkRun(m.runs[id])
+		m.mu.RUnlock()
+		if run == nil {
+			return
+		}
+		for _, path := range benchmarkCasePaths(run) {
+			state := states[path]
+			if state == nil {
+				state = &gateStreakState{}
+				states[path] = state
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				continue
+			}
+			scanner := bufio.NewScanner(file)
+			scanner.Buffer(make([]byte, 64<<10), 2<<20)
+			line := 0
+			for scanner.Scan() {
+				line++
+				if line <= processed[path] {
+					continue
+				}
+				var item struct {
+					InfrastructureFailure   bool     `json:"infrastructure_failure"`
+					ArbitrationGateFailures []string `json:"arbitration_gate_failures"`
+				}
+				if json.Unmarshal(scanner.Bytes(), &item) != nil {
+					continue
+				}
+				gate, pause := state.Observe(item.ArbitrationGateFailures, item.InfrastructureFailure)
+				if pause {
+					file.Close()
+					reason := fmt.Sprintf("automatically paused after four consecutive cases failed arbitration gate %q with no infrastructure failure", gate)
+					m.mu.Lock()
+					m.paused[id] = reason
+					m.mu.Unlock()
+					m.append(id, reason)
+					cancel()
+					return
+				}
+			}
+			processed[path] = line
+			file.Close()
+		}
+	}
+}
+
+func benchmarkCasePaths(run *BenchmarkRun) []string {
+	if run == nil {
+		return nil
+	}
+	roots := []string{run.ArtifactRoot, filepath.Join(run.ArtifactRoot, "diagnosis")}
+	seen := map[string]bool{}
+	var out []string
+	for _, root := range roots {
+		for _, path := range []string{filepath.Join(root, "cases.jsonl")} {
+			if _, err := os.Stat(path); err == nil && !seen[path] {
+				seen[path] = true
+				out = append(out, path)
+			}
+		}
+		matches, _ := filepath.Glob(filepath.Join(root, "*", "cases.jsonl"))
+		for _, path := range matches {
+			if !seen[path] {
+				seen[path] = true
+				out = append(out, path)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }

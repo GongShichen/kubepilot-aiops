@@ -53,12 +53,15 @@ func (s singlePassStrategy) Diagnose(ctx context.Context, input DiagnosisInput) 
 		return DiagnosisResult{}, fmt.Errorf("incident is required")
 	}
 	payload := map[string]any{
-		"incident": safeIncident(input.Incident),
-		"evidence": compactToolEvidence(input.InitialEvidence, 48<<10),
+		"incident":             safeIncident(input.Incident),
+		"evidence":             compactToolEvidence(input.InitialEvidence, 48<<10),
+		"allowed_causal_nodes": allowedCausalNodes(input.InitialEvidence, nil),
+		"allowed_causal_edges": allowedCausalEdges(input.InitialEvidence, nil),
 		"requirements": map[string]any{
 			"reasoning_type":      "hypothesis_verification",
 			"maximum_hypotheses":  3,
 			"evidence_references": "use only evidence IDs present in the input",
+			"causal_references":   "use one expected_causal_node_id belonging to cited supporting evidence, or a directed path in allowed_causal_edges",
 			"output":              "JSON only with hypotheses and selected_hypothesis_id",
 		},
 	}
@@ -68,7 +71,7 @@ func (s singlePassStrategy) Diagnose(ctx context.Context, input DiagnosisInput) 
 	raw, _ := json.Marshal(payload)
 	started := time.Now()
 	message, err := s.registry.chat.Generate(ctx, []*schema.Message{
-		schema.SystemMessage("Diagnose one Kubernetes incident from the supplied, server-owned observations. Return JSON only. Do not invent evidence IDs, tools, actions, or hidden observations."),
+		schema.SystemMessage("Diagnose one Kubernetes incident from the supplied, server-owned observations. Return JSON only. Each hypothesis must include expected_causal_node_ids using only allowed server node IDs. A causal sequence is one cited observation node or a directed path listed in allowed_causal_edges. Do not invent evidence IDs, causal nodes, tools, actions, or hidden observations."),
 		schema.UserMessage(string(raw)),
 	}, s.registry.modelOptions()...)
 	if err != nil {
@@ -81,6 +84,10 @@ func (s singlePassStrategy) Diagnose(ctx context.Context, input DiagnosisInput) 
 	if err = decodeModelJSON(message.Content, &output); err != nil {
 		return DiagnosisResult{}, fmt.Errorf("decode %s diagnosis: %w", s.id, err)
 	}
+	// A baseline receives the same server-owned causal-ID contract as the
+	// hierarchical strategy. This prevents a provider response from turning a
+	// list of unrelated observations into an implicit causal path.
+	output.Hypotheses = filterGroundedHypothesisDrafts(output.Hypotheses, input.InitialEvidence)
 	result := DiagnosisResult{Method: s.id, Hypotheses: output.Hypotheses, SelectedHypothesisID: output.SelectedHypothesisID, Evidence: input.InitialEvidence, Candidates: input.Candidates}
 	architecture := "single-pass"
 	if s.id == domain.DiagnosisMethodRAG {
@@ -286,7 +293,7 @@ func collectInitialEvidence(ctx context.Context, incident *domain.Incident, coll
 		group.Add(1)
 		go func(source string, collector Collector) {
 			defer group.Done()
-			items, err := collector.Collect(ctx, incident)
+			items, err := collector.Collect(ctx, incident, defaultEvidenceRequest(incident, source))
 			results <- collected{source: source, items: items, err: err}
 		}(source, collector)
 	}
