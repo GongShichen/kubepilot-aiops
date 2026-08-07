@@ -1172,6 +1172,37 @@ func TestToolCategorySelectionRejectsSkillCategoryMismatch(t *testing.T) {
 	if output.Class != domain.ToolResultConstraint || output.Status != "REJECTED" || output.ConstraintCode != "tool_category_not_granted_by_requested_skill" || len(output.RequestedSkills) != 0 {
 		t.Fatalf("Skill/category mismatch expanded authority: %+v", output)
 	}
+	if len(output.SkillActivations) != 1 {
+		t.Fatalf("Skill/category mismatch did not retain one rejected activation: %+v", output.SkillActivations)
+	}
+	activation := output.SkillActivations[0]
+	pkg := resolver.packages["investigate-metrics"]
+	if activation.SkillID != pkg.Spec.ID || activation.Version != pkg.Spec.Version || activation.ContentHash != pkg.Hash || activation.Status != "REJECTED" || activation.RejectedReason != "requested_skill_does_not_grant_category" {
+		t.Fatalf("rejected Skill/category decision lost frozen catalog identity: %+v", activation)
+	}
+}
+
+func TestRejectedActivationForKnownSkillPreservesCatalogIdentity(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := SkillRequest{
+		SkillID:       "explore-resources",
+		Reason:        "resolve an admitted target",
+		Trigger:       "HYPOTHESIS_CONFLICT",
+		RequestedBy:   "BRAIN",
+		RequestedTurn: "turn:rejected-activation",
+	}
+	now := time.Now().UTC()
+	activation := rejectedActivationFor(resolver, request, domain.BrainPhaseInvestigation, "activation_decision_missing", now)
+	pkg := resolver.packages[request.SkillID]
+	if activation.SkillID != pkg.Spec.ID || activation.Version != pkg.Spec.Version || activation.ContentHash != pkg.Hash {
+		t.Fatalf("known rejected Skill lost catalog identity: %+v", activation)
+	}
+	if activation.Status != "REJECTED" || activation.RejectedReason != "activation_decision_missing" || activation.Phase != domain.BrainPhaseInvestigation || activation.ActivatedAt != now {
+		t.Fatalf("known rejected Skill lost its decision audit: %+v", activation)
+	}
 }
 
 func TestExploreResourcesSkillRoutesOnlyToEvidenceToolsNode(t *testing.T) {

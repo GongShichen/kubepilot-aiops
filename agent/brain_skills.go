@@ -440,6 +440,30 @@ func activationFor(pkg brainSkillPackage, request SkillRequest, phase domain.Bra
 	return domain.SkillActivation{SkillID: pkg.Spec.ID, Version: pkg.Spec.Version, ContentHash: pkg.Hash, Phase: phase, Reason: request.Reason, Trigger: request.Trigger, RequestedBy: request.RequestedBy, RequestedTurn: request.RequestedTurn, Status: "ACTIVATED", ActivatedAt: now}
 }
 
+// rejectedActivationFor preserves the immutable catalog identity of a known
+// Skill even when a later routing or policy decision rejects its activation.
+// Rejection is an execution decision about that exact Skill package, so its
+// audit record must remain replayable against the frozen catalog snapshot.
+func rejectedActivationFor(resolver *BrainSkillResolver, request SkillRequest, phase domain.BrainPhase, reason string, now time.Time) domain.SkillActivation {
+	activation := domain.SkillActivation{
+		SkillID:       request.SkillID,
+		Phase:         phase,
+		Reason:        request.Reason,
+		Trigger:       request.Trigger,
+		RequestedBy:   request.RequestedBy,
+		RequestedTurn: request.RequestedTurn,
+		ActivatedAt:   now,
+	}
+	if resolver != nil {
+		if pkg, ok := resolver.packages[request.SkillID]; ok {
+			activation = activationFor(pkg, request, phase, now)
+		}
+	}
+	activation.Status = "REJECTED"
+	activation.RejectedReason = reason
+	return activation
+}
+
 func supportsPhase(spec brainSkillSpec, phase domain.BrainPhase) bool {
 	for _, candidate := range spec.CompatiblePhases {
 		if candidate == phase {

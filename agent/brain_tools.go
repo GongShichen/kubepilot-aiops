@@ -1061,7 +1061,7 @@ func resolveBrainSkillRequests(state *WorkflowState, resolver *BrainSkillResolve
 			break
 		}
 		if !matched {
-			rejected = append(rejected, domain.SkillActivation{SkillID: request.SkillID, Phase: resolutionPhase, Reason: request.Reason, Trigger: request.Trigger, RequestedBy: request.RequestedBy, RequestedTurn: request.RequestedTurn, Status: "REJECTED", RejectedReason: "activation_decision_missing", ActivatedAt: time.Now().UTC()})
+			rejected = append(rejected, rejectedActivationFor(resolver, request, resolutionPhase, "activation_decision_missing", time.Now().UTC()))
 		}
 	}
 	return accepted, rejected, resolved, nil
@@ -1129,7 +1129,7 @@ func runBrainSelectCategory(ctx context.Context, resolver *BrainSkillResolver, i
 	// the exact IDs chosen by the Brain may grant the selected category.
 	if !brainRequestedSkillsGrantCategory(resolver, accepted, input.Category) {
 		for _, request := range accepted {
-			rejected = append(rejected, domain.SkillActivation{SkillID: request.SkillID, Phase: state.BrainPhase, Reason: request.Reason, Trigger: request.Trigger, RequestedBy: request.RequestedBy, RequestedTurn: request.RequestedTurn, Status: "REJECTED", RejectedReason: "requested_skill_does_not_grant_category", ActivatedAt: time.Now().UTC()})
+			rejected = append(rejected, rejectedActivationFor(resolver, request, state.BrainPhase, "requested_skill_does_not_grant_category", time.Now().UTC()))
 		}
 		return brainCapabilityOutput{Class: domain.ToolResultConstraint, Status: "REJECTED", Summary: skillActivationSummary(nil, rejected), ConstraintCode: "tool_category_not_granted_by_requested_skill", SkillActivations: rejected, NewInformation: false, Provenance: baseBrainProvenance(envelope, "skill-category-router-v1", resolved.Activations)}, nil
 	}
