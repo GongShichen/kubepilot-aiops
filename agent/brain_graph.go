@@ -47,31 +47,39 @@ type boundBrainModel struct {
 
 func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.Message, error) {
 	started := time.Now()
-	options = append(options, model.WithTools(m.tools), model.WithToolChoice(schema.ToolChoiceForced), model.WithMaxTokens(8192), model.WithTemperature(0))
+	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
 	message, err := m.base.Generate(ctx, normalizeBrainModelMessages(messages), options...)
 	if err != nil {
 		return nil, err
 	}
-	ensureBrainAssistantVisibleContent(message)
+	now := time.Now().UTC()
+	sanitized, record, persist := normalizeBrainAssistantOutput(message, "", now)
 	if state, stateErr := brainWorkflowState(ctx); stateErr == nil {
-		sanitized := *message
-		sanitized.ReasoningContent = ""
-		state.BrainMessages = append(state.BrainMessages, &sanitized)
+		record.TurnID = currentBrainTurnID(state)
+		state.AssistantTurns = append(state.AssistantTurns, record)
+		if persist {
+			state.BrainMessages = append(state.BrainMessages, sanitized)
+		}
 		if len(state.BrainTurns) > 0 {
 			index := len(state.BrainTurns) - 1
 			usage := m.agents.modelUsage(state.Incident.ID, m.label, message, time.Since(started))
 			state.BrainTurns[index].ModelUsage = &usage
-			state.BrainTurns[index].CompletedAt = time.Now().UTC()
+			state.BrainTurns[index].CompletedAt = now
 			if state.Incident.Investigation != nil {
 				state.Incident.Investigation.ModelUsage = append(state.Incident.Investigation.ModelUsage, usage)
+				state.Incident.Investigation.AssistantTurns = append([]domain.AssistantTurnRecord(nil), state.AssistantTurns...)
 			}
 		}
 	}
-	return message, nil
+	// The graph router receives a provider-neutral message. For a
+	// reasoning-only turn this is deliberately an empty transient Assistant
+	// output: the structured output guard records a classified Constraint, but
+	// no invalid Assistant message enters conversation or checkpoint state.
+	return sanitized, nil
 }
 
 func (m boundBrainModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	options = append(options, model.WithTools(m.tools), model.WithToolChoice(schema.ToolChoiceForced), model.WithMaxTokens(8192), model.WithTemperature(0))
+	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
 	return m.base.Stream(ctx, normalizeBrainModelMessages(messages), options...)
 }
 
@@ -237,6 +245,11 @@ func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowSta
 	if state == nil || state.Incident == nil {
 		return nil, fmt.Errorf("Brain context requires WorkflowState and Incident")
 	}
+	// Checkpoint/resume may load conversation state produced by an older
+	// provider adapter. Normalize it before any new checkpoint or model call so
+	// a stripped reasoning-only Assistant turn can never re-enter Chat API
+	// input. Tool-call Assistants retain a visible structured projection.
+	state.BrainMessages = normalizeBrainModelMessages(state.BrainMessages)
 	if r.states != nil {
 		r.states.Store(state.Incident.ID, state)
 	}
@@ -456,7 +469,12 @@ func normalizeBrainModelMessages(values []*schema.Message) []*schema.Message {
 		}
 		copyMessage := *value
 		copyMessage.ReasoningContent = ""
-		ensureBrainAssistantVisibleContent(&copyMessage)
+		if copyMessage.Role == schema.Assistant {
+			if strings.TrimSpace(copyMessage.Content) == "" && len(copyMessage.ToolCalls) == 0 {
+				continue
+			}
+			ensureBrainAssistantToolCallContent(&copyMessage)
+		}
 		if strings.TrimSpace(copyMessage.Content) == "" && copyMessage.Role == schema.Tool {
 			copyMessage.Content = `{"class":"ERROR","status":"ERROR","summary":"tool returned an empty result payload"}`
 		}
@@ -465,12 +483,31 @@ func normalizeBrainModelMessages(values []*schema.Message) []*schema.Message {
 	return out
 }
 
-func ensureBrainAssistantVisibleContent(message *schema.Message) {
+func normalizeBrainAssistantOutput(message *schema.Message, turnID string, observedAt time.Time) (*schema.Message, domain.AssistantTurnRecord, bool) {
+	record := domain.AssistantTurnRecord{TurnID: turnID, ObservedAt: observedAt}
+	if message == nil {
+		return &schema.Message{Role: schema.Assistant}, record, false
+	}
+	record.ContentPresent = strings.TrimSpace(message.Content) != ""
+	record.ToolCallPresent = len(message.ToolCalls) > 0
+	record.ReasoningPresent = strings.TrimSpace(message.ReasoningContent) != ""
+	record.Persisted = record.ContentPresent || record.ToolCallPresent
+	sanitized := *message
+	sanitized.ReasoningContent = ""
+	if sanitized.Role == "" {
+		sanitized.Role = schema.Assistant
+	}
+	if record.ToolCallPresent {
+		ensureBrainAssistantToolCallContent(&sanitized)
+	}
+	return &sanitized, record, record.Persisted
+}
+
+func ensureBrainAssistantToolCallContent(message *schema.Message) {
 	if message == nil || message.Role != schema.Assistant || strings.TrimSpace(message.Content) != "" {
 		return
 	}
 	if len(message.ToolCalls) == 0 {
-		message.Content = `{"type":"assistant_status","status":"NO_STRUCTURED_ACTION","summary":"model returned no visible content or structured tool action"}`
 		return
 	}
 	type callSummary struct {
@@ -504,7 +541,11 @@ func completeBrainMessageUnits(values []*schema.Message) [][]*schema.Message {
 		}
 		message := *values[index]
 		message.ReasoningContent = ""
-		ensureBrainAssistantVisibleContent(&message)
+		if message.Role == schema.Assistant && strings.TrimSpace(message.Content) == "" && len(message.ToolCalls) == 0 {
+			index++
+			continue
+		}
+		ensureBrainAssistantToolCallContent(&message)
 		if message.Role == schema.Tool {
 			// Never expose an orphan Tool result without the Assistant request it
 			// answers; the structured Runtime summary remains in the state payload.

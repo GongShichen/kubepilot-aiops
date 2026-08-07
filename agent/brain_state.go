@@ -336,6 +336,7 @@ func (r *brainGraphRuntime) syncInvestigation(state *WorkflowState) {
 	}
 	inv := state.Incident.Investigation
 	inv.BrainTurns = append([]domain.BrainTurn(nil), state.BrainTurns...)
+	inv.AssistantTurns = append([]domain.AssistantTurnRecord(nil), state.AssistantTurns...)
 	inv.IncidentUnderstanding = state.IncidentUnderstanding
 	inv.SkillActivations = append([]domain.SkillActivation(nil), state.SkillActivations...)
 	inv.ToolExecutions = append([]domain.BrainToolExecution(nil), state.ToolExecutions...)

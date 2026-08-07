@@ -68,6 +68,18 @@ type ToolResultRecord struct {
 	OccurredAt     time.Time            `json:"occurred_at"`
 }
 
+// AssistantTurnRecord is the audit projection of one provider Assistant
+// response. Hidden reasoning is represented only by its presence bit; its
+// content is never copied into conversation state, checkpoints, or the API.
+type AssistantTurnRecord struct {
+	TurnID           string    `json:"turn_id"`
+	ContentPresent   bool      `json:"content_present"`
+	ToolCallPresent  bool      `json:"tool_call_present"`
+	ReasoningPresent bool      `json:"reasoning_present"`
+	Persisted        bool      `json:"persisted"`
+	ObservedAt       time.Time `json:"observed_at"`
+}
+
 type GroundingLevel string
 
 const (

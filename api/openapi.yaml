@@ -301,6 +301,7 @@ components:
         memory_reads: {type: array, items: {$ref: '#/components/schemas/MemoryAccessEvent'}}
         model_usage: {type: array, items: {$ref: '#/components/schemas/ModelUsageEvent'}}
         brain_turns: {type: array, items: {$ref: '#/components/schemas/BrainTurn'}}
+        assistant_turns: {type: array, items: {$ref: '#/components/schemas/AssistantTurnRecord'}}
         incident_understanding: {$ref: '#/components/schemas/IncidentUnderstanding'}
         skill_activations: {type: array, items: {$ref: '#/components/schemas/SkillActivation'}}
         tool_executions: {type: array, items: {$ref: '#/components/schemas/BrainToolExecution'}}
@@ -440,6 +441,17 @@ components:
         model_usage: {$ref: '#/components/schemas/ModelUsageEvent'}
         started_at: {type: string, format: date-time}
         completed_at: {type: string, format: date-time}
+    AssistantTurnRecord:
+      type: object
+      required: [turn_id, content_present, tool_call_present, reasoning_present, persisted, observed_at]
+      description: Provider output audit. Hidden reasoning content is never persisted; only its presence is recorded.
+      properties:
+        turn_id: {type: string}
+        content_present: {type: boolean}
+        tool_call_present: {type: boolean}
+        reasoning_present: {type: boolean}
+        persisted: {type: boolean}
+        observed_at: {type: string, format: date-time}
     IncidentUnderstanding:
       type: object
       required: [summary, submitted_at]

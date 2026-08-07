@@ -27,9 +27,6 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 	defer m.mu.Unlock()
 	m.calls++
 	options := model.GetCommonOptions(nil, opts...)
-	if options.ToolChoice == nil || *options.ToolChoice != schema.ToolChoiceForced {
-		return nil, fmt.Errorf("Brain ChatModel must require one structured tool action")
-	}
 	available := map[string]bool{}
 	for _, info := range options.Tools {
 		available[info.Name] = true
@@ -350,15 +347,33 @@ func TestBrainHistoryKeepsCompleteVisibleToolTransactions(t *testing.T) {
 	}
 }
 
-func TestBrainHistoryMakesNoStructuredActionStatusVisible(t *testing.T) {
+func TestBrainHistoryDropsReasoningOnlyAssistantTurn(t *testing.T) {
 	message := &schema.Message{Role: schema.Assistant, ReasoningContent: "hidden provider reasoning"}
 	history := boundedBrainMessageHistory([]*schema.Message{message}, 8, 64<<10)
-	if len(history) != 1 || history[0].ReasoningContent != "" || !strings.Contains(history[0].Content, `"status":"NO_STRUCTURED_ACTION"`) {
-		t.Fatalf("blank Assistant turn was not represented as a visible status: %+v", history)
+	if len(history) != 0 {
+		t.Fatalf("reasoning-only Assistant turn entered conversation history: %+v", history)
 	}
 	normalized := normalizeBrainModelMessages([]*schema.Message{message})
-	if len(normalized) != 1 || strings.TrimSpace(normalized[0].Content) == "" {
-		t.Fatalf("provider input still contained a blank Assistant message: %+v", normalized)
+	if len(normalized) != 0 {
+		t.Fatalf("provider input still contained a reasoning-only Assistant message: %+v", normalized)
+	}
+	sanitized, record, persisted := normalizeBrainAssistantOutput(message, "turn-12", time.Now().UTC())
+	if persisted || record.Persisted || !record.ReasoningPresent || record.ContentPresent || record.ToolCallPresent || record.TurnID != "turn-12" {
+		t.Fatalf("reasoning-only Assistant audit was incorrect: %+v", record)
+	}
+	if sanitized.ReasoningContent != "" || strings.TrimSpace(sanitized.Content) != "" || len(sanitized.ToolCalls) != 0 {
+		t.Fatalf("hidden reasoning leaked through the provider-normalized output: %+v", sanitized)
+	}
+}
+
+func TestBrainAssistantToolCallIsPersistedWithVisibleSummary(t *testing.T) {
+	message := &schema.Message{Role: schema.Assistant, ReasoningContent: "hidden", ToolCalls: []schema.ToolCall{{ID: "call-1", Type: "function", Function: schema.FunctionCall{Name: "query_kubernetes_evidence", Arguments: `{"intent":"inspect readiness","expected_observation":["current pod state"]}`}}}}
+	sanitized, record, persisted := normalizeBrainAssistantOutput(message, "turn-13", time.Now().UTC())
+	if !persisted || !record.Persisted || !record.ToolCallPresent || record.ContentPresent || !record.ReasoningPresent {
+		t.Fatalf("ToolCall Assistant audit was incorrect: %+v", record)
+	}
+	if sanitized.ReasoningContent != "" || !strings.Contains(sanitized.Content, `"type":"assistant_tool_calls"`) || !strings.Contains(sanitized.Content, "inspect readiness") {
+		t.Fatalf("ToolCall Assistant did not receive a visible provider-neutral summary: %+v", sanitized)
 	}
 }
 

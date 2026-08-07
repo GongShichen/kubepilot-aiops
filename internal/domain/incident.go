@@ -151,6 +151,7 @@ type Investigation struct {
 	MemoryReads           []MemoryAccessEvent         `json:"memory_reads,omitempty"`
 	ModelUsage            []ModelUsageEvent           `json:"model_usage,omitempty"`
 	BrainTurns            []BrainTurn                 `json:"brain_turns,omitempty"`
+	AssistantTurns        []AssistantTurnRecord       `json:"assistant_turns,omitempty"`
 	IncidentUnderstanding *IncidentUnderstanding      `json:"incident_understanding,omitempty"`
 	SkillActivations      []SkillActivation           `json:"skill_activations,omitempty"`
 	ToolExecutions        []BrainToolExecution        `json:"tool_executions,omitempty"`

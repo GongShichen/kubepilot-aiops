@@ -44,6 +44,7 @@ type WorkflowState struct {
 	BrainPhase            domain.BrainPhase                      `json:"brain_phase,omitempty"`
 	ResumeBrainPhase      domain.BrainPhase                      `json:"resume_brain_phase,omitempty"`
 	BrainTurns            []domain.BrainTurn                     `json:"brain_turns,omitempty"`
+	AssistantTurns        []domain.AssistantTurnRecord           `json:"assistant_turns,omitempty"`
 	IncidentUnderstanding *domain.IncidentUnderstanding          `json:"incident_understanding,omitempty"`
 	SkillActivations      []domain.SkillActivation               `json:"skill_activations,omitempty"`
 	ActiveSkillRefs       []domain.SkillRef                      `json:"active_skill_refs,omitempty"`
