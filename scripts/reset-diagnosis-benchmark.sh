@@ -53,9 +53,10 @@ DELETE FROM incidents WHERE namespace = 'kubepilot-benchmark' OR namespace LIKE 
 SQL
 
 # PostgreSQL executes /docker-entrypoint-initdb.d only when its data volume is
-# first created. Apply the idempotent intelligence migration explicitly so an
-# existing development volume receives schema additions before the rebuilt
-# runtime reads or seeds causal patterns.
+# first created. Apply the idempotent Brain and intelligence migrations
+# explicitly so an existing development volume receives schema additions
+# before the rebuilt runtime starts or history is seeded.
+"${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U kubepilot -d kubepilot -f /docker-entrypoint-initdb.d/010_brain_runtime.sql >/dev/null
 "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U kubepilot -d kubepilot -f /docker-entrypoint-initdb.d/intelligence.sql >/dev/null
 
 # Rebuild the Agent image before every fresh benchmark baseline. Restarting an
