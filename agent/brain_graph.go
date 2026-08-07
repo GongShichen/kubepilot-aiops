@@ -47,12 +47,12 @@ type boundBrainModel struct {
 
 func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.Message, error) {
 	started := time.Now()
-	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
+	options = append(options, model.WithTools(m.tools), model.WithToolChoice(schema.ToolChoiceForced), model.WithMaxTokens(8192), model.WithTemperature(0))
 	message, err := m.base.Generate(ctx, normalizeBrainModelMessages(messages), options...)
 	if err != nil {
 		return nil, err
 	}
-	ensureBrainAssistantToolCallContent(message)
+	ensureBrainAssistantVisibleContent(message)
 	if state, stateErr := brainWorkflowState(ctx); stateErr == nil {
 		sanitized := *message
 		sanitized.ReasoningContent = ""
@@ -71,7 +71,7 @@ func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Messag
 }
 
 func (m boundBrainModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
+	options = append(options, model.WithTools(m.tools), model.WithToolChoice(schema.ToolChoiceForced), model.WithMaxTokens(8192), model.WithTemperature(0))
 	return m.base.Stream(ctx, normalizeBrainModelMessages(messages), options...)
 }
 
@@ -456,7 +456,7 @@ func normalizeBrainModelMessages(values []*schema.Message) []*schema.Message {
 		}
 		copyMessage := *value
 		copyMessage.ReasoningContent = ""
-		ensureBrainAssistantToolCallContent(&copyMessage)
+		ensureBrainAssistantVisibleContent(&copyMessage)
 		if strings.TrimSpace(copyMessage.Content) == "" && copyMessage.Role == schema.Tool {
 			copyMessage.Content = `{"class":"ERROR","status":"ERROR","summary":"tool returned an empty result payload"}`
 		}
@@ -465,8 +465,12 @@ func normalizeBrainModelMessages(values []*schema.Message) []*schema.Message {
 	return out
 }
 
-func ensureBrainAssistantToolCallContent(message *schema.Message) {
-	if message == nil || message.Role != schema.Assistant || len(message.ToolCalls) == 0 || strings.TrimSpace(message.Content) != "" {
+func ensureBrainAssistantVisibleContent(message *schema.Message) {
+	if message == nil || message.Role != schema.Assistant || strings.TrimSpace(message.Content) != "" {
+		return
+	}
+	if len(message.ToolCalls) == 0 {
+		message.Content = `{"type":"assistant_status","status":"NO_STRUCTURED_ACTION","summary":"model returned no visible content or structured tool action"}`
 		return
 	}
 	type callSummary struct {
@@ -500,7 +504,7 @@ func completeBrainMessageUnits(values []*schema.Message) [][]*schema.Message {
 		}
 		message := *values[index]
 		message.ReasoningContent = ""
-		ensureBrainAssistantToolCallContent(&message)
+		ensureBrainAssistantVisibleContent(&message)
 		if message.Role == schema.Tool {
 			// Never expose an orphan Tool result without the Assistant request it
 			// answers; the structured Runtime summary remains in the state payload.

@@ -27,6 +27,9 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 	defer m.mu.Unlock()
 	m.calls++
 	options := model.GetCommonOptions(nil, opts...)
+	if options.ToolChoice == nil || *options.ToolChoice != schema.ToolChoiceForced {
+		return nil, fmt.Errorf("Brain ChatModel must require one structured tool action")
+	}
 	available := map[string]bool{}
 	for _, info := range options.Tools {
 		available[info.Name] = true
@@ -344,6 +347,18 @@ func TestBrainHistoryKeepsCompleteVisibleToolTransactions(t *testing.T) {
 	}
 	if orphaned := boundedBrainMessageHistory([]*schema.Message{assistant, tool}, 1, 64<<10); len(orphaned) != 0 {
 		t.Fatalf("history budget retained an orphaned tool request/result: %+v", orphaned)
+	}
+}
+
+func TestBrainHistoryMakesNoStructuredActionStatusVisible(t *testing.T) {
+	message := &schema.Message{Role: schema.Assistant, ReasoningContent: "hidden provider reasoning"}
+	history := boundedBrainMessageHistory([]*schema.Message{message}, 8, 64<<10)
+	if len(history) != 1 || history[0].ReasoningContent != "" || !strings.Contains(history[0].Content, `"status":"NO_STRUCTURED_ACTION"`) {
+		t.Fatalf("blank Assistant turn was not represented as a visible status: %+v", history)
+	}
+	normalized := normalizeBrainModelMessages([]*schema.Message{message})
+	if len(normalized) != 1 || strings.TrimSpace(normalized[0].Content) == "" {
+		t.Fatalf("provider input still contained a blank Assistant message: %+v", normalized)
 	}
 }
 
