@@ -15,23 +15,25 @@ Use only the triggering Tool Result, GroundingDelta, affected hypotheses, and cu
 
 ## Procedure
 
-1. Explain which belief is affected.
-2. Propose a confidence change without changing server grounding.
-3. Decide whether a new revision is required.
-4. Select the next bounded goal or escalation.
-5. Avoid repeating the observation verbatim.
+1. Classify the trigger as evidence, grounding, tool, constraint, recovery, or verification feedback.
+2. Read the complete Assistant Tool-Call summary and its classified Tool Result; never infer an Incident fact from a constraint or execution error.
+3. If no admitted hypothesis exists yet, repair the procedure by submitting falsifiable hypotheses or requesting the missing phase-compatible Skill. Do not emit a BeliefDelta for a hypothesis that does not exist.
+4. If an admitted hypothesis exists, explain which belief is affected and propose a confidence change without changing server grounding.
+5. Decide whether a new revision is required. Changes to Statement, Mechanism, Target, or falsification conditions require a new revision.
+6. Select one bounded next goal or escalation. A denied Tool Category requires a compatible Skill activation before category selection.
+7. Never retry an unchanged constraint request, and do not repeat the observation verbatim.
 
 ## Allowed actions
 
-Use reflection submission, belief commit, hypothesis revision, or control capabilities only.
+Use hypothesis submission when no hypothesis exists; otherwise use reflection submission, belief commit, hypothesis revision, Skill request, or control capabilities only.
 
 ## Output contract
 
-Return structured BeliefDelta records and a next goal; do not expose hidden reasoning.
+Return a structured corrective action. When a hypothesis exists, return BeliefDelta records and a next goal. When none exists, return a hypothesis submission or Skill request that resolves the procedural blocker. Do not expose hidden reasoning.
 
 ## Stop and failure conditions
 
-Stop when belief changes are committed or the trigger cannot be resolved safely.
+Stop when belief changes are committed, the missing Skill or hypothesis is submitted, or the trigger cannot be resolved safely. Never claim success after an empty or unclassified Tool Result.
 
 ## Handoff
 

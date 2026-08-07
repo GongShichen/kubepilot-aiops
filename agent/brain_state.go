@@ -45,6 +45,14 @@ func (r *brainGraphRuntime) classifyToolResults(ctx context.Context, messages []
 		state.BrainBudget.Usage.ToolCalls++
 		toolMessage := *message
 		toolMessage.ReasoningContent = ""
+		// Persist the server-classified result, not the raw adapter payload. This
+		// makes Class, Status, failure semantics, complete Provenance and Evidence
+		// IDs visible to the next Brain turn as one auditable Tool result.
+		classified, marshalErr := json.Marshal(output)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("encode classified Brain Tool result: %w", marshalErr)
+		}
+		toolMessage.Content = string(classified)
 		state.BrainMessages = append(state.BrainMessages, &toolMessage)
 		r.applyCapabilityOutput(state, output)
 	}

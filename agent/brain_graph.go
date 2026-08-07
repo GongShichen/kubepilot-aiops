@@ -48,10 +48,11 @@ type boundBrainModel struct {
 func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.Message, error) {
 	started := time.Now()
 	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
-	message, err := m.base.Generate(ctx, messages, options...)
+	message, err := m.base.Generate(ctx, normalizeBrainModelMessages(messages), options...)
 	if err != nil {
 		return nil, err
 	}
+	ensureBrainAssistantToolCallContent(message)
 	if state, stateErr := brainWorkflowState(ctx); stateErr == nil {
 		sanitized := *message
 		sanitized.ReasoningContent = ""
@@ -71,7 +72,7 @@ func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Messag
 
 func (m boundBrainModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
-	return m.base.Stream(ctx, messages, options...)
+	return m.base.Stream(ctx, normalizeBrainModelMessages(messages), options...)
 }
 
 func buildBrainGraph(ctx context.Context, runtime *brainGraphRuntime) (compose.AnyGraph, error) {
@@ -420,33 +421,134 @@ func boundedBrainMessageHistory(values []*schema.Message, maxItems, maxBytes int
 	if maxItems <= 0 || maxBytes <= 0 || len(values) == 0 {
 		return nil
 	}
-	start := len(values) - maxItems
-	if start < 0 {
-		start = 0
-	}
-	selected := make([]*schema.Message, 0, len(values)-start)
+	units := completeBrainMessageUnits(values)
+	selectedUnits := make([][]*schema.Message, 0, len(units))
 	used := 0
-	for index := len(values) - 1; index >= start; index-- {
-		if values[index] == nil {
-			continue
+	items := 0
+	for index := len(units) - 1; index >= 0; index-- {
+		unit := units[index]
+		if len(unit) == 0 || items+len(unit) > maxItems {
+			break
 		}
-		copyMessage := *values[index]
-		copyMessage.ReasoningContent = ""
-		if len(copyMessage.Content) > 24<<10 {
-			copyMessage.Content = copyMessage.Content[:24<<10] + "\n[tool result projection truncated]"
-		}
-		size := len(copyMessage.Content)
-		for _, call := range copyMessage.ToolCalls {
-			size += len(call.Function.Name) + len(call.Function.Arguments)
+		size := 0
+		for _, message := range unit {
+			size += brainMessageSize(message)
 		}
 		if used+size > maxBytes {
 			break
 		}
 		used += size
-		selected = append(selected, &copyMessage)
+		items += len(unit)
+		selectedUnits = append(selectedUnits, unit)
 	}
-	for left, right := 0, len(selected)-1; left < right; left, right = left+1, right-1 {
-		selected[left], selected[right] = selected[right], selected[left]
+	selected := make([]*schema.Message, 0, items)
+	for index := len(selectedUnits) - 1; index >= 0; index-- {
+		selected = append(selected, selectedUnits[index]...)
 	}
 	return selected
+}
+
+func normalizeBrainModelMessages(values []*schema.Message) []*schema.Message {
+	out := make([]*schema.Message, 0, len(values))
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		copyMessage := *value
+		copyMessage.ReasoningContent = ""
+		ensureBrainAssistantToolCallContent(&copyMessage)
+		if strings.TrimSpace(copyMessage.Content) == "" && copyMessage.Role == schema.Tool {
+			copyMessage.Content = `{"class":"ERROR","status":"ERROR","summary":"tool returned an empty result payload"}`
+		}
+		out = append(out, &copyMessage)
+	}
+	return out
+}
+
+func ensureBrainAssistantToolCallContent(message *schema.Message) {
+	if message == nil || message.Role != schema.Assistant || len(message.ToolCalls) == 0 || strings.TrimSpace(message.Content) != "" {
+		return
+	}
+	type callSummary struct {
+		ID                  string   `json:"id"`
+		Tool                string   `json:"tool"`
+		Intent              string   `json:"intent,omitempty"`
+		ExpectedObservation []string `json:"expected_observation,omitempty"`
+	}
+	projection := struct {
+		Type  string        `json:"type"`
+		Calls []callSummary `json:"calls"`
+	}{Type: "assistant_tool_calls"}
+	for _, call := range message.ToolCalls {
+		var intent struct {
+			Intent              string   `json:"intent"`
+			ExpectedObservation []string `json:"expected_observation"`
+		}
+		_ = json.Unmarshal([]byte(call.Function.Arguments), &intent)
+		projection.Calls = append(projection.Calls, callSummary{ID: call.ID, Tool: call.Function.Name, Intent: intent.Intent, ExpectedObservation: intent.ExpectedObservation})
+	}
+	raw, _ := json.Marshal(projection)
+	message.Content = string(raw)
+}
+
+func completeBrainMessageUnits(values []*schema.Message) [][]*schema.Message {
+	units := make([][]*schema.Message, 0, len(values))
+	for index := 0; index < len(values); {
+		if values[index] == nil {
+			index++
+			continue
+		}
+		message := *values[index]
+		message.ReasoningContent = ""
+		ensureBrainAssistantToolCallContent(&message)
+		if message.Role == schema.Tool {
+			// Never expose an orphan Tool result without the Assistant request it
+			// answers; the structured Runtime summary remains in the state payload.
+			index++
+			continue
+		}
+		unit := []*schema.Message{&message}
+		if message.Role == schema.Assistant && len(message.ToolCalls) > 0 {
+			allowedCallIDs := map[string]bool{}
+			for _, call := range message.ToolCalls {
+				allowedCallIDs[call.ID] = true
+			}
+			cursor := index + 1
+			for cursor < len(values) && values[cursor] != nil && values[cursor].Role == schema.Tool {
+				if !allowedCallIDs[values[cursor].ToolCallID] {
+					break
+				}
+				toolResult := *values[cursor]
+				toolResult.ReasoningContent = ""
+				if strings.TrimSpace(toolResult.Content) == "" {
+					toolResult.Content = `{"class":"ERROR","status":"ERROR","summary":"tool returned an empty result payload"}`
+				}
+				unit = append(unit, &toolResult)
+				cursor++
+			}
+			// A request is useful history only after every Tool Call has a result.
+			if len(unit)-1 == len(message.ToolCalls) {
+				units = append(units, unit)
+			}
+			index = cursor
+			continue
+		}
+		units = append(units, unit)
+		index++
+	}
+	return units
+}
+
+func brainMessageSize(message *schema.Message) int {
+	if message == nil {
+		return 0
+	}
+	if len(message.Content) > 24<<10 {
+		message.Content = message.Content[:24<<10] + "\n[tool result projection truncated]"
+	}
+	size := len(message.Content)
+	for _, call := range message.ToolCalls {
+		size += len(call.ID) + len(call.Function.Name) + len(call.Function.Arguments)
+	}
+	return size
 }

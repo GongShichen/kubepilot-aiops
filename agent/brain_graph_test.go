@@ -334,3 +334,78 @@ func TestDiagnosisCannotRewriteCommittedHypothesis(t *testing.T) {
 		t.Fatalf("diagnosis rewrote immutable hypothesis semantics: %+v", output)
 	}
 }
+
+func TestBrainHistoryKeepsCompleteVisibleToolTransactions(t *testing.T) {
+	assistant := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call-1", Type: "function", Function: schema.FunctionCall{Name: "query_kubernetes_evidence", Arguments: `{"intent":"inspect readiness","expected_observation":["current pod state"]}`}}}}
+	tool := &schema.Message{Role: schema.Tool, ToolCallID: "call-1", ToolName: "query_kubernetes_evidence", Content: `{"class":"EVIDENCE","status":"OK","summary":"pod is not ready","provenance":{"evidence_ids":["e1"]}}`}
+	history := boundedBrainMessageHistory([]*schema.Message{assistant, tool}, 8, 64<<10)
+	if len(history) != 2 || strings.TrimSpace(history[0].Content) == "" || !strings.Contains(history[0].Content, "inspect readiness") || !strings.Contains(history[1].Content, "pod is not ready") {
+		t.Fatalf("tool transaction was blank or incomplete: %+v", history)
+	}
+	if orphaned := boundedBrainMessageHistory([]*schema.Message{assistant, tool}, 1, 64<<10); len(orphaned) != 0 {
+		t.Fatalf("history budget retained an orphaned tool request/result: %+v", orphaned)
+	}
+}
+
+func TestToolHistoryUsesServerClassifiedResultWithProvenance(t *testing.T) {
+	assistant := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call-1", Type: "function", Function: schema.FunctionCall{Name: "query_kubernetes_evidence", Arguments: `{"intent":"inspect readiness","expected_observation":["current pod state"],"targets":[{"namespace":"team-a","service":"api"}]}`}}}}
+	now := time.Now().UTC()
+	output := brainCapabilityOutput{Class: domain.ToolResultConstraint, Status: "REJECTED", Summary: "scope denied", ConstraintCode: "cross_namespace_denied", Provenance: domain.ToolResultProvenance{Collector: "constraint-kernel", WindowStart: now, WindowEnd: now, ObservedAt: now, RawArtifactHash: "artifact", ParserVersion: "v1"}}
+	raw, err := json.Marshal(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &WorkflowState{
+		Incident:          &domain.Incident{ID: "tool-result", Investigation: &domain.Investigation{}},
+		BrainMessages:     []*schema.Message{assistant},
+		ExecutionSnapshot: domain.ExecutionSnapshot{ToolSchemaHash: "schema-hash"},
+		BrainBudget:       domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+	}
+	message := &schema.Message{Role: schema.Tool, ToolCallID: "call-1", ToolName: "query_kubernetes_evidence", Content: string(raw)}
+	if _, err = (&brainGraphRuntime{}).classifyToolResults(withBrainWorkflowState(context.Background(), state), []*schema.Message{message}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.BrainMessages) != 2 {
+		t.Fatalf("classified Tool result was not retained: %+v", state.BrainMessages)
+	}
+	classified, err := decodeBrainCapabilityOutput(state.BrainMessages[1].Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if classified.Class != domain.ToolResultConstraint || classified.ConstraintCode != "cross_namespace_denied" || classified.Provenance.ToolCallID != "call-1" || classified.Provenance.ToolSchemaHash != "schema-hash" {
+		t.Fatalf("Brain history did not contain the classified result and injected provenance: %+v", classified)
+	}
+}
+
+func TestReflectionCanCorrectPreHypothesisConstraintBySubmittingHypotheses(t *testing.T) {
+	target := domain.ResourceRef{Namespace: "team-a", Service: "api", Resource: "api", Kind: "Service"}
+	state := &WorkflowState{
+		Incident:              &domain.Incident{ID: "reflection-admission", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainPhase:            domain.BrainPhaseReflection,
+		ResumeBrainPhase:      domain.BrainPhaseInvestigation,
+		BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
+		BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		ActiveToolCategory:    domain.BrainToolReasoning,
+		ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
+	}
+	input := submitBrainHypothesesInput{
+		Intent:              "correct the blocked investigation by forming a falsifiable hypothesis",
+		ExpectedObservation: []string{"server admission decision"},
+		Hypotheses: []proposedBrainHypothesis{{
+			Statement:               "api degradation is caused by a local execution stall",
+			Category:                "application",
+			Mechanism:               "execution stall",
+			Targets:                 []domain.ResourceRef{target},
+			EvidenceNeeds:           []string{"workload execution evidence"},
+			FalsificationConditions: []string{"workload execution is healthy"},
+			ModelConfidence:         .5,
+		}},
+	}
+	output, err := runBrainSubmitHypotheses(withBrainWorkflowState(context.Background(), state), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Class == domain.ToolResultConstraint || len(output.Hypotheses) != 1 || len(output.Admissions) != 1 {
+		t.Fatalf("Reflection could not produce the structured correction needed to leave the pre-hypothesis failure: %+v", output)
+	}
+}

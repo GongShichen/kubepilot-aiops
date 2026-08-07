@@ -451,7 +451,7 @@ func runBrainSubmitHypotheses(ctx context.Context, input submitBrainHypothesesIn
 	if err != nil {
 		return brainCapabilityOutput{}, err
 	}
-	if state.BrainPhase != domain.BrainPhaseInvestigation {
+	if state.BrainPhase != domain.BrainPhaseInvestigation && state.BrainPhase != domain.BrainPhaseReflection {
 		return phaseConstraintOutput(state, "submit_hypotheses", domain.BrainToolReasoning, input.Intent, domain.BrainPhaseInvestigation), nil
 	}
 	envelope := newBrainEnvelope(state, "submit_hypotheses", domain.BrainToolReasoning, domain.AgentActionIntent{Intent: input.Intent, ExpectedObservation: input.ExpectedObservation})
