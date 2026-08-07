@@ -623,6 +623,79 @@ func TestBrainAssistantToolCallIsPersistedWithVisibleSummary(t *testing.T) {
 	}
 }
 
+func TestBrainContextAdvertisesResumePhaseOptionalSkills(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &brainGraphRuntime{resolver: resolver, toolHash: "tool-hash", policyHash: "policy-hash"}
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "skill-catalog-context", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase:         domain.BrainPhaseReflection,
+			ResumeBrainPhase:   domain.BrainPhaseInvestigation,
+			ActiveToolCategory: domain.BrainToolReasoning,
+			BrainBudget:        domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		},
+	}
+	messages, err := runtime.contextBuilder(context.Background(), state, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) < 2 || !strings.Contains(messages[0].Content, "available_optional_skills") || !strings.Contains(messages[0].Content, "must never be emitted as Assistant text") {
+		t.Fatalf("Brain system contract did not explain native Skill selection: %+v", messages)
+	}
+	var payload struct {
+		Phase          domain.BrainPhase        `json:"phase"`
+		SelectionPhase domain.BrainPhase        `json:"optional_skill_selection_phase"`
+		Skills         []brainSkillCatalogEntry `json:"available_optional_skills"`
+	}
+	if err = json.Unmarshal([]byte(messages[len(messages)-1].Content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range payload.Skills {
+		found = found || entry.ID == "investigate-metrics"
+	}
+	if payload.Phase != domain.BrainPhaseReflection || payload.SelectionPhase != domain.BrainPhaseInvestigation || !found {
+		t.Fatalf("reflection did not expose exact resume-phase Skills: %+v", payload)
+	}
+	if len(state.RequestedSkills) != 0 {
+		t.Fatalf("catalog discovery activated a Skill without a Brain request: %+v", state.RequestedSkills)
+	}
+}
+
+func TestStructuredOutputGuardPersistsCompleteConstraintProvenance(t *testing.T) {
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "guard-audit", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase:           domain.BrainPhaseInvestigation,
+			BrainTurns:           []domain.BrainTurn{{ID: "turn:guard", Sequence: 1}},
+			BrainBudget:          domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			ExecutionSnapshot:    domain.ExecutionSnapshot{ToolSchemaHash: "tool-hash"},
+			EvidenceSnapshotHash: "evidence-hash",
+		},
+	}
+	message := &schema.Message{Role: schema.Assistant, Content: `{"tool":"collect-evidence"}`, ReasoningContent: "hidden"}
+	if _, err := (&brainGraphRuntime{}).handleUnstructured(withBrainWorkflowState(context.Background(), state), message); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.ToolExecutions) != 1 || len(state.Observations) != 1 {
+		t.Fatalf("structured guard did not persist one classified status: %+v", state.ToolExecutions)
+	}
+	execution := state.ToolExecutions[0]
+	provenance := execution.Result.Provenance
+	if execution.Envelope.ToolName != "structured_output_guard" || execution.Envelope.ActionID == "" || provenance.ToolCallID != execution.Envelope.ActionID || provenance.ToolName != execution.Envelope.ToolName || provenance.ToolSchemaHash != "tool-hash" || provenance.ObservedAt.IsZero() || len(provenance.TargetRefs) != 1 || provenance.ParserVersion != "structured-output-guard-v2" {
+		t.Fatalf("structured guard provenance is incomplete: %+v", execution)
+	}
+	if execution.Result.Class != domain.ToolResultConstraint || execution.Result.Status != "REJECTED" || execution.Result.ConstraintCode != "structured_action_required" || execution.Result.Summary == "" || state.PendingReflection == nil || *state.PendingReflection != domain.ReflectionConstraintFailure {
+		t.Fatalf("structured guard did not expose an explicit corrective status: %+v", execution.Result)
+	}
+	if message.ReasoningContent != "" {
+		t.Fatal("structured guard retained hidden reasoning")
+	}
+}
+
 func TestToolHistoryUsesServerClassifiedResultWithProvenance(t *testing.T) {
 	assistant := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call-1", Type: "function", Function: schema.FunctionCall{Name: "inspect_kubernetes", Arguments: `{"intent":"inspect readiness","expected_observation":["current pod state"],"targets":[{"namespace":"team-a","service":"api"}]}`}}}}
 	now := time.Now().UTC()

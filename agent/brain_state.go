@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/schema"
@@ -11,7 +12,6 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/topology"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
-	"github.com/oklog/ulid/v2"
 )
 
 func (r *brainGraphRuntime) classifyToolResults(ctx context.Context, messages []*schema.Message) (*WorkflowState, error) {
@@ -363,9 +363,27 @@ func (r *brainGraphRuntime) handleUnstructured(ctx context.Context, message *sch
 	}
 	state.BrainBudget.Usage.StructuredCorrections++
 	now := time.Now().UTC()
-	callID := "structured-guard:" + ulid.Make().String()
-	result := domain.ToolResultRecord{Class: domain.ToolResultConstraint, Status: "REJECTED", Summary: "Brain turn ended without a structured tool action", ConstraintCode: "structured_action_required", OccurredAt: now, Provenance: domain.ToolResultProvenance{ToolCallID: callID, ToolName: "structured_output_guard", Collector: "brain-action-gateway", ToolSchemaHash: state.ExecutionSnapshot.ToolSchemaHash, WindowStart: now, WindowEnd: now, ObservedAt: now, RawArtifactHash: brainruntime.Hash(struct{ HasMessage bool }{message != nil}), ParserVersion: "structured-output-guard-v1"}}
-	state.ToolExecutions = append(state.ToolExecutions, domain.BrainToolExecution{Result: result})
+	intent := domain.AgentActionIntent{Intent: "reject an unstructured Assistant turn", ExpectedObservation: []string{"one native call to an exposed structured tool on the corrective turn"}}
+	envelope := newBrainEnvelope(state, "structured_output_guard", domain.BrainToolControl, intent)
+	hasContent, hasReasoning := false, false
+	if message != nil {
+		hasContent = strings.TrimSpace(message.Content) != ""
+		hasReasoning = strings.TrimSpace(message.ReasoningContent) != ""
+	}
+	result := domain.ToolResultRecord{
+		Class: domain.ToolResultConstraint, Status: "REJECTED",
+		Summary:        "Brain turn ended without a native structured tool call; the corrective turn must call one exposed tool and may request only exact IDs from available_optional_skills",
+		ConstraintCode: "structured_action_required", OccurredAt: now,
+		Provenance: domain.ToolResultProvenance{
+			ToolCallID: envelope.ActionID, ToolName: envelope.ToolName, Collector: "brain-action-gateway",
+			ToolSchemaHash: state.ExecutionSnapshot.ToolSchemaHash, TargetRefs: brainProvenanceTargets(state, envelope),
+			WindowStart: now, WindowEnd: now, ObservedAt: now,
+			RawArtifactHash: brainruntime.Hash(struct{ HasMessage, HasContent, HasReasoning bool }{message != nil, hasContent, hasReasoning}),
+			ParserVersion:   "structured-output-guard-v2", EvidenceIDs: []string{},
+		},
+	}
+	state.ToolExecutions = append(state.ToolExecutions, domain.BrainToolExecution{Envelope: envelope, Result: result})
+	state.Observations = append(state.Observations, result)
 	if state.BrainBudget.Usage.StructuredCorrections >= state.BrainBudget.Limits.MaxStructuredCorrections {
 		termination, _ := brainruntime.NewTermination(domain.TerminationBudgetExhausted, currentBrainTurnID(state), finalHypothesisID(state), state.EvidenceSnapshotHash, &state.ExecutionSnapshot, []string{"structured action correction budget exhausted"}, state.BrainBudget)
 		state.Termination = &termination

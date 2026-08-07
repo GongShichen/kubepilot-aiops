@@ -92,6 +92,31 @@ func TestBrainSkillResolverPinsCompleteBundlesAndDependencies(t *testing.T) {
 	}
 }
 
+func TestBrainSkillResolverExposesExactOptionalCatalogWithoutActivation(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := resolver.OptionalCatalog(domain.BrainPhaseInvestigation)
+	wanted := map[string]bool{"investigate-metrics": false, "investigate-logs": false, "investigate-traces": false, "inspect-kubernetes": false, "select-tools": false}
+	for _, entry := range catalog {
+		if entry.ID == "" || entry.Version == "" || entry.Description == "" || entry.OutputContract == "" || len(entry.AllowedToolCategories) == 0 {
+			t.Fatalf("optional Skill catalog entry is incomplete: %+v", entry)
+		}
+		if _, ok := wanted[entry.ID]; ok {
+			wanted[entry.ID] = true
+		}
+	}
+	for id, found := range wanted {
+		if !found {
+			t.Fatalf("phase-compatible optional Skill %s is undiscoverable: %+v", id, catalog)
+		}
+	}
+	if len(resolver.OptionalCatalog(domain.BrainPhaseIntake)) != 0 {
+		t.Fatal("INTAKE unexpectedly advertised optional Skills")
+	}
+}
+
 func TestBrainSkillResolverRejectsPhaseAndBudgetWithoutExpandingAuthority(t *testing.T) {
 	resolver, err := LoadDefaultBrainSkillResolver()
 	if err != nil {

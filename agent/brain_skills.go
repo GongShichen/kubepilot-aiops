@@ -58,6 +58,20 @@ type ResolvedBrainSkills struct {
 	active            map[string]brainSkillPackage
 }
 
+// brainSkillCatalogEntry is the bounded, model-facing description of one
+// optional capability. It deliberately exposes only frozen catalog metadata:
+// the Brain can choose an exact Skill ID, while the Runtime still owns phase,
+// dependency, conflict, budget, and authority validation.
+type brainSkillCatalogEntry struct {
+	ID                    string                     `json:"id"`
+	Version               string                     `json:"version"`
+	Description           string                     `json:"description"`
+	Requires              []string                   `json:"requires,omitempty"`
+	AllowedToolCategories []domain.BrainToolCategory `json:"allowed_tool_categories"`
+	OutputContract        string                     `json:"output_contract"`
+	References            []string                   `json:"references,omitempty"`
+}
+
 type BrainSkillResolver struct {
 	version    int
 	root       string
@@ -104,6 +118,33 @@ func (r *BrainSkillResolver) SnapshotHash() string {
 		return ""
 	}
 	return r.hash
+}
+
+// OptionalCatalog returns exact phase-compatible Skill IDs without activating
+// anything or expanding authority. The returned metadata is sufficient for the
+// LLM to make an informed request_skills call; Resolve remains the sole
+// admission boundary.
+func (r *BrainSkillResolver) OptionalCatalog(phase domain.BrainPhase) []brainSkillCatalogEntry {
+	if r == nil {
+		return nil
+	}
+	entries := make([]brainSkillCatalogEntry, 0, len(r.packages))
+	for _, pkg := range r.packages {
+		if pkg.Spec.Mandatory || !supportsPhase(pkg.Spec, phase) {
+			continue
+		}
+		entries = append(entries, brainSkillCatalogEntry{
+			ID:                    pkg.Spec.ID,
+			Version:               pkg.Spec.Version,
+			Description:           pkg.Description,
+			Requires:              append([]string(nil), pkg.Spec.Requires...),
+			AllowedToolCategories: append([]domain.BrainToolCategory(nil), pkg.Spec.AllowedToolCategories...),
+			OutputContract:        pkg.Spec.OutputContract,
+			References:            append([]string(nil), pkg.Spec.References...),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
+	return entries
 }
 
 func (r *BrainSkillResolver) ReadActiveReference(active []domain.SkillRef, skillID, name string) (string, error) {

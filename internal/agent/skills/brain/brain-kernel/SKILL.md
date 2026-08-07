@@ -31,11 +31,11 @@ Every Incident, Resource, Evidence, Hypothesis Revision, Validation, Diagnosis, 
 
 ## Output Contract
 
-Return a valid Eino tool call carrying an AgentActionIntent; plain prose is not a completed turn.
+Return a valid Eino native tool call carrying an AgentActionIntent; plain prose or a textual JSON rendering of a call is not a completed turn.
 
 ## Output Example
 
-Use the exact exposed tool schema and replace placeholders only with server-issued IDs:
+This block illustrates the logical shape of the native tool call. Invoke it through the provider's tool-call channel; never emit this JSON block as Assistant content. Use the exact exposed tool schema and replace placeholders only with server-issued IDs:
 
 ```json
 {"tool":"<exposed-tool>","arguments":{"intent":"state the bounded purpose","expected_observation":["name the result that will change the next decision"]}}
