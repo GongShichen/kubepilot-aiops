@@ -131,6 +131,34 @@ func TestIngestWithoutRuntimeLeavesIncidentReceived(t *testing.T) {
 	}
 }
 
+func TestResolvedAlertDoesNotCancelActiveInvestigation(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	manager := &IncidentManager{Store: st, Hub: NewHub()}
+	firing := domain.Alert{Fingerprint: "fp-active", Status: "firing", StartsAt: time.Now().UTC().Add(-time.Minute)}
+	incident, err := manager.IngestAlert(ctx, firing, "gateway-service", "production", "critical", "gateway-service", "service alert")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = st.UpdateWorkflowStatus(ctx, incident.ID, domain.StatusDiagnosing, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved := firing
+	resolved.Status = "resolved"
+	resolved.EndsAt = time.Now().UTC()
+	current, err := manager.IngestAlert(ctx, resolved, "gateway-service", "production", "critical", "gateway-service", "service alert")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != domain.StatusDiagnosing {
+		t.Fatalf("resolved alert cancelled active investigation: %s", current.Status)
+	}
+	if len(current.Alerts) != 2 || current.Alerts[len(current.Alerts)-1].Status != "resolved" {
+		t.Fatalf("resolved alert was not preserved as an observation: %#v", current.Alerts)
+	}
+}
+
 func TestCorrelationDoesNotMergeNamespaces(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()

@@ -129,11 +129,18 @@ func (m *IncidentManager) IngestAlert(ctx context.Context, a domain.Alert, servi
 		if err != nil {
 			return nil, err
 		}
-		if existing.Status == domain.StatusAwaitingApproval || existing.Status == domain.StatusReceived || existing.Status == domain.StatusCollecting || existing.Status == domain.StatusDiagnosing {
-			_ = domain.Transition(existing, domain.StatusCancelled)
-			_ = m.Store.Update(ctx, existing)
+		// Alert lifecycle and Incident investigation lifecycle are independent.
+		// A resolved signal is a current observation for the Brain, not an
+		// operator cancellation command. Cancelling here can race an active
+		// Workflow Attempt before its first checkpoint and leave callers waiting
+		// forever for the required completed Investigation audit.
+		resolved, appendErr := m.appendAlert(ctx, existing, a)
+		if appendErr != nil {
+			return nil, appendErr
 		}
-		return existing, nil
+		m.audit(ctx, resolved.ID, "alert_resolved", "resolved alert recorded without cancelling investigation", map[string]any{"fingerprint": a.Fingerprint})
+		m.publish(resolved)
+		return resolved, nil
 	}
 	if existing, err := m.Store.FindByFingerprint(ctx, a.Fingerprint); err == nil {
 		return m.appendAlert(ctx, existing, a)
