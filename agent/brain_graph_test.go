@@ -19,9 +19,10 @@ import (
 )
 
 type brainGraphModel struct {
-	mu      sync.Mutex
-	calls   int
-	history []string
+	mu                  sync.Mutex
+	calls               int
+	forcedToolChoiceUse int
+	history             []string
 }
 
 func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message, opts ...model.Option) (*schema.Message, error) {
@@ -29,6 +30,9 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 	defer m.mu.Unlock()
 	m.calls++
 	options := model.GetCommonOptions(nil, opts...)
+	if options.ToolChoice != nil && *options.ToolChoice == schema.ToolChoiceForced {
+		m.forcedToolChoiceUse++
+	}
 	available := map[string]bool{}
 	for _, info := range options.Tools {
 		available[info.Name] = true
@@ -236,6 +240,11 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 	}
 	if final.DiagnosisRuntime != nil || len(final.Candidates) != 0 || len(final.HypothesisDrafts) != 0 || len(final.VerifiedHypotheses) != 0 || final.Incident.Investigation.Arbitration != nil || final.Incident.DiagnosisLedger != nil {
 		t.Fatalf("KubePilot entered a deterministic baseline path: runtime=%+v candidates=%d drafts=%d verified=%d arbitration=%+v", final.DiagnosisRuntime, len(final.Candidates), len(final.HypothesisDrafts), len(final.VerifiedHypotheses), final.Incident.Investigation.Arbitration)
+	}
+	brainModel.mu.Lock()
+	defer brainModel.mu.Unlock()
+	if brainModel.calls == 0 || brainModel.forcedToolChoiceUse != brainModel.calls {
+		t.Fatalf("Brain model calls did not enforce the native structured action boundary: calls=%d forced=%d", brainModel.calls, brainModel.forcedToolChoiceUse)
 	}
 }
 
