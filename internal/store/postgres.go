@@ -478,6 +478,7 @@ func diagnosticIntelligencePayload(investigation *domain.Investigation) map[stri
 		"memory_reads":                 investigation.MemoryReads,
 		"model_usage":                  investigation.ModelUsage,
 		"brain_turns":                  investigation.BrainTurns,
+		"assistant_turns":              investigation.AssistantTurns,
 		"incident_understanding":       investigation.IncidentUnderstanding,
 		"skill_activations":            investigation.SkillActivations,
 		"tool_executions":              investigation.ToolExecutions,

@@ -30,3 +30,13 @@ func TestDiagnosticIntelligencePayloadIncludesModelUsage(t *testing.T) {
 		t.Fatalf("model usage was omitted from investigation audit payload: %#v", payload)
 	}
 }
+
+func TestDiagnosticIntelligencePayloadIncludesAssistantTurnAudit(t *testing.T) {
+	observedAt := time.Now().UTC()
+	turn := domain.AssistantTurnRecord{TurnID: "turn-1", ToolCallPresent: true, ReasoningPresent: true, Persisted: true, ObservedAt: observedAt}
+	payload := diagnosticIntelligencePayload(&domain.Investigation{AssistantTurns: []domain.AssistantTurnRecord{turn}})
+	items, ok := payload["assistant_turns"].([]domain.AssistantTurnRecord)
+	if !ok || len(items) != 1 || items[0].TurnID != turn.TurnID || !items[0].ToolCallPresent || !items[0].ReasoningPresent || !items[0].Persisted {
+		t.Fatalf("Assistant turn audit was omitted from investigation payload: %#v", payload)
+	}
+}
