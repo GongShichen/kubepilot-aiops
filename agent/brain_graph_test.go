@@ -240,6 +240,28 @@ func TestNoReflectionAblationBypassesPendingReflection(t *testing.T) {
 	}
 }
 
+func TestReflectionRouteStopsAtBrainTurnBudget(t *testing.T) {
+	trigger := domain.ReflectionGroundingFailure
+	budget := brainruntime.DefaultBudget()
+	state := &WorkflowState{
+		Incident:             &domain.Incident{ID: "reflection-budget", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Investigation: &domain.Investigation{}},
+		PendingReflection:    &trigger,
+		BrainBudget:          domain.BrainBudgetState{Limits: budget, Usage: domain.BrainBudgetUsage{Turns: budget.MaxTurns}},
+		ExecutionSnapshot:    domain.ExecutionSnapshot{SkillSnapshotHash: "skills", ModelConfigHash: "model", ToolSchemaHash: "tools", PolicyHash: "policy"},
+		EvidenceSnapshotHash: "evidence",
+	}
+	next, err := (&brainGraphRuntime{}).reflectionRoute(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != "brain_termination_router" || state.Termination == nil || state.Termination.Reason != domain.TerminationBudgetExhausted {
+		t.Fatalf("reflection bypassed Brain turn budget: next=%s termination=%+v", next, state.Termination)
+	}
+	if state.PendingReflection != nil || len(state.Reflections) != 0 || state.BrainBudget.Usage.ReflectionCostUnits != 0 {
+		t.Fatalf("budget-exhausted reflection still consumed state: %+v", state)
+	}
+}
+
 func TestVerificationFailureSchedulesOneBudgetedBrainReflection(t *testing.T) {
 	executor := &sequenceVerificationExecutor{samples: []bool{false}}
 	state := &WorkflowState{

@@ -340,6 +340,18 @@ func (r *brainGraphRuntime) actionGateway(ctx context.Context, message *schema.M
 }
 
 func (r *brainGraphRuntime) reflectionRoute(_ context.Context, state *WorkflowState) (string, error) {
+	// Reflection is a Brain turn too. A pending reflection used to route
+	// directly back to reflection_context_builder without passing through the
+	// termination router, so a stream of corrective reflections could exceed
+	// MaxTurns and eventually fail at Eino's defensive graph-step limit. Keep
+	// the graph-step limit as a last-resort guard, but make the domain budget the
+	// authoritative, auditable termination boundary.
+	if state.Termination == nil && state.BrainBudget.Limits.MaxTurns > 0 && state.BrainBudget.Usage.Turns >= state.BrainBudget.Limits.MaxTurns {
+		termination, _ := brainruntime.NewTermination(domain.TerminationBudgetExhausted, currentBrainTurnID(state), finalHypothesisID(state), state.EvidenceSnapshotHash, &state.ExecutionSnapshot, unresolvedGaps(state), state.BrainBudget)
+		state.Termination = &termination
+		state.PendingReflection = nil
+		return "brain_termination_router", nil
+	}
 	if state.PendingReflection != nil && state.Termination == nil {
 		if method, _ := domain.NormalizeDiagnosisMethod(state.Incident.DiagnosisMethod); method == domain.DiagnosisMethodKubePilotNoReflection {
 			state.PendingReflection = nil
