@@ -1,0 +1,4 @@
+interface:
+  display_name: "plan-recovery"
+  short_description: "KubePilot plan-recovery procedure"
+  default_prompt: "Apply the plan-recovery procedure to the current grounded incident state."

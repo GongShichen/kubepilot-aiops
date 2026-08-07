@@ -427,6 +427,22 @@ func syncIncidentRecords(ctx context.Context, tx pgx.Tx, in *domain.Incident) er
 			}
 		}
 	}
+	if in.WorkflowAttempt != nil {
+		executionSnapshot, marshalErr := json.Marshal(in.WorkflowAttempt.ExecutionSnapshot)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		invalidated, marshalErr := json.Marshal(in.WorkflowAttempt.InvalidatedArtifactIDs)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, insertErr := tx.Exec(ctx, `INSERT INTO workflow_attempts(id,incident_id,sequence,checkpoint_id,status,execution_snapshot,evidence_snapshot_hash,migrated_from_attempt_id,invalidated_artifact_ids,started_at,interrupted_at,completed_at,updated_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+			ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status,execution_snapshot=EXCLUDED.execution_snapshot,evidence_snapshot_hash=EXCLUDED.evidence_snapshot_hash,invalidated_artifact_ids=EXCLUDED.invalidated_artifact_ids,interrupted_at=EXCLUDED.interrupted_at,completed_at=EXCLUDED.completed_at,updated_at=NOW()`,
+			in.WorkflowAttempt.ID, in.ID, in.WorkflowAttempt.Sequence, in.WorkflowAttempt.CheckpointID, in.WorkflowAttempt.Status, executionSnapshot, nullString(in.WorkflowAttempt.EvidenceSnapshotHash), nullString(in.WorkflowAttempt.MigratedFromAttemptID), invalidated, in.WorkflowAttempt.StartedAt, statusTime(!in.WorkflowAttempt.InterruptedAt.IsZero(), in.WorkflowAttempt.InterruptedAt), statusTime(!in.WorkflowAttempt.CompletedAt.IsZero(), in.WorkflowAttempt.CompletedAt)); insertErr != nil {
+			return insertErr
+		}
+	}
 	budget, _ := json.Marshal(in.AgentBudget)
 	architecture := "constrained-react"
 	if in.Investigation != nil && in.Investigation.Architecture != "" {
@@ -461,6 +477,22 @@ func diagnosticIntelligencePayload(investigation *domain.Investigation) map[stri
 		"recovery_permission":          investigation.RecoveryPermission,
 		"memory_reads":                 investigation.MemoryReads,
 		"model_usage":                  investigation.ModelUsage,
+		"brain_turns":                  investigation.BrainTurns,
+		"incident_understanding":       investigation.IncidentUnderstanding,
+		"skill_activations":            investigation.SkillActivations,
+		"tool_executions":              investigation.ToolExecutions,
+		"agent_hypotheses":             investigation.AgentHypotheses,
+		"hypothesis_admissions":        investigation.HypothesisAdmissions,
+		"hypothesis_groundings":        investigation.HypothesisGroundings,
+		"grounding_deltas":             investigation.GroundingDeltas,
+		"belief_deltas":                investigation.BeliefDeltas,
+		"reflections":                  investigation.Reflections,
+		"agent_diagnosis":              investigation.AgentDiagnosis,
+		"agent_recovery_plan":          investigation.AgentRecoveryPlan,
+		"termination":                  investigation.Termination,
+		"brain_budget":                 investigation.BrainBudget,
+		"execution_snapshot":           investigation.ExecutionSnapshot,
+		"workflow_attempt":             investigation.WorkflowAttempt,
 	}
 }
 

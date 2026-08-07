@@ -11,7 +11,18 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/benchmark/history"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/reporter"
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
+	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
+
+func TestDiagnosisSkillSnapshotHashUsesVersionedBrainBundle(t *testing.T) {
+	brain, err := diagnosisSkillSnapshotHash(domain.DiagnosisMethodKubePilot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(brain) != 64 {
+		t.Fatalf("invalid Brain Skill snapshot hash: %q", brain)
+	}
+}
 
 func TestSeparatedBenchmarkCommandsDoNotExposeLegacyRetrieval(t *testing.T) {
 	for _, command := range []string{"log-retrieval", "incident-retrieval", "suite-report"} {
@@ -144,14 +155,14 @@ func TestCleanupFailureStopsFullPipeline(t *testing.T) {
 func TestStrategyOrderIsDeterministicPermutation(t *testing.T) {
 	first := comparisonStrategyOrder("comparison-run")
 	second := comparisonStrategyOrder("comparison-run")
-	if stableJSON(first) != stableJSON(second) || len(first) != 5 {
+	if stableJSON(first) != stableJSON(second) || len(first) != 10 {
 		t.Fatalf("strategy randomization is not reproducible: first=%v second=%v", first, second)
 	}
 	seen := map[string]bool{}
 	for _, strategy := range first {
 		seen[strategy] = true
 	}
-	for _, required := range []string{"rule-only", "evidence-only", "cognitive", "active-diagnosis", "react"} {
+	for _, required := range []string{"direct", "rag", "react", "rule-only", "evidence-only", "cognitive", "active-diagnosis", "kubepilot", "kubepilot-no-reflection", "kubepilot-no-optional-skills"} {
 		if !seen[required] {
 			t.Fatalf("randomized strategy order lost %s: %v", required, first)
 		}

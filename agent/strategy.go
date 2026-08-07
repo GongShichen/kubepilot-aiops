@@ -146,14 +146,14 @@ func (r *AgentRegistry) RunConstrained(ctx context.Context, state *WorkflowState
 		if err = r.applyDiagnosisResult(ctx, state, deps, result); err != nil {
 			return err
 		}
-	case domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive, domain.DiagnosisMethodKubePilot:
+	case domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive:
 		mode := cognitiveDiagnosisMode{}
 		switch method {
 		case domain.DiagnosisMethodRuleOnly:
 			mode.RuleOnly = true
 		case domain.DiagnosisMethodCognitive:
 			mode.Cognitive = true
-		case domain.DiagnosisMethodActive, domain.DiagnosisMethodKubePilot:
+		case domain.DiagnosisMethodActive:
 			mode.Cognitive, mode.Active = true, true
 		}
 		result, err := r.runCognitiveDiagnosis(ctx, state.Incident, deps, mode)

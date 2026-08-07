@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -217,6 +218,7 @@ func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter
 	res.Resource = in.RootCauseResource
 	res.Confidence = in.Confidence
 	populateAgentMetrics(&res, in)
+	populateHypothesisTopK(&res, s, in)
 	if in.DiagnosisError != "" {
 		res.Error = "diagnosis workflow: " + in.DiagnosisError
 	}
@@ -265,6 +267,67 @@ func (r *Runner) runOne(ctx context.Context, s scenarios.Scenario) (res reporter
 	return res
 }
 
+func populateHypothesisTopK(result *reporter.CaseResult, scenario scenarios.Scenario, incident *domain.Incident) {
+	if result == nil || incident == nil || incident.Investigation == nil || incident.Investigation.Architecture != "eino-native-self-reflective-brain" {
+		return
+	}
+	admitted := map[string]bool{}
+	for _, admission := range incident.Investigation.HypothesisAdmissions {
+		if admission.Decision == "ADMITTED" {
+			admitted[admission.HypothesisRevisionID] = true
+		}
+	}
+	candidates := []domain.AgentHypothesis{}
+	for _, hypothesis := range incident.Investigation.AgentHypotheses {
+		if !admitted[hypothesis.ID] {
+			continue
+		}
+		switch hypothesis.Status {
+		case domain.HypothesisRefuted, domain.HypothesisReplaced, domain.HypothesisMerged, domain.HypothesisAbandoned:
+			continue
+		}
+		candidates = append(candidates, hypothesis)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].ModelConfidence == candidates[j].ModelConfidence {
+			return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
+		}
+		return candidates[i].ModelConfidence > candidates[j].ModelConfidence
+	})
+	for index, hypothesis := range candidates {
+		if !hypothesisMatchesScenario(hypothesis, scenario) {
+			continue
+		}
+		if index == 0 {
+			result.HypothesisTop1Correct = true
+		}
+		if index < 3 {
+			result.HypothesisTop3Correct = true
+		}
+		break
+	}
+}
+
+func hypothesisMatchesScenario(hypothesis domain.AgentHypothesis, scenario scenarios.Scenario) bool {
+	if !strings.EqualFold(strings.TrimSpace(hypothesis.Category), strings.TrimSpace(scenario.GroundTruth.RootCauseCategory)) || !strings.EqualFold(strings.TrimSpace(hypothesis.Mechanism), strings.TrimSpace(scenario.Variant)) {
+		return false
+	}
+	for _, target := range hypothesis.TargetRefs {
+		service := target.Service
+		resource := target.Resource
+		if service == "" {
+			service = resource
+		}
+		if resource == "" {
+			resource = service
+		}
+		if strings.EqualFold(strings.TrimSpace(service), strings.TrimSpace(scenario.GroundTruth.Service)) && strings.EqualFold(strings.TrimSpace(resource), strings.TrimSpace(scenario.GroundTruth.Resource)) {
+			return true
+		}
+	}
+	return false
+}
+
 func populateRecoverySafety(result *reporter.CaseResult, incident *domain.Incident) {
 	if result == nil || incident == nil {
 		return
@@ -305,6 +368,24 @@ func populateAgentMetrics(result *reporter.CaseResult, incident *domain.Incident
 	result.CognitiveAcceptedProposals = observation.CognitiveAcceptedProposals
 	result.CognitiveUsefulProposals = observation.CognitiveUsefulProposals
 	result.CognitiveRejectedProposals = observation.CognitiveRejectedProposals
+	result.HypothesisCorrectionOpportunities = observation.HypothesisCorrectionOpportunities
+	result.HypothesisCorrections = observation.HypothesisCorrections
+	result.GroundedHypothesisCorrections = observation.GroundedHypothesisCorrections
+	result.GroundedDecision = observation.GroundedDecision
+	result.AutomaticRecoveryDiagnosis = observation.AutomaticRecoveryDiagnosis
+	result.GroundedAutomaticRecovery = observation.GroundedAutomaticRecovery
+	result.NonControlToolResults = observation.NonControlToolResults
+	result.InformativeToolResults = observation.InformativeToolResults
+	result.ReflectionTriggers = observation.ReflectionTriggers
+	result.AcceptedReflections = observation.AcceptedReflections
+	result.SkillActivations = observation.SkillActivations
+	result.AcceptedSkillActivations = observation.AcceptedSkillActivations
+	result.SkillDrift = observation.SkillDrift
+	result.HypothesisAdmissions = observation.HypothesisAdmissions
+	result.AcceptedHypothesisAdmissions = observation.AcceptedHypothesisAdmissions
+	result.GroundableHypothesisAdmissions = observation.GroundableHypothesisAdmissions
+	result.UnsupportedDiagnosis = observation.UnsupportedDiagnosis
+	result.IncompleteToolProvenance = observation.IncompleteToolProvenance
 	result.ConfidenceUpdates = observation.ConfidenceUpdates
 	result.AttributedEvidence = observation.AttributedEvidence
 	result.TopologyCandidates = observation.TopologyCandidates

@@ -1,42 +1,56 @@
-# KubePilot：带 Eino 认知层的证据锚定自治诊断 Runtime
+# KubePilot：Eino-native 自反思自治 SRE Agent Runtime
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-KubePilot 是一个基于 Eino 的 Kubernetes 自治 SRE 控制平面。MVP 核心链路为：
+KubePilot 是一个 Eino-native 自治 SRE Agent。LLM Brain 负责调查、开放世界假设、信念修订、诊断和恢复规划；Runtime 是证据锚定环境与 Safety Kernel：
 
-> Observe → Interpret → Request discriminative evidence → Update belief → Safe recovery or human escalation
+> Observe → Ground → Revise belief → Act → Verify → Safe recovery or human escalation
 
-模型负责规划、只读调查、提出和挑战假设、生成恢复建议；确定性的服务端代码负责 Evidence 身份、预算、置信门禁、租户边界、Dry-run、人工审批、幂等执行和恢复后验证。
+Runtime 可以返回 Evidence、Contradiction、Validation Coverage 与 Causal Coverage，但不能生成 KubePilot Hypothesis、选择最终根因、判断机制是否合理、修改模型主观置信度，或用确定性 Candidate 替换 LLM Diagnosis。系统不保存隐藏 Chain-of-Thought，只审计结构化 Plan、Action、Evidence、Grounding、Belief、Reflection 与完整 Lineage。
 
 
 ## Agent 架构
 
 ```mermaid
 flowchart TD
-    I["incident_intake"] --> CI["cognitive_intent"]
-    CI --> QC["query_compiler"]
-    QC --> EC["evidence_collection"]
-    EC --> SA["signal_assertion_builder"]
-    SA --> CG["candidate_generation"]
-    CG --> CR["cognitive_reasoning"]
-    CR --> CF["causal_falsification"]
-    CF --> OA{"objective_arbitration"}
-    OA -->|"有价值的有界请求"| QC
-    OA -->|"客观门禁通过"| RP["recovery_permission"]
-    OA -->|"未收敛"| H["NEEDS_ATTENTION"]
+    I["incident_intake"] --> C["brain_context_builder"]
+    C --> M["brain_model"]
+    M --> G["brain_action_gateway"]
+    G --> R{"tool_category_router"}
+    R --> E["Evidence ToolsNode"]
+    R --> K["Retrieval ToolsNode"]
+    R --> Q["Reasoning ToolsNode"]
+    R --> P["Recovery ToolsNode"]
+    R --> T["Control ToolsNode"]
+    E --> C1["tool_result_classifier"]
+    K --> C1
+    Q --> C1
+    P --> C1
+    C1 --> O["observation_update"]
+    O --> GD["belief_update: GroundingDelta"]
+    GD --> RR{"reflection_router"}
+    RR -->|"需要认知修订"| RF["reflection_update"]
+    RF --> BC["belief_commit"]
+    BC --> C
+    RR -->|"继续"| C
+    T --> TR{"termination_router"}
+    TR -->|"请求恢复"| RP["recovery_permission"]
+    TR -->|"完成或升级"| F["incident_finalizer"]
     RP --> DR["Kubernetes DryRunAll"]
     DR --> AP["人工审批 Interrupt"]
     AP --> EX["幂等 Executor"]
     EX --> V["恢复后验证"]
+    V -->|"确认失败"| RF
+    V -->|"成功或结果未知"| F
 ```
 
-每一个命名阶段都是共享 `WorkflowState`、callback、checkpoint 和 resume 语义的 Eino Graph Node。Eino 管理模型和工具生命周期；纯 Go 服务负责事实、Signal、State Assertion、Candidate 校验、因果覆盖、证伪、评分和安全门禁。Causal Engine 只能接收服务器签发的 Signal、State Assertion、Graph Node 和拓扑边 ID，不能用自然语言作因果推断。
+`WorkflowState` 是唯一可变状态。Eino `ChatModelNode` 承担 Brain 调用，按类别隔离的 `ToolsNode` 承担能力调用，Lambda Node 只负责上下文、路由、持久化、策略和 Safety Kernel。所有 Brain、Tool、Grounding、Reflection、审批与验证边界均可 checkpoint/resume；Graph 只受认知预算约束，不设置 Agent 或 Incident 总时间限制。
 
-Cognitive Runtime 是包含 Planner、Interpreter、Comparator 与 Investigator 四种受限操作的单一 Eino 组件。它可以解释已锚定 Observation、比较候选并提出区分性证据请求，但不能新增事实、创建可执行根因、修改 Objective Score 或授权恢复。当请求重复、不可用、没有新 Evidence、缺少未观测 Assertion，或 `DiagnosticValue = ExpectedEntropyReduction × DecisionImpact < 0.05` 时，服务端停止主动诊断循环。
+Tool Result 固定分类为 `EVIDENCE`、`VALIDATION`、`CONSTRAINT`、`ERROR`、`STATE_CHANGE`。约束和基础设施错误不得进入 Incident Evidence。每个结果都保留 Tool、Schema、Collector、Target、时间窗口、Parser、Artifact 和 Evidence ID provenance；Mutation 还必须保留审批与 ResourceVersion。
 
-Objective Arbiter 使用 `0.50 × Evidence + 0.30 × Causal + 0.20 × ObservationCoverage − 0.30 × Contradiction`。Evidence 是独立且按来源加权的支持；Observation Coverage 衡量不同异常状态、时间阶段与机制节点，禁止对同一 Signal 二次计分。只有 Objective Score、Margin 和 Gate 决定恢复资格。满足近似同分条件的 Cognitive Preference 只是序数偏好：只影响展示、下一轮候选对和人工审阅优先级，绝不影响置信度或自动化。
+Runtime 输出非概率式 `GroundingLevel`、支持/反驳 Evidence ID 与验证义务 Coverage。`GroundingDelta` 只描述客观变化，只有 LLM Reflection 能产生主观 `BeliefDelta`。Statement、Mechanism、Target 或 Falsification 条件变化时必须创建不可变 Hypothesis Revision，并保留完整 Lineage。
 
-系统不请求、不保存 Chain-of-Thought，只持久化 `HypothesisArgument`、`Critique`、Evidence ID、评分变化和 `ArbitrationResult`。
+细粒度 Skill 是版本化能力契约，不是一个大 Prompt。每个 Skill 定义 Preconditions、Server-owned Inputs、Procedure、Allowed Tools、Required IDs、Output Contract、Stop/Failure Conditions、Handoff、依赖、冲突与阶段兼容性。Skill、Model、Tool Schema 与 Policy 哈希冻结在 `ExecutionSnapshot`；Resume 必须使用相同 Snapshot，显式迁移会创建新 Workflow Attempt 并使旧 Diagnosis/Recovery artifact 失效。
 
 ## Diagnosis Strategy 与 MVP Baseline
 
@@ -50,9 +64,11 @@ Objective Arbiter 使用 `0.50 × Evidence + 0.30 × Causal + 0.20 × Observatio
 | `active-diagnosis` | Cognitive Runtime 加最多两轮、由服务端计算价值的 Planner/Investigator 主动诊断。 |
 | `react` | 单个受预算约束的 Diagnosis ReAct Agent，可使用 Metric/Log/Trace/Kubernetes 工具；无 Planner、Debate、长期 Memory 和 Causal 增强。 |
 | `direct`、`rag` | 兼容 Baseline：一次结构化模型调用，分别不带、或带有 scoped Episodic Memory。 |
-| `kubepilot` | 完整 active-diagnosis runtime 的兼容别名。 |
+| `kubepilot` | Eino-native LLM Brain：开放世界 Hypothesis Lineage、Evidence Grounding、Reflection、版本化 Skill 与安全恢复。 |
+| `kubepilot-no-reflection` | 禁用 Reflection 路径的 KubePilot Brain 消融。 |
+| `kubepilot-no-optional-skills` | 禁用 Optional Skill 激活的 KubePilot Brain 消融。 |
 
-兼容输入 `llm-only → direct`、`vector-rag → rag`；持久化和评测 artifact 只写规范 ID。正式 MVP 对比固定使用 `rule-only`、`evidence-only`、`cognitive`、`active-diagnosis` 和 `react`，并共享模型 profile、Collector、单 Agent 输出上限、Recovery path、审批、执行器与验证控制器。
+兼容输入 `llm-only → direct`、`vector-rag → rag`；持久化和评测 artifact 只写规范 ID。正式比较保留全部独立 Baseline，并加入 KubePilot Brain 与两个消融；所有策略共享模型 profile、Collector、单次 8192 输出上限、Recovery path、审批、执行器与验证控制器。
 
 比较器会检查执行足迹：若标签实际产生相同 Runtime 轨迹，整次比较直接失败。
 
@@ -122,6 +138,8 @@ Recovery Agent 无法发现 Mutation、Approval Data 或 Verification 能力。�
 
 基础设施失败与模型失败分开统计；比例超过 2% 时整次正式运行 invalid。`ToolCost` 只是工具复杂度，不是金额。真实 Cost 使用 prompt、visible completion、reasoning token 和运行时 price snapshot 计算。
 
+Brain 评测把 **Hypothesis Correction Rate**、**Grounded Decision Rate** 和 **Tool Efficiency** 作为一等指标，并分别报告 Semantic RCA、Hypothesis Top-K、Reflection Precision、Skill Adherence/Drift、Admission Precision、Unsupported Hypothesis、Recovery 与 Safety。Grounded Decision 必须引用 Evidence、验证最终不可变 Revision、具备完整 Lineage、匹配 Evidence/Execution Snapshot，并保留完整 Tool Provenance；所有进入自动恢复的 Diagnosis 必须 100% 满足该契约。
+
 同一条生产 KubePilot 路径还支持四组因果消融：`no-causal`、`static-causal`、`learned-causal`、`full`。报告使用真实成对 Case 的 RCA、Recovery Success 与 Evidence Efficiency，并输出 95% CI、McNemar/Wilcoxon 和 Holm 校正结果：
 
 ```bash
@@ -173,8 +191,9 @@ make up
 
 OpenAPI 位于 `api/openapi.yaml`。核心接口包括：
 
-- `POST /api/v1/incidents`：选择 `direct`、`rag`、`react` 或 `kubepilot`，并可设置受控的 causal mode。
-- `GET /api/v1/incidents/{id}/investigation`：读取 Plan、Worker Findings、Debate 和 Arbitration，不返回隐藏推理。
+- `POST /api/v1/incidents`：选择独立 Baseline、`kubepilot` 或两个 KubePilot 消融策略。
+- `GET /api/v1/incidents/{id}/investigation`：读取 Brain Turn、Skill、分类 Tool provenance、Hypothesis Lineage、Grounding/Belief Delta、Diagnosis、Termination 与 Recovery，不返回隐藏推理。
+- `POST /api/v1/incidents/{id}/workflow-attempts/migrate`：显式迁移 Snapshot，并使旧 Artifact 失效。
 - `GET /api/v1/incidents/{id}/agent-runs`：读取 Strategy、Architecture、父子 Agent、Token、Cost、Tool、Budget 与 Safety 事件。
 - `POST /api/v1/benchmarks/runs`：设置 Strategies、Split、Seeds、Repetitions、Model Profile 和 Auto-approve。
 - `GET /api/v1/benchmarks/runs/{id}/results`：读取该父 Run 持久化的精确结果 artifact。

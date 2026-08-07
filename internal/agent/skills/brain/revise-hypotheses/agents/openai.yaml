@@ -1,0 +1,4 @@
+interface:
+  display_name: "revise-hypotheses"
+  short_description: "KubePilot revise-hypotheses procedure"
+  default_prompt: "Apply the revise-hypotheses procedure to the current grounded incident state."

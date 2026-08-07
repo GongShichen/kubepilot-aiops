@@ -1,0 +1,4 @@
+interface:
+  display_name: "understand-incident"
+  short_description: "KubePilot understand-incident procedure"
+  default_prompt: "Apply the understand-incident procedure to the current grounded incident state."

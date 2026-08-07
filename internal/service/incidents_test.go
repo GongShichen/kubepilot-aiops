@@ -25,6 +25,70 @@ func TestWorkflowContextHasNoWallClockDeadline(t *testing.T) {
 	}
 }
 
+func TestRetryCreatesNewWorkflowAttemptAndInvalidatesFrozenArtifacts(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	now := time.Now().UTC()
+	snapshot := domain.ExecutionSnapshot{SkillSnapshotHash: "old-skills", ModelConfigHash: "old-model", ToolSchemaHash: "old-tools", PolicyHash: "old-policy"}
+	incident := &domain.Incident{
+		ID: "incident-migrate", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Status: domain.StatusNeedsAttention, Namespace: "production", CreatedAt: now, UpdatedAt: now,
+		ExecutionSnapshot: &snapshot,
+		WorkflowAttempt:   &domain.WorkflowAttempt{ID: "attempt:old", IncidentID: "incident-migrate", Sequence: 2, Status: domain.WorkflowAttemptCompleted, ExecutionSnapshot: snapshot, StartedAt: now},
+		Investigation:     &domain.Investigation{Architecture: "eino-native-self-reflective-brain", AgentDiagnosis: &domain.AgentDiagnosis{ID: "diagnosis:old"}, AgentRecoveryPlan: &domain.AgentRecoveryPlan{ID: "plan:old"}},
+		Evidence:          []domain.Evidence{{ID: "e1"}}, Proposal: &domain.RecoveryProposal{ID: "proposal:old"}, DryRun: &domain.DryRunResult{MutationSpecHash: "mutation:old"},
+	}
+	if err := st.Create(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	manager := &IncidentManager{Store: st, Hub: NewHub()}
+	migrated, err := manager.Retry(ctx, incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.WorkflowAttempt == nil || migrated.WorkflowAttempt.Sequence != 3 || migrated.WorkflowAttempt.MigratedFromAttemptID != "attempt:old" || migrated.WorkflowAttempt.Status != domain.WorkflowAttemptActive {
+		t.Fatalf("new Workflow Attempt not created: %+v", migrated.WorkflowAttempt)
+	}
+	if migrated.ExecutionSnapshot != nil || migrated.Investigation != nil || len(migrated.Evidence) != 0 || migrated.Proposal != nil || migrated.DryRun != nil {
+		t.Fatalf("frozen artifacts survived explicit migration: %+v", migrated)
+	}
+}
+
+func TestBaselineRetryDoesNotAdoptBrainWorkflowAttemptSemantics(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	now := time.Now().UTC()
+	investigation := &domain.Investigation{Architecture: "eino-evidence-diagnosis-runtime", StartedAt: now}
+	incident := &domain.Incident{ID: "baseline-retry", DiagnosisMethod: domain.DiagnosisMethodEvidence, Status: domain.StatusNeedsAttention, Investigation: investigation, CreatedAt: now, UpdatedAt: now}
+	if err := st.Create(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	manager := &IncidentManager{Store: st, Hub: NewHub()}
+	retried, err := manager.Retry(ctx, incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.WorkflowAttempt != nil || retried.ExecutionSnapshot != nil {
+		t.Fatalf("baseline retry adopted Brain attempt state: attempt=%+v snapshot=%+v", retried.WorkflowAttempt, retried.ExecutionSnapshot)
+	}
+	if retried.Investigation == nil || retried.Investigation.Architecture != investigation.Architecture {
+		t.Fatalf("baseline investigation behavior changed: %+v", retried.Investigation)
+	}
+}
+
+func TestWorkflowAttemptMigrationRejectsBaseline(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	now := time.Now().UTC()
+	incident := &domain.Incident{ID: "baseline-migration", DiagnosisMethod: domain.DiagnosisMethodEvidence, Status: domain.StatusNeedsAttention, CreatedAt: now, UpdatedAt: now}
+	if err := st.Create(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	manager := &IncidentManager{Store: st, Hub: NewHub()}
+	if _, err := manager.MigrateWorkflowAttempt(ctx, incident.ID); err == nil {
+		t.Fatal("baseline accepted KubePilot Brain Workflow Attempt migration")
+	}
+}
+
 func TestApproveRejectsLegacyWorkflowWithoutEinoCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()

@@ -1,0 +1,452 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
+	"github.com/kubepilot-aiops/kubepilot/internal/brainruntime"
+	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	captools "github.com/kubepilot-aiops/kubepilot/tools"
+	"github.com/oklog/ulid/v2"
+)
+
+// One Brain turn can traverse context, model, gateway, category routing, tool,
+// classification, observation, grounding, reflection routing and termination.
+// The fixed tail covers recovery and finalization nodes after the Brain budget
+// is exhausted. There is intentionally no wall-clock incident timeout.
+const (
+	brainGraphStepsPerTurn = 10
+	brainGraphTailSteps    = 12
+	BrainGraphMaxSteps     = brainruntime.DefaultMaxTurns*brainGraphStepsPerTurn + brainGraphTailSteps
+)
+
+type brainGraphRuntime struct {
+	resolver   *BrainSkillResolver
+	tools      *captools.Registry
+	toolHash   string
+	policyHash string
+	agents     *AgentRegistry
+	deps       constrainedToolDeps
+	states     *sync.Map
+}
+
+type boundBrainModel struct {
+	base   model.BaseChatModel
+	tools  []*schema.ToolInfo
+	agents *AgentRegistry
+	label  string
+}
+
+func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.Message, error) {
+	started := time.Now()
+	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
+	message, err := m.base.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	if state, stateErr := brainWorkflowState(ctx); stateErr == nil {
+		sanitized := *message
+		sanitized.ReasoningContent = ""
+		state.BrainMessages = append(state.BrainMessages, &sanitized)
+		if len(state.BrainTurns) > 0 {
+			index := len(state.BrainTurns) - 1
+			usage := m.agents.modelUsage(state.Incident.ID, m.label, message, time.Since(started))
+			state.BrainTurns[index].ModelUsage = &usage
+			state.BrainTurns[index].CompletedAt = time.Now().UTC()
+			if state.Incident.Investigation != nil {
+				state.Incident.Investigation.ModelUsage = append(state.Incident.Investigation.ModelUsage, usage)
+			}
+		}
+	}
+	return message, nil
+}
+
+func (m boundBrainModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
+	return m.base.Stream(ctx, messages, options...)
+}
+
+func buildBrainGraph(ctx context.Context, runtime *brainGraphRuntime) (compose.AnyGraph, error) {
+	graph := compose.NewGraph[*WorkflowState, *WorkflowState]()
+	addState := func(name string, handler func(context.Context, *WorkflowState) (*WorkflowState, error)) error {
+		return graph.AddLambdaNode(name, compose.InvokableLambda(handler), compose.WithNodeName(name))
+	}
+	if err := addState("brain_termination_router", runtime.terminationRouter); err != nil {
+		return nil, err
+	}
+	if err := graph.AddLambdaNode("brain_context_builder", compose.InvokableLambda(func(ctx context.Context, state *WorkflowState) ([]*schema.Message, error) {
+		return runtime.contextBuilder(ctx, state, false)
+	}), compose.WithNodeName("brain_context_builder")); err != nil {
+		return nil, err
+	}
+	if err := graph.AddLambdaNode("reflection_context_builder", compose.InvokableLambda(func(ctx context.Context, state *WorkflowState) ([]*schema.Message, error) {
+		return runtime.contextBuilder(ctx, state, true)
+	}), compose.WithNodeName("reflection_context_builder")); err != nil {
+		return nil, err
+	}
+
+	modelNodes := map[domain.BrainToolCategory]string{
+		domain.BrainToolEvidence: "brain_model_evidence", domain.BrainToolRetrieval: "brain_model_retrieval",
+		domain.BrainToolReasoning: "brain_model_reasoning", domain.BrainToolRecovery: "brain_model_recovery",
+		domain.BrainToolControl: "brain_model_control",
+	}
+	registryNodes := map[domain.BrainToolCategory]string{
+		domain.BrainToolEvidence: captools.NodeBrainEvidence, domain.BrainToolRetrieval: captools.NodeBrainRetrieval,
+		domain.BrainToolReasoning: captools.NodeBrainReasoning, domain.BrainToolRecovery: captools.NodeBrainRecovery,
+		domain.BrainToolControl: captools.NodeBrainControl,
+	}
+	if err := graph.AddLambdaNode("brain_action_gateway", compose.InvokableLambda(runtime.actionGateway), compose.WithNodeName("brain_action_gateway")); err != nil {
+		return nil, err
+	}
+	for category, key := range modelNodes {
+		infos, err := runtime.tools.ToolInfosForNode(ctx, registryNodes[category])
+		if err != nil {
+			return nil, err
+		}
+		if err = graph.AddChatModelNode(key, boundBrainModel{base: runtime.agents.chat, tools: infos, agents: runtime.agents, label: key}, compose.WithNodeName("brain_model")); err != nil {
+			return nil, err
+		}
+		if err = graph.AddEdge(key, "brain_action_gateway"); err != nil {
+			return nil, err
+		}
+	}
+	reflectionInfos, err := runtime.tools.ToolInfosForNode(ctx, captools.NodeBrainReasoning)
+	if err != nil {
+		return nil, err
+	}
+	if err = graph.AddChatModelNode("reflection_update", boundBrainModel{base: runtime.agents.chat, tools: reflectionInfos, agents: runtime.agents, label: "reflection_update"}, compose.WithNodeName("reflection_update")); err != nil {
+		return nil, err
+	}
+	if err = graph.AddEdge("reflection_update", "brain_action_gateway"); err != nil {
+		return nil, err
+	}
+	if err = graph.AddLambdaNode("tool_category_router", compose.InvokableLambda(func(_ context.Context, message *schema.Message) (*schema.Message, error) { return message, nil }), compose.WithNodeName("tool_category_router")); err != nil {
+		return nil, err
+	}
+	if err = graph.AddEdge("brain_action_gateway", "tool_category_router"); err != nil {
+		return nil, err
+	}
+	if err = graph.AddLambdaNode("tool_result_classifier", compose.InvokableLambda(runtime.classifyToolResults), compose.WithNodeName("tool_result_classifier")); err != nil {
+		return nil, err
+	}
+
+	toolNodes := map[domain.BrainToolCategory]string{}
+	for category, registryNode := range registryNodes {
+		config, err := runtime.tools.ToolsNodeConfig(registryNode, category != domain.BrainToolEvidence)
+		if err != nil {
+			return nil, err
+		}
+		config.UnknownToolsHandler = func(ctx context.Context, name, _ string) (string, error) {
+			state, stateErr := brainWorkflowState(ctx)
+			if stateErr != nil {
+				return "", stateErr
+			}
+			output := constraintBrainOutput(newBrainEnvelope(state, name, domain.BrainToolControl, domain.AgentActionIntent{Intent: "unavailable tool requested"}), "tool_not_available_in_category", "requested tool is not exposed in this Tool Category")
+			raw, _ := json.Marshal(output)
+			return string(raw), nil
+		}
+		node, err := compose.NewToolNode(ctx, &config)
+		if err != nil {
+			return nil, err
+		}
+		key := "tools_" + strings.ToLower(string(category))
+		toolNodes[category] = key
+		if err = graph.AddToolsNode(key, node, compose.WithNodeName(registryNode)); err != nil {
+			return nil, err
+		}
+		if err = graph.AddEdge(key, "tool_result_classifier"); err != nil {
+			return nil, err
+		}
+	}
+	if err = addState("observation_update", runtime.observationUpdate); err != nil {
+		return nil, err
+	}
+	if err = addState("belief_update", runtime.beliefUpdate); err != nil {
+		return nil, err
+	}
+	if err = addState("reflection_router", func(_ context.Context, state *WorkflowState) (*WorkflowState, error) { return state, nil }); err != nil {
+		return nil, err
+	}
+	if err = graph.AddLambdaNode("structured_output_guard", compose.InvokableLambda(runtime.handleUnstructured), compose.WithNodeName("structured_output_guard")); err != nil {
+		return nil, err
+	}
+
+	if err = graph.AddEdge(compose.START, "brain_termination_router"); err != nil {
+		return nil, err
+	}
+	if err = graph.AddBranch("brain_termination_router", compose.NewGraphBranch(func(_ context.Context, state *WorkflowState) (string, error) {
+		if state.Termination != nil {
+			return compose.END, nil
+		}
+		if state.PendingReflection != nil {
+			return "reflection_router", nil
+		}
+		return "brain_context_builder", nil
+	}, map[string]bool{compose.END: true, "brain_context_builder": true, "reflection_router": true})); err != nil {
+		return nil, err
+	}
+	if err = graph.AddBranch("brain_context_builder", compose.NewGraphBranch(func(ctx context.Context, _ []*schema.Message) (string, error) {
+		state, stateErr := brainWorkflowState(ctx)
+		if stateErr != nil {
+			return "", stateErr
+		}
+		return modelNodes[effectiveToolCategory(state)], nil
+	}, graphStringSet(modelNodes))); err != nil {
+		return nil, err
+	}
+	if err = graph.AddEdge("reflection_context_builder", "reflection_update"); err != nil {
+		return nil, err
+	}
+	destinations := map[string]bool{"structured_output_guard": true}
+	for _, key := range toolNodes {
+		destinations[key] = true
+	}
+	if err = graph.AddBranch("tool_category_router", compose.NewGraphBranch(func(ctx context.Context, message *schema.Message) (string, error) {
+		if message == nil || len(message.ToolCalls) == 0 {
+			return "structured_output_guard", nil
+		}
+		state, stateErr := brainWorkflowState(ctx)
+		if stateErr != nil {
+			return "", stateErr
+		}
+		return toolNodes[effectiveToolCategory(state)], nil
+	}, destinations)); err != nil {
+		return nil, err
+	}
+	for _, edge := range [][2]string{{"tool_result_classifier", "observation_update"}, {"observation_update", "belief_update"}, {"belief_update", "reflection_router"}, {"structured_output_guard", "reflection_router"}} {
+		if err = graph.AddEdge(edge[0], edge[1]); err != nil {
+			return nil, err
+		}
+	}
+	if err = graph.AddBranch("reflection_router", compose.NewGraphBranch(runtime.reflectionRoute, map[string]bool{"reflection_context_builder": true, "brain_termination_router": true})); err != nil {
+		return nil, err
+	}
+	return graph, nil
+}
+
+func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowState, reflection bool) ([]*schema.Message, error) {
+	if state == nil || state.Incident == nil {
+		return nil, fmt.Errorf("Brain context requires WorkflowState and Incident")
+	}
+	if r.states != nil {
+		r.states.Store(state.Incident.ID, state)
+	}
+	if state.Incident.Investigation == nil || state.Incident.Investigation.Architecture != "eino-native-self-reflective-brain" {
+		state.Incident.Investigation = &domain.Investigation{Architecture: "eino-native-self-reflective-brain", StartedAt: time.Now().UTC()}
+	}
+	if state.BrainBudget.Limits.MaxTurns == 0 {
+		state.BrainBudget = domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()}
+	}
+	if state.BrainToolPolicy.MaxSameToolRepeat == 0 {
+		state.BrainToolPolicy = r.resolver.ToolPolicy()
+	}
+	if state.BrainPhase == "" {
+		state.BrainPhase, state.ActiveToolCategory = domain.BrainPhaseIntake, domain.BrainToolControl
+	}
+	if reflection {
+		if state.BrainPhase != domain.BrainPhaseReflection {
+			state.ResumeBrainPhase = state.BrainPhase
+		}
+		state.BrainPhase = domain.BrainPhaseReflection
+	}
+	maxOptional := state.BrainBudget.Limits.MaxOptionalSkillsPerTurn
+	if method, _ := domain.NormalizeDiagnosisMethod(state.Incident.DiagnosisMethod); method == domain.DiagnosisMethodKubePilotNoOptionalSkills {
+		maxOptional = 0
+	}
+	resolved, err := r.resolver.Resolve(state.BrainPhase, state.RequestedSkills, maxOptional)
+	if err != nil {
+		return nil, err
+	}
+	state.ActiveSkillRefs, state.ActiveSkillPrompt = resolved.Refs, resolved.Prompt
+	state.ActiveSkillCategories = nil
+	for category := range resolved.AllowedCategories {
+		state.ActiveSkillCategories = append(state.ActiveSkillCategories, category)
+	}
+	sort.Slice(state.ActiveSkillCategories, func(i, j int) bool { return state.ActiveSkillCategories[i] < state.ActiveSkillCategories[j] })
+	if !categoryAllowed(state.ActiveSkillCategories, state.ActiveToolCategory) {
+		state.ActiveToolCategory = defaultCategoryForPhase(state.BrainPhase)
+	}
+	state.SkillActivations = append(state.SkillActivations, resolved.Activations...)
+	turn := domain.BrainTurn{ID: "turn:" + ulid.Make().String(), Sequence: len(state.BrainTurns) + 1, Phase: state.BrainPhase, SkillRefs: append([]domain.SkillRef(nil), resolved.Refs...), ToolCategory: effectiveToolCategory(state), StartedAt: time.Now().UTC()}
+	state.BrainTurns = append(state.BrainTurns, turn)
+	state.BrainBudget.Usage.Turns++
+	state.EvidenceSnapshotHash = brainruntime.EvidenceSnapshotHash(state.Incident.Evidence)
+	currentSnapshot := domain.ExecutionSnapshot{SkillSnapshotHash: r.resolver.SnapshotHash(), ModelConfigHash: state.Incident.ModelConfigHash, ToolSchemaHash: r.toolHash, PolicyHash: r.policyHash}
+	if state.ExecutionSnapshot == (domain.ExecutionSnapshot{}) {
+		state.ExecutionSnapshot = currentSnapshot
+	} else if state.ExecutionSnapshot != currentSnapshot {
+		termination, _ := brainruntime.NewTermination(domain.TerminationSafetyBlocked, currentBrainTurnID(state), finalHypothesisID(state), state.EvidenceSnapshotHash, &state.ExecutionSnapshot, []string{"execution snapshot changed; explicit Workflow Attempt migration is required"}, state.BrainBudget)
+		state.Termination = &termination
+		return nil, fmt.Errorf("execution snapshot changed during Workflow Attempt")
+	}
+	if state.WorkflowAttempt == nil {
+		state.WorkflowAttempt = &domain.WorkflowAttempt{ID: "attempt:" + ulid.Make().String(), IncidentID: state.Incident.ID, Sequence: 1, CheckpointID: "incident:" + state.Incident.ID, Status: domain.WorkflowAttemptActive, ExecutionSnapshot: state.ExecutionSnapshot, StartedAt: time.Now().UTC()}
+	}
+	state.WorkflowAttempt.EvidenceSnapshotHash = state.EvidenceSnapshotHash
+	state.Incident.ExecutionSnapshot = &state.ExecutionSnapshot
+	state.Incident.WorkflowAttempt = state.WorkflowAttempt
+	state.Incident.SkillSnapshotHash = r.resolver.SnapshotHash()
+	payload := map[string]any{"incident": safeIncident(state.Incident), "understanding": state.IncidentUnderstanding, "plan": state.Incident.Investigation.Plan, "phase": state.BrainPhase, "evidence_snapshot_hash": state.EvidenceSnapshotHash, "evidence": compactToolEvidence(state.Incident.Evidence, 48<<10), "hypotheses": state.AgentHypotheses, "admissions": state.HypothesisAdmissions, "groundings": state.HypothesisGroundings, "grounding_deltas": tailGroundingDeltas(state.GroundingDeltas, 5), "recent_tool_results": tailBrainToolExecutions(state.ToolExecutions, 5), "memory_reads": state.Incident.Investigation.MemoryReads, "causal_patterns": tailCausalPatterns(state.CausalPatterns, 10), "loaded_skill_references": state.LoadedSkillReferences, "diagnosis": state.AgentDiagnosis, "recovery_plan": state.AgentRecoveryPlan, "budget": state.BrainBudget, "active_tool_category": effectiveToolCategory(state), "execution_snapshot": state.ExecutionSnapshot}
+	raw, _ := json.Marshal(payload)
+	system := "You are KubePilot's LLM Brain. You own investigation, open-world hypotheses, subjective belief revision, diagnosis selection, and recovery planning. The Runtime owns facts, grounding, constraints, authorization, execution, and verification. Follow the injected Skills exactly. Use only an exposed structured tool; do not answer in prose or reveal hidden chain-of-thought. Constraint or tool errors are not Incident evidence.\n\n" + resolved.Prompt
+	messages := []*schema.Message{schema.SystemMessage(system)}
+	messages = append(messages, boundedBrainMessageHistory(state.BrainMessages, 8, 64<<10)...)
+	messages = append(messages, schema.UserMessage(string(raw)))
+	return messages, nil
+}
+
+func (r *brainGraphRuntime) actionGateway(ctx context.Context, message *schema.Message) (*schema.Message, error) {
+	state, err := brainWorkflowState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if message == nil {
+		return nil, fmt.Errorf("Brain model returned no message")
+	}
+	if len(message.ToolCalls) > state.BrainBudget.Limits.MaxParallelReadTools && effectiveToolCategory(state) == domain.BrainToolEvidence {
+		message.ToolCalls = message.ToolCalls[:state.BrainBudget.Limits.MaxParallelReadTools]
+	}
+	if state.BrainBudget.Usage.ToolCalls+len(message.ToolCalls) > state.BrainBudget.Limits.MaxToolCalls {
+		termination, _ := brainruntime.NewTermination(domain.TerminationBudgetExhausted, currentBrainTurnID(state), finalHypothesisID(state), state.EvidenceSnapshotHash, &state.ExecutionSnapshot, []string{"tool call budget exhausted"}, state.BrainBudget)
+		state.Termination, message.ToolCalls = &termination, nil
+	}
+	return message, nil
+}
+
+func (r *brainGraphRuntime) reflectionRoute(_ context.Context, state *WorkflowState) (string, error) {
+	if state.PendingReflection != nil && state.Termination == nil {
+		if method, _ := domain.NormalizeDiagnosisMethod(state.Incident.DiagnosisMethod); method == domain.DiagnosisMethodKubePilotNoReflection {
+			state.PendingReflection = nil
+			return "brain_termination_router", nil
+		}
+		cost := brainruntime.ReflectionCost(*state.PendingReflection)
+		if state.BrainBudget.Usage.ReflectionCostUnits+cost <= state.BrainBudget.Limits.MaxReflectionCostUnits {
+			state.BrainBudget.Usage.ReflectionCostUnits += cost
+			record := domain.ReflectionRecord{ID: "reflection:" + ulid.Make().String(), Trigger: *state.PendingReflection, CostUnits: cost, OccurredAt: time.Now().UTC()}
+			if len(state.ToolExecutions) > 0 {
+				last := state.ToolExecutions[len(state.ToolExecutions)-1]
+				record.TriggerToolCallID = last.Result.Provenance.ToolCallID
+				record.EvidenceIDs = append([]string(nil), last.Result.Provenance.EvidenceIDs...)
+				record.HypothesisRevisionIDs = append([]string(nil), last.Envelope.Intent.HypothesisIDs...)
+			}
+			state.Reflections = append(state.Reflections, record)
+			return "reflection_context_builder", nil
+		}
+		if *state.PendingReflection == domain.ReflectionRecoveryFailure || *state.PendingReflection == domain.ReflectionVerificationFail {
+			termination, _ := brainruntime.NewTermination(domain.TerminationSafetyBlocked, currentBrainTurnID(state), finalHypothesisID(state), state.EvidenceSnapshotHash, &state.ExecutionSnapshot, []string{"reflection budget exhausted after recovery or verification failure"}, state.BrainBudget)
+			state.Termination = &termination
+		}
+		state.PendingReflection = nil
+	}
+	return "brain_termination_router", nil
+}
+
+func effectiveToolCategory(state *WorkflowState) domain.BrainToolCategory {
+	switch state.BrainPhase {
+	case domain.BrainPhaseIntake, domain.BrainPhaseEscalation, domain.BrainPhaseVerification:
+		return domain.BrainToolControl
+	case domain.BrainPhasePlanning, domain.BrainPhaseDiagnosis, domain.BrainPhaseReflection:
+		return domain.BrainToolReasoning
+	case domain.BrainPhaseRecovery:
+		return domain.BrainToolRecovery
+	}
+	if state.ActiveToolCategory == "" {
+		return domain.BrainToolReasoning
+	}
+	return state.ActiveToolCategory
+}
+
+func defaultCategoryForPhase(phase domain.BrainPhase) domain.BrainToolCategory {
+	switch phase {
+	case domain.BrainPhaseIntake, domain.BrainPhaseEscalation, domain.BrainPhaseVerification:
+		return domain.BrainToolControl
+	case domain.BrainPhaseRecovery:
+		return domain.BrainToolRecovery
+	default:
+		return domain.BrainToolReasoning
+	}
+}
+
+func categoryAllowed(values []domain.BrainToolCategory, wanted domain.BrainToolCategory) bool {
+	if wanted == domain.BrainToolControl {
+		return true
+	}
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func graphStringSet(values map[domain.BrainToolCategory]string) map[string]bool {
+	out := map[string]bool{}
+	for _, value := range values {
+		out[value] = true
+	}
+	return out
+}
+
+func tailGroundingDeltas(values []domain.GroundingDelta, limit int) []domain.GroundingDelta {
+	if len(values) <= limit {
+		return values
+	}
+	return values[len(values)-limit:]
+}
+
+func tailBrainToolExecutions(values []domain.BrainToolExecution, limit int) []domain.BrainToolExecution {
+	if len(values) <= limit {
+		return values
+	}
+	return values[len(values)-limit:]
+}
+
+func tailCausalPatterns(values []domain.CausalPattern, limit int) []domain.CausalPattern {
+	if len(values) <= limit {
+		return values
+	}
+	return values[len(values)-limit:]
+}
+
+func boundedBrainMessageHistory(values []*schema.Message, maxItems, maxBytes int) []*schema.Message {
+	if maxItems <= 0 || maxBytes <= 0 || len(values) == 0 {
+		return nil
+	}
+	start := len(values) - maxItems
+	if start < 0 {
+		start = 0
+	}
+	selected := make([]*schema.Message, 0, len(values)-start)
+	used := 0
+	for index := len(values) - 1; index >= start; index-- {
+		if values[index] == nil {
+			continue
+		}
+		copyMessage := *values[index]
+		copyMessage.ReasoningContent = ""
+		if len(copyMessage.Content) > 24<<10 {
+			copyMessage.Content = copyMessage.Content[:24<<10] + "\n[tool result projection truncated]"
+		}
+		size := len(copyMessage.Content)
+		for _, call := range copyMessage.ToolCalls {
+			size += len(call.Function.Name) + len(call.Function.Arguments)
+		}
+		if used+size > maxBytes {
+			break
+		}
+		used += size
+		selected = append(selected, &copyMessage)
+	}
+	for left, right := 0, len(selected)-1; left < right; left, right = left+1, right-1 {
+		selected[left], selected[right] = selected[right], selected[left]
+	}
+	return selected
+}

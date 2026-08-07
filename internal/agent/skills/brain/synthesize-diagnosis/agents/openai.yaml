@@ -1,0 +1,4 @@
+interface:
+  display_name: "synthesize-diagnosis"
+  short_description: "KubePilot synthesize-diagnosis procedure"
+  default_prompt: "Apply the synthesize-diagnosis procedure to the current grounded incident state."

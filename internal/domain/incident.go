@@ -52,6 +52,8 @@ type Incident struct {
 	ModelName            string             `json:"model_name,omitempty"`
 	ModelConfigHash      string             `json:"model_config_hash,omitempty"`
 	SkillSnapshotHash    string             `json:"skill_snapshot_hash,omitempty"`
+	ExecutionSnapshot    *ExecutionSnapshot `json:"execution_snapshot,omitempty"`
+	WorkflowAttempt      *WorkflowAttempt   `json:"workflow_attempt,omitempty"`
 	RankingPolicyHash    string             `json:"ranking_policy_hash,omitempty"`
 	RerankerConfigHash   string             `json:"reranker_config_hash,omitempty"`
 	TraceID              string             `json:"trace_id,omitempty"`
@@ -72,14 +74,16 @@ type Incident struct {
 }
 
 const (
-	DiagnosisMethodDirect    = "direct"
-	DiagnosisMethodRAG       = "rag"
-	DiagnosisMethodReAct     = "react"
-	DiagnosisMethodRuleOnly  = "rule-only"
-	DiagnosisMethodEvidence  = "evidence-only"
-	DiagnosisMethodCognitive = "cognitive"
-	DiagnosisMethodActive    = "active-diagnosis"
-	DiagnosisMethodKubePilot = "kubepilot"
+	DiagnosisMethodDirect                    = "direct"
+	DiagnosisMethodRAG                       = "rag"
+	DiagnosisMethodReAct                     = "react"
+	DiagnosisMethodRuleOnly                  = "rule-only"
+	DiagnosisMethodEvidence                  = "evidence-only"
+	DiagnosisMethodCognitive                 = "cognitive"
+	DiagnosisMethodActive                    = "active-diagnosis"
+	DiagnosisMethodKubePilot                 = "kubepilot"
+	DiagnosisMethodKubePilotNoReflection     = "kubepilot-no-reflection"
+	DiagnosisMethodKubePilotNoOptionalSkills = "kubepilot-no-optional-skills"
 	// Deprecated request aliases are accepted at the API boundary only. All
 	// persisted state and benchmark artifacts use the canonical identifiers.
 	DiagnosisMethodLLMOnly   = "llm-only"
@@ -117,33 +121,54 @@ func NormalizeDiagnosisMethod(value string) (string, bool) {
 		return DiagnosisMethodDirect, true
 	case DiagnosisMethodVectorRAG:
 		return DiagnosisMethodRAG, true
-	case DiagnosisMethodDirect, DiagnosisMethodRAG, DiagnosisMethodReAct, DiagnosisMethodRuleOnly, DiagnosisMethodEvidence, DiagnosisMethodCognitive, DiagnosisMethodActive, DiagnosisMethodKubePilot:
+	case DiagnosisMethodDirect, DiagnosisMethodRAG, DiagnosisMethodReAct, DiagnosisMethodRuleOnly, DiagnosisMethodEvidence, DiagnosisMethodCognitive, DiagnosisMethodActive, DiagnosisMethodKubePilot, DiagnosisMethodKubePilotNoReflection, DiagnosisMethodKubePilotNoOptionalSkills:
 		return value, true
 	default:
 		return "", false
 	}
 }
 
+func IsKubePilotBrainMethod(value string) bool {
+	normalized, ok := NormalizeDiagnosisMethod(value)
+	return ok && (normalized == DiagnosisMethodKubePilot || normalized == DiagnosisMethodKubePilotNoReflection || normalized == DiagnosisMethodKubePilotNoOptionalSkills)
+}
+
 type Investigation struct {
-	Architecture       string                      `json:"architecture"`
-	Plan               InvestigationPlan           `json:"plan"`
-	Findings           []WorkerFinding             `json:"findings,omitempty"`
-	Debate             []DebateRound               `json:"debate,omitempty"`
-	Candidates         []HypothesisDraft           `json:"candidates,omitempty"`
-	Verified           []VerifiedHypothesis        `json:"verified_hypotheses,omitempty"`
-	Signals            []EvidenceSignal            `json:"signals,omitempty"`
-	Assertions         []StateAssertion            `json:"state_assertions,omitempty"`
-	CognitiveReasoning []CognitiveReasoning        `json:"cognitive_reasoning,omitempty"`
-	Falsification      []FalsificationResult       `json:"falsification,omitempty"`
-	Pairwise           []PairwiseFalsification     `json:"pairwise_falsification,omitempty"`
-	ExpansionRequests  []CandidateExpansionRequest `json:"candidate_expansion_requests,omitempty"`
-	Arbitration        *ArbitrationResult          `json:"arbitration,omitempty"`
-	RecoveryPermission *RecoveryPermission         `json:"recovery_permission,omitempty"`
-	MemoryReads        []MemoryAccessEvent         `json:"memory_reads,omitempty"`
-	ModelUsage         []ModelUsageEvent           `json:"model_usage,omitempty"`
-	DiagnosisRounds    int                         `json:"diagnosis_rounds,omitempty"`
-	StartedAt          time.Time                   `json:"started_at"`
-	CompletedAt        time.Time                   `json:"completed_at,omitempty"`
+	Architecture          string                      `json:"architecture"`
+	Plan                  InvestigationPlan           `json:"plan"`
+	Findings              []WorkerFinding             `json:"findings,omitempty"`
+	Debate                []DebateRound               `json:"debate,omitempty"`
+	Candidates            []HypothesisDraft           `json:"candidates,omitempty"`
+	Verified              []VerifiedHypothesis        `json:"verified_hypotheses,omitempty"`
+	Signals               []EvidenceSignal            `json:"signals,omitempty"`
+	Assertions            []StateAssertion            `json:"state_assertions,omitempty"`
+	CognitiveReasoning    []CognitiveReasoning        `json:"cognitive_reasoning,omitempty"`
+	Falsification         []FalsificationResult       `json:"falsification,omitempty"`
+	Pairwise              []PairwiseFalsification     `json:"pairwise_falsification,omitempty"`
+	ExpansionRequests     []CandidateExpansionRequest `json:"candidate_expansion_requests,omitempty"`
+	Arbitration           *ArbitrationResult          `json:"arbitration,omitempty"`
+	RecoveryPermission    *RecoveryPermission         `json:"recovery_permission,omitempty"`
+	MemoryReads           []MemoryAccessEvent         `json:"memory_reads,omitempty"`
+	ModelUsage            []ModelUsageEvent           `json:"model_usage,omitempty"`
+	BrainTurns            []BrainTurn                 `json:"brain_turns,omitempty"`
+	IncidentUnderstanding *IncidentUnderstanding      `json:"incident_understanding,omitempty"`
+	SkillActivations      []SkillActivation           `json:"skill_activations,omitempty"`
+	ToolExecutions        []BrainToolExecution        `json:"tool_executions,omitempty"`
+	AgentHypotheses       []AgentHypothesis           `json:"agent_hypotheses,omitempty"`
+	HypothesisAdmissions  []HypothesisAdmission       `json:"hypothesis_admissions,omitempty"`
+	HypothesisGroundings  []HypothesisGrounding       `json:"hypothesis_groundings,omitempty"`
+	GroundingDeltas       []GroundingDelta            `json:"grounding_deltas,omitempty"`
+	BeliefDeltas          []BeliefDelta               `json:"belief_deltas,omitempty"`
+	Reflections           []ReflectionRecord          `json:"reflections,omitempty"`
+	AgentDiagnosis        *AgentDiagnosis             `json:"agent_diagnosis,omitempty"`
+	AgentRecoveryPlan     *AgentRecoveryPlan          `json:"agent_recovery_plan,omitempty"`
+	Termination           *TerminationEvent           `json:"termination,omitempty"`
+	BrainBudget           *BrainBudgetState           `json:"brain_budget,omitempty"`
+	ExecutionSnapshot     *ExecutionSnapshot          `json:"execution_snapshot,omitempty"`
+	WorkflowAttempt       *WorkflowAttempt            `json:"workflow_attempt,omitempty"`
+	DiagnosisRounds       int                         `json:"diagnosis_rounds,omitempty"`
+	StartedAt             time.Time                   `json:"started_at"`
+	CompletedAt           time.Time                   `json:"completed_at,omitempty"`
 }
 
 // StateAssertion is a server-owned statement about the live incident state.
@@ -811,11 +836,17 @@ type AgentBudgetState struct {
 type HypothesisStatus string
 
 const (
+	HypothesisProposed          HypothesisStatus = "PROPOSED"
+	HypothesisAdmitted          HypothesisStatus = "ADMITTED"
+	HypothesisInvestigating     HypothesisStatus = "INVESTIGATING"
 	HypothesisCreated           HypothesisStatus = "CREATED"
 	HypothesisEvidenceSearching HypothesisStatus = "EVIDENCE_SEARCHING"
 	HypothesisSupported         HypothesisStatus = "SUPPORTED"
 	HypothesisRefuted           HypothesisStatus = "REFUTED"
 	HypothesisAccepted          HypothesisStatus = "ACCEPTED"
+	HypothesisReplaced          HypothesisStatus = "REPLACED"
+	HypothesisMerged            HypothesisStatus = "MERGED"
+	HypothesisAbandoned         HypothesisStatus = "ABANDONED"
 )
 
 type HypothesisTransition struct {

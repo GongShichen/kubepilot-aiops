@@ -56,6 +56,7 @@ func (s *Server) Router() *gin.Engine {
 	api.GET("/incidents/:id/stream", s.stream)
 	api.POST("/incidents/:id/approval", s.approval)
 	api.POST("/incidents/:id/retry", s.retry)
+	api.POST("/incidents/:id/workflow-attempts/migrate", s.migrateWorkflowAttempt)
 	api.GET("/model/health", func(c *gin.Context) { c.JSON(200, s.ModelHealth()) })
 	api.POST("/model/probe", func(c *gin.Context) {
 		if err := s.ModelProbe(c); err != nil {
@@ -229,10 +230,28 @@ func (s *Server) retry(c *gin.Context) {
 	v, err := s.Manager.Retry(c, c.Param("id"))
 	respond(c, v, err)
 }
+func (s *Server) migrateWorkflowAttempt(c *gin.Context) {
+	v, err := s.Manager.MigrateWorkflowAttempt(c, c.Param("id"))
+	respond(c, v, err)
+}
 func (s *Server) hypotheses(c *gin.Context) {
 	incident, err := s.Manager.Get(c, c.Param("id"))
 	if err != nil {
 		respond(c, nil, err)
+		return
+	}
+	if incident.Investigation != nil && incident.Investigation.Architecture == "eino-native-self-reflective-brain" {
+		c.JSON(http.StatusOK, gin.H{
+			"hypotheses":         incident.Investigation.AgentHypotheses,
+			"admissions":         incident.Investigation.HypothesisAdmissions,
+			"groundings":         incident.Investigation.HypothesisGroundings,
+			"grounding_deltas":   incident.Investigation.GroundingDeltas,
+			"belief_deltas":      incident.Investigation.BeliefDeltas,
+			"reflections":        incident.Investigation.Reflections,
+			"diagnosis":          incident.Investigation.AgentDiagnosis,
+			"execution_snapshot": incident.Investigation.ExecutionSnapshot,
+			"workflow_attempt":   incident.Investigation.WorkflowAttempt,
+		})
 		return
 	}
 	if incident.DiagnosisLedger == nil {
@@ -357,7 +376,18 @@ func (s *Server) benchmarkStart(c *gin.Context) {
 		return
 	}
 	if len(in.Strategies) == 0 && (in.Profile == "smoke" || in.Profile == "ci" || in.Profile == "standard" || in.Profile == "robustness" || in.Profile == "full") {
-		in.Strategies = []string{domain.DiagnosisMethodDirect, domain.DiagnosisMethodRAG, domain.DiagnosisMethodReAct, domain.DiagnosisMethodKubePilot}
+		in.Strategies = []string{
+			domain.DiagnosisMethodDirect,
+			domain.DiagnosisMethodRAG,
+			domain.DiagnosisMethodReAct,
+			domain.DiagnosisMethodRuleOnly,
+			domain.DiagnosisMethodEvidence,
+			domain.DiagnosisMethodCognitive,
+			domain.DiagnosisMethodActive,
+			domain.DiagnosisMethodKubePilot,
+			domain.DiagnosisMethodKubePilotNoReflection,
+			domain.DiagnosisMethodKubePilotNoOptionalSkills,
+		}
 	}
 	run, err := s.Benchmarks.StartRequest(service.BenchmarkRequest{Profile: in.Profile, Strategies: in.Strategies, DatasetSplit: in.DatasetSplit, Seeds: in.Seeds, Repetitions: in.Repetitions, ModelProfile: in.ModelProfile, AutoApprove: in.AutoApprove})
 	respond(c, run, err)

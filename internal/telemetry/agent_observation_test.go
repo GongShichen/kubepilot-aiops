@@ -4,9 +4,43 @@ import (
 	"context"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
+
+func TestObserveAgentProjectsSelfReflectiveBrainQualityMetrics(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := domain.ExecutionSnapshot{SkillSnapshotHash: "skills", ModelConfigHash: "model", ToolSchemaHash: "tools", PolicyHash: "policy"}
+	ref := domain.SkillRef{ID: "brain-kernel", Version: "1", ContentHash: "skill-hash"}
+	h1 := domain.AgentHypothesis{ID: "h1", LineageID: "h1", Version: 1, Relation: domain.HypothesisRoot, Statement: "dependency failure", Category: "dependency", Mechanism: "timeout", Status: domain.HypothesisRefuted, CreatedAt: now}
+	h2 := domain.AgentHypothesis{ID: "h2", LineageID: "h1", Version: 2, ParentIDs: []string{"h1"}, Relation: domain.HypothesisReplace, RevisionReason: "counterevidence", Statement: "resource pressure", Category: "resource", Mechanism: "cpu saturation", Status: domain.HypothesisSupported, LastValidatedAt: now, LastValidatedSnapshotHash: "evidence-snapshot", CreatedAt: now}
+	grounding1 := domain.HypothesisGrounding{ID: "g1", HypothesisRevisionID: "h1", Level: domain.GroundingRefuted, ValidatedAt: now, EvidenceSnapshotHash: "evidence-snapshot"}
+	grounding2 := domain.HypothesisGrounding{ID: "g2", HypothesisRevisionID: "h2", Level: domain.GroundingSupported, Evidence: domain.GroundingEvidence{SupportingEvidenceIDs: []string{"e1"}, IndependentSourceCount: 1}, ValidatedAt: now, EvidenceSnapshotHash: "evidence-snapshot"}
+	incident := &domain.Incident{Evidence: []domain.Evidence{{ID: "e1", Source: "prometheus", Timestamp: now}}, Proposal: &domain.RecoveryProposal{ID: "p1"}}
+	incident.Investigation = &domain.Investigation{
+		Architecture:     "eino-native-self-reflective-brain",
+		BrainTurns:       []domain.BrainTurn{{ID: "t1"}, {ID: "t2"}},
+		SkillActivations: []domain.SkillActivation{{SkillID: ref.ID, Version: ref.Version, ContentHash: ref.ContentHash, Status: "ACTIVATED"}},
+		ToolExecutions: []domain.BrainToolExecution{{
+			Envelope: domain.AgentActionEnvelope{ToolCategory: domain.BrainToolEvidence, SkillRefs: []domain.SkillRef{ref}},
+			Result:   domain.ToolResultRecord{Class: domain.ToolResultEvidence, NewInformation: true, Provenance: domain.ToolResultProvenance{ToolCallID: "call-1", ToolName: "query_prometheus_evidence", ToolSchemaHash: snapshot.ToolSchemaHash, Collector: "prometheus", WindowStart: now.Add(-time.Minute), WindowEnd: now, ObservedAt: now, RawArtifactHash: "artifact", ParserVersion: "v1", EvidenceIDs: []string{"e1"}}},
+		}},
+		AgentHypotheses:      []domain.AgentHypothesis{h1, h2},
+		HypothesisAdmissions: []domain.HypothesisAdmission{{HypothesisRevisionID: "h1", Decision: "ADMITTED"}, {HypothesisRevisionID: "h2", Decision: "ADMITTED"}},
+		HypothesisGroundings: []domain.HypothesisGrounding{grounding1, grounding2},
+		Reflections:          []domain.ReflectionRecord{{Trigger: domain.ReflectionHypothesisRefuted, Accepted: true}},
+		AgentDiagnosis:       &domain.AgentDiagnosis{HypothesisRevisionID: "h2", EvidenceIDs: []string{"e1"}, ValidationResultIDs: []string{"g2"}, EvidenceSnapshotHash: "evidence-snapshot", ExecutionSnapshot: snapshot, GroundingLevel: domain.GroundingSupported},
+		ExecutionSnapshot:    &snapshot,
+	}
+	got := ObserveAgent(incident)
+	if got.Iterations != 2 || got.ToolUses != 1 || got.HypothesisCorrectionOpportunities != 1 || got.HypothesisCorrections != 1 || got.GroundedHypothesisCorrections != 1 {
+		t.Fatalf("unexpected Brain correction projection: %+v", got)
+	}
+	if !got.GroundedDecision || !got.GroundedAutomaticRecovery || got.UnsupportedDiagnosis || got.SkillDrift != 0 || got.IncompleteToolProvenance != 0 {
+		t.Fatalf("unexpected Brain grounding/provenance projection: %+v", got)
+	}
+}
 
 func TestObserveAgentProjectsRuntimeState(t *testing.T) {
 	incident := &domain.Incident{

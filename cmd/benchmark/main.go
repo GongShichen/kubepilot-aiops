@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kubepilot-aiops/kubepilot/agent"
 	causalbenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/causal"
 	causaldiscoverybenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/causaldiscovery"
 	causalevolution "github.com/kubepilot-aiops/kubepilot/benchmark/causalevolution"
@@ -164,11 +165,11 @@ func run(args []string) {
 	caseID := fs.String("case-id", "", "run exactly one scenario ID (diagnostic use)")
 	runID := fs.String("run-id", "", "stable run ID used for resume/API orchestration")
 	resumeRun := fs.Bool("resume", false, "continue after the last checkpoint")
-	diagnosisMethod := fs.String("diagnosis-method", domain.DiagnosisMethodKubePilot, "direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, or kubepilot")
+	diagnosisMethod := fs.String("diagnosis-method", domain.DiagnosisMethodKubePilot, "direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, or kubepilot-no-optional-skills")
 	causalMode := fs.String("causal-mode", domain.CausalModeFull, "no-causal, static-causal, learned-causal, or full")
 	modelProfile := fs.String("model-profile", os.Getenv("MODEL_PROFILE"), "stable label for the active model configuration")
 	compareMethods := fs.Bool("compare-methods", false, "run all diagnosis baselines sequentially")
-	strategyList := fs.String("strategies", "rule-only,evidence-only,cognitive,active-diagnosis,react", "comma-separated strategies used by comparison runs")
+	strategyList := fs.String("strategies", "direct,rag,react,rule-only,evidence-only,cognitive,active-diagnosis,kubepilot,kubepilot-no-reflection,kubepilot-no-optional-skills", "comma-separated strategies used by comparison runs")
 	datasetSplit := fs.String("dataset-split", "test", "dev, validation, test, or all")
 	seedList := fs.String("seeds", "20260803,20260804,20260805", "comma-separated paired load and fault seeds")
 	repetitions := fs.Int("repetitions", 1, "repetitions per scenario and seed")
@@ -307,7 +308,7 @@ func run(args []string) {
 		judgeConfig, configErr = semanticJudgeChatConfig(loadedConfig.Chat)
 		fatal(configErr)
 	}
-	skillHash, err := diagnosisSkillSnapshotHash()
+	skillHash, err := diagnosisSkillSnapshotHash(*diagnosisMethod)
 	fatal(err)
 	rankingHash, err := fileSHA256(env("RANKING_POLICY_FILE", "knowledge/ranking_policy.yaml"))
 	fatal(err)
@@ -526,7 +527,14 @@ func semanticJudgeConfigHash(cfg config.ChatConfig) string {
 	return hex.EncodeToString(hash[:])
 }
 
-func diagnosisSkillSnapshotHash() (string, error) {
+func diagnosisSkillSnapshotHash(method string) (string, error) {
+	if domain.IsKubePilotBrainMethod(method) {
+		resolver, err := agent.LoadDefaultBrainSkillResolver()
+		if err != nil {
+			return "", err
+		}
+		return resolver.SnapshotHash(), nil
+	}
 	files := []struct{ agent, path string }{
 		{"planner_agent", "internal/agent/skills/planner/SKILL.md"},
 		{"metric_worker", "internal/agent/skills/metric-worker/SKILL.md"},
@@ -662,7 +670,7 @@ func caseCheckpointKey(caseID string, seed int64, repetition int) string {
 }
 
 func comparisonStrategyOrder(runID string) []string {
-	return randomizedStrategyOrder([]string{domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive, domain.DiagnosisMethodReAct}, runID)
+	return randomizedStrategyOrder([]string{domain.DiagnosisMethodDirect, domain.DiagnosisMethodRAG, domain.DiagnosisMethodReAct, domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive, domain.DiagnosisMethodKubePilot, domain.DiagnosisMethodKubePilotNoReflection, domain.DiagnosisMethodKubePilotNoOptionalSkills}, runID)
 }
 
 func randomizedStrategyOrder(strategies []string, runID string) []string {
@@ -704,8 +712,10 @@ func strategyArchitecture(strategy string) string {
 		return "eino-rule-diagnosis-runtime"
 	case domain.DiagnosisMethodEvidence:
 		return "eino-evidence-diagnosis-runtime"
-	case domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive, domain.DiagnosisMethodKubePilot:
+	case domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive:
 		return domain.WorkflowRuntimeName
+	case domain.DiagnosisMethodKubePilot, domain.DiagnosisMethodKubePilotNoReflection, domain.DiagnosisMethodKubePilotNoOptionalSkills:
+		return "eino-native-self-reflective-brain"
 	default:
 		return "unknown"
 	}

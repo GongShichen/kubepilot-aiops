@@ -1,0 +1,4 @@
+interface:
+  display_name: "investigate-logs"
+  short_description: "KubePilot investigate-logs procedure"
+  default_prompt: "Apply the investigate-logs procedure to the current grounded incident state."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "investigate-metrics"
+  short_description: "KubePilot investigate-metrics procedure"
+  default_prompt: "Apply the investigate-metrics procedure to the current grounded incident state."

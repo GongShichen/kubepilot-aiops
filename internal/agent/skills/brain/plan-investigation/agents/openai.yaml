@@ -1,0 +1,4 @@
+interface:
+  display_name: "plan-investigation"
+  short_description: "KubePilot plan-investigation procedure"
+  default_prompt: "Apply the plan-investigation procedure to the current grounded incident state."

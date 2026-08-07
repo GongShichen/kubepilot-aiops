@@ -287,7 +287,7 @@ func TestEinoGraphInterruptAndResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	incident := &domain.Incident{ID: "incident-eino", Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
+	incident := &domain.Incident{ID: "incident-eino", DiagnosisMethod: domain.DiagnosisMethodReAct, Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
 	_, runErr := supervisor.Run(ctx, incident)
 	interrupt, ok := compose.ExtractInterruptInfo(runErr)
 	if !ok || len(interrupt.InterruptContexts) != 1 {
@@ -423,7 +423,7 @@ func TestEvidenceToolsNodeExecutesAllFourSourcesInParallel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	incident := &domain.Incident{ID: "incident-parallel", Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
+	incident := &domain.Incident{ID: "incident-parallel", DiagnosisMethod: domain.DiagnosisMethodReAct, Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
 	_, runErr := supervisor.Run(ctx, incident)
 	if _, ok := compose.ExtractInterruptInfo(runErr); !ok {
 		t.Fatalf("parallel evidence collection did not reach approval: %v incident=%#v", runErr, incident)
@@ -448,7 +448,7 @@ func TestConstrainedAgentCanChooseDifferentEvidenceToolOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	incident := &domain.Incident{ID: "incident-supplement", Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
+	incident := &domain.Incident{ID: "incident-supplement", DiagnosisMethod: domain.DiagnosisMethodReAct, Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
 	state, runErr := supervisor.Run(ctx, incident)
 	if _, ok := compose.ExtractInterruptInfo(runErr); !ok {
 		t.Fatalf("supplemental collection did not reach approval interrupt: err=%v state=%#v incident=%#v", runErr, state, incident)

@@ -1,0 +1,4 @@
+interface:
+  display_name: "inspect-kubernetes"
+  short_description: "KubePilot inspect-kubernetes procedure"
+  default_prompt: "Apply the inspect-kubernetes procedure to the current grounded incident state."

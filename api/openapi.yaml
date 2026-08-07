@@ -47,7 +47,7 @@ paths:
       responses: {'200': {description: Agent run ledger, content: {application/json: {schema: {$ref: '#/components/schemas/AgentRunLedger'}}}}, '404': {description: Incident not found}}
   /api/v1/incidents/{id}/investigation:
     get:
-      summary: Read the structured plan, worker findings, debate, and deterministic arbitration
+      summary: Read the complete auditable runtime state without hidden chain-of-thought
       parameters: [{$ref: '#/components/parameters/IncidentID'}]
       responses: {'200': {description: Investigation without hidden reasoning, content: {application/json: {schema: {$ref: '#/components/schemas/Investigation'}}}}, '404': {description: Incident not found}}
   /api/v1/incidents/{id}/events:
@@ -62,7 +62,12 @@ paths:
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Approval'}}}}
       responses: {'200': {description: Updated incident}, '409': {description: Invalid state}}
   /api/v1/incidents/{id}/retry:
-    post: {parameters: [{$ref: '#/components/parameters/IncidentID'}], responses: {'200': {description: Diagnosis restarted}, '409': {description: Invalid state}}}
+    post: {parameters: [{$ref: '#/components/parameters/IncidentID'}], responses: {'200': {description: Diagnosis restarted as a new Workflow Attempt}, '409': {description: Invalid state}}}
+  /api/v1/incidents/{id}/workflow-attempts/migrate:
+    post:
+      summary: Explicitly invalidate frozen artifacts and start a new Workflow Attempt
+      parameters: [{$ref: '#/components/parameters/IncidentID'}]
+      responses: {'200': {description: New Workflow Attempt created}, '409': {description: Incident is not eligible for migration}}
   /api/v1/model/health:
     get: {responses: {'200': {description: Redacted model configuration status}}}
   /api/v1/model/probe:
@@ -107,7 +112,7 @@ paths:
               required: [profile]
               properties:
                 profile: {type: string, enum: [smoke, ci, standard, robustness, correlation, log-retrieval, incident-retrieval, full]}
-                strategies: {type: array, items: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot]}, default: [rule-only, evidence-only, cognitive, active-diagnosis, react]}
+                strategies: {type: array, items: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}, default: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}
                 dataset_split: {type: string, enum: [dev, validation, test, all], default: test}
                 seeds: {type: array, minItems: 1, items: {type: integer, format: int64}, default: [20260803, 20260804, 20260805]}
                 repetitions: {type: integer, minimum: 1, default: 1}
@@ -142,7 +147,7 @@ components:
         namespace: {type: string}
         resource: {type: string}
         summary: {type: string}
-        diagnosis_method: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, llm-only, vector-rag], default: kubepilot, description: Legacy llm-only and vector-rag values are normalized before persistence}
+        diagnosis_method: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills, llm-only, vector-rag], default: kubepilot, description: Legacy llm-only and vector-rag values are normalized before persistence}
         causal_mode: {type: string, enum: [no-causal, static-causal, learned-causal, full], default: full, description: Runtime causal knowledge policy used for controlled ablations and deployments}
         evidence_start_at: {type: string, format: date-time, description: Optional start of the incident observation window}
     Approval:
@@ -164,7 +169,7 @@ components:
         namespace: {type: string}
         resource: {type: string}
         summary: {type: string}
-        diagnosis_method: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot]}
+        diagnosis_method: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}
         causal_mode: {type: string, enum: [no-causal, static-causal, learned-causal, full]}
         diagnosis_error: {type: string, description: Workflow failure kept separate from an incorrect diagnosis}
         recovery_execution:
@@ -181,13 +186,15 @@ components:
             completed_at: {type: string, format: date-time}
         evidence_start_at: {type: string, format: date-time}
         root_cause: {type: string}
-        root_cause_category: {type: string, enum: [cpu, memory, database, network, deployment, dependency]}
+        root_cause_category: {type: string, description: Open-world LLM diagnosis category; baseline strategies continue to emit their fixed categories}
         root_cause_variant: {type: string, description: Operational failure variant selected by the Diagnosis Agent}
         root_cause_service: {type: string, description: Service selected by the diagnosis agent as the root-cause location}
         root_cause_resource: {type: string, description: Kubernetes workload selected by the diagnosis agent as the root-cause resource}
         root_cause_evidence_ids: {type: array, items: {type: string}}
         confidence: {type: number}
         reasoning_type: {type: string, enum: [hypothesis_verification]}
+        execution_snapshot: {$ref: '#/components/schemas/ExecutionSnapshot'}
+        workflow_attempt: {$ref: '#/components/schemas/WorkflowAttempt'}
         dry_run: {$ref: '#/components/schemas/DryRunResult'}
         investigation: {$ref: '#/components/schemas/Investigation'}
         created_at: {type: string, format: date-time}
@@ -277,7 +284,7 @@ components:
       type: object
       required: [architecture, plan, started_at]
       properties:
-        architecture: {type: string, enum: [single-pass, single-pass-episodic, single-react, hierarchical-causal-react, eino-rule-diagnosis-runtime, eino-evidence-diagnosis-runtime, eino-cognitive-diagnosis-runtime]}
+        architecture: {type: string, enum: [single-pass, single-pass-episodic, single-react, hierarchical-causal-react, eino-rule-diagnosis-runtime, eino-evidence-diagnosis-runtime, eino-cognitive-diagnosis-runtime, eino-native-self-reflective-brain]}
         plan: {$ref: '#/components/schemas/InvestigationPlan'}
         findings: {type: array, items: {$ref: '#/components/schemas/WorkerFinding'}}
         debate: {type: array, maxItems: 2, items: {$ref: '#/components/schemas/DebateRound'}}
@@ -293,15 +300,332 @@ components:
         recovery_permission: {$ref: '#/components/schemas/RecoveryPermission'}
         memory_reads: {type: array, items: {$ref: '#/components/schemas/MemoryAccessEvent'}}
         model_usage: {type: array, items: {$ref: '#/components/schemas/ModelUsageEvent'}}
+        brain_turns: {type: array, items: {$ref: '#/components/schemas/BrainTurn'}}
+        incident_understanding: {$ref: '#/components/schemas/IncidentUnderstanding'}
+        skill_activations: {type: array, items: {$ref: '#/components/schemas/SkillActivation'}}
+        tool_executions: {type: array, items: {$ref: '#/components/schemas/BrainToolExecution'}}
+        agent_hypotheses: {type: array, items: {$ref: '#/components/schemas/AgentHypothesis'}}
+        hypothesis_admissions: {type: array, items: {$ref: '#/components/schemas/HypothesisAdmission'}}
+        hypothesis_groundings: {type: array, items: {$ref: '#/components/schemas/HypothesisGrounding'}}
+        grounding_deltas: {type: array, items: {$ref: '#/components/schemas/GroundingDelta'}}
+        belief_deltas: {type: array, items: {$ref: '#/components/schemas/BeliefDelta'}}
+        reflections: {type: array, items: {$ref: '#/components/schemas/ReflectionRecord'}}
+        agent_diagnosis: {$ref: '#/components/schemas/AgentDiagnosis'}
+        agent_recovery_plan: {$ref: '#/components/schemas/AgentRecoveryPlan'}
+        termination: {$ref: '#/components/schemas/TerminationEvent'}
+        brain_budget: {$ref: '#/components/schemas/BrainBudgetState'}
+        execution_snapshot: {$ref: '#/components/schemas/ExecutionSnapshot'}
+        workflow_attempt: {$ref: '#/components/schemas/WorkflowAttempt'}
         diagnosis_rounds: {type: integer, minimum: 1, maximum: 2}
         started_at: {type: string, format: date-time}
         completed_at: {type: string, format: date-time}
+    ExecutionSnapshot:
+      type: object
+      required: [skill_snapshot_hash, model_config_hash, tool_schema_hash, policy_hash]
+      properties:
+        skill_snapshot_hash: {type: string}
+        model_config_hash: {type: string}
+        tool_schema_hash: {type: string}
+        policy_hash: {type: string}
+    WorkflowAttempt:
+      type: object
+      required: [id, incident_id, sequence, checkpoint_id, status, execution_snapshot, started_at]
+      properties:
+        id: {type: string}
+        incident_id: {type: string}
+        sequence: {type: integer, minimum: 1}
+        checkpoint_id: {type: string}
+        status: {type: string, enum: [ACTIVE, INTERRUPTED, COMPLETED, INVALIDATED]}
+        execution_snapshot: {$ref: '#/components/schemas/ExecutionSnapshot'}
+        evidence_snapshot_hash: {type: string}
+        migrated_from_attempt_id: {type: string}
+        invalidated_artifact_ids: {type: array, items: {type: string}}
+        started_at: {type: string, format: date-time}
+        interrupted_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time}
+    SkillActivation:
+      type: object
+      required: [skill_id, version, content_hash, phase, reason, trigger, requested_by, status, activated_at]
+      properties:
+        skill_id: {type: string}
+        version: {type: string}
+        content_hash: {type: string}
+        phase: {type: string}
+        reason: {type: string}
+        trigger: {type: string}
+        requested_by: {type: string, enum: [BRAIN, RUNTIME]}
+        requested_turn: {type: string}
+        status: {type: string, enum: [ACTIVATED, REJECTED]}
+        rejected_reason: {type: string}
+        activated_at: {type: string, format: date-time}
+    ToolResultProvenance:
+      type: object
+      required: [tool_call_id, tool_name, tool_schema_hash, collector, target_refs, window_start, window_end, observed_at, raw_artifact_hash, parser_version, evidence_ids]
+      properties:
+        tool_call_id: {type: string}
+        tool_name: {type: string}
+        tool_schema_hash: {type: string}
+        collector: {type: string}
+        target_refs: {type: array, items: {$ref: '#/components/schemas/ResourceRef'}}
+        window_start: {type: string, format: date-time}
+        window_end: {type: string, format: date-time}
+        observed_at: {type: string, format: date-time}
+        raw_artifact_hash: {type: string}
+        parser_version: {type: string}
+        evidence_ids: {type: array, items: {type: string}}
+        state_change_id: {type: string}
+        approval_id: {type: string}
+        mutation_spec_hash: {type: string}
+        target_uid: {type: string}
+        resource_version: {type: string}
+    ToolResultRecord:
+      type: object
+      required: [class, provenance, status, new_information, occurred_at]
+      properties:
+        class: {type: string, enum: [EVIDENCE, VALIDATION, CONSTRAINT, ERROR, STATE_CHANGE]}
+        provenance: {$ref: '#/components/schemas/ToolResultProvenance'}
+        status: {type: string}
+        summary: {type: string}
+        validation_ids: {type: array, items: {type: string}}
+        new_information: {type: boolean}
+        constraint_code: {type: string}
+        infrastructure_failure: {type: boolean}
+        occurred_at: {type: string, format: date-time}
+    BrainToolExecution:
+      type: object
+      required: [envelope, result]
+      properties:
+        envelope: {$ref: '#/components/schemas/AgentActionEnvelope'}
+        result: {$ref: '#/components/schemas/ToolResultRecord'}
+    AgentActionIntent:
+      type: object
+      required: [intent]
+      properties:
+        intent: {type: string}
+        target_scope: {type: array, items: {$ref: '#/components/schemas/ResourceRef'}}
+        hypothesis_ids: {type: array, items: {type: string}}
+        evidence_need: {type: array, items: {type: string}}
+        expected_observation: {type: array, items: {type: string}}
+    AgentActionEnvelope:
+      type: object
+      required: [action_id, incident_id, turn_id, phase, tool_name, tool_category, evidence_snapshot_hash, idempotency_key, intent]
+      properties:
+        action_id: {type: string}
+        incident_id: {type: string}
+        turn_id: {type: string}
+        phase: {type: string, enum: [INTAKE, PLANNING, INVESTIGATION, REFLECTION, DIAGNOSIS, RECOVERY, VERIFICATION, ESCALATION]}
+        tool_name: {type: string}
+        tool_category: {type: string, enum: [EVIDENCE, RETRIEVAL, REASONING, RECOVERY, CONTROL]}
+        skill_refs: {type: array, items: {$ref: '#/components/schemas/SkillRef'}}
+        evidence_snapshot_hash: {type: string}
+        idempotency_key: {type: string}
+        intent: {$ref: '#/components/schemas/AgentActionIntent'}
+    SkillRef:
+      type: object
+      required: [id, version, content_hash]
+      properties:
+        id: {type: string}
+        version: {type: string}
+        content_hash: {type: string}
+    BrainTurn:
+      type: object
+      required: [id, sequence, phase, started_at]
+      description: Structured Eino Brain turn audit; hidden chain-of-thought is never persisted.
+      properties:
+        id: {type: string}
+        sequence: {type: integer, minimum: 1}
+        phase: {type: string, enum: [INTAKE, PLANNING, INVESTIGATION, REFLECTION, DIAGNOSIS, RECOVERY, VERIFICATION, ESCALATION]}
+        skill_refs: {type: array, items: {$ref: '#/components/schemas/SkillRef'}}
+        tool_category: {type: string, enum: [EVIDENCE, RETRIEVAL, REASONING, RECOVERY, CONTROL]}
+        model_usage: {$ref: '#/components/schemas/ModelUsageEvent'}
+        started_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time}
+    IncidentUnderstanding:
+      type: object
+      required: [summary, submitted_at]
+      properties:
+        summary: {type: string}
+        affected_targets: {type: array, items: {$ref: '#/components/schemas/ResourceRef'}}
+        possible_domains: {type: array, items: {type: string}}
+        unknowns: {type: array, items: {type: string}}
+        submitted_at: {type: string, format: date-time}
+    ReflectionRecord:
+      type: object
+      required: [id, trigger, cost_units, accepted, occurred_at]
+      description: Structured reflection audit; hidden chain-of-thought is never persisted.
+      properties:
+        id: {type: string}
+        trigger: {type: string, enum: [CRITICAL_EVIDENCE, HYPOTHESIS_REFUTED, CANDIDATE_CONFLICT, TOOL_FAILURE, CONSTRAINT_FAILURE, GROUNDING_FAILURE, RECOVERY_FAILURE, VERIFICATION_FAILURE]}
+        trigger_tool_call_id: {type: string}
+        hypothesis_revision_ids: {type: array, items: {type: string}}
+        evidence_ids: {type: array, items: {type: string}}
+        belief_deltas: {type: array, items: {$ref: '#/components/schemas/BeliefDelta'}}
+        next_goal: {type: string}
+        cost_units: {type: integer, minimum: 0}
+        accepted: {type: boolean}
+        rejected_reason: {type: string}
+        occurred_at: {type: string, format: date-time}
+    AgentHypothesis:
+      type: object
+      required: [id, lineage_id, version, relation, statement, category, mechanism, target_refs, evidence_needs, falsification_conditions, model_confidence, status, created_at]
+      properties:
+        id: {type: string}
+        lineage_id: {type: string}
+        version: {type: integer, minimum: 1}
+        parent_ids: {type: array, items: {type: string}}
+        relation: {type: string, enum: [ROOT, REFINE, REPLACE, SPLIT, MERGE]}
+        revision_reason: {type: string}
+        statement: {type: string}
+        category: {type: string}
+        mechanism: {type: string}
+        target_refs: {type: array, items: {$ref: '#/components/schemas/ResourceRef'}}
+        evidence_needs: {type: array, items: {type: string}}
+        falsification_conditions: {type: array, items: {type: string}}
+        model_confidence: {type: number, minimum: 0, maximum: 1}
+        status: {type: string, enum: [PROPOSED, ADMITTED, INVESTIGATING, SUPPORTED, REFUTED, REPLACED, MERGED, ABANDONED]}
+        last_validated_at: {type: string, format: date-time}
+        last_validated_snapshot_hash: {type: string}
+        created_at: {type: string, format: date-time}
+    HypothesisAdmission:
+      type: object
+      required: [hypothesis_revision_id, decision, grounding_level, resource_scope, occurred_at]
+      properties:
+        hypothesis_revision_id: {type: string}
+        decision: {type: string, enum: [ADMITTED, REJECTED]}
+        grounding_level: {type: string, enum: [DIRECT, INDIRECT, UNRESOLVED, REJECTED]}
+        reason_codes: {type: array, items: {type: string}}
+        allowed_tool_categories: {type: array, items: {type: string}}
+        resource_scope: {type: array, items: {type: object, additionalProperties: true}}
+        occurred_at: {type: string, format: date-time}
+    HypothesisGrounding:
+      type: object
+      required: [id, hypothesis_revision_id, level, evidence, coverage, validated_at, evidence_snapshot_hash]
+      properties:
+        id: {type: string}
+        hypothesis_revision_id: {type: string}
+        level: {type: string, enum: [SUPPORTED, PARTIAL, REFUTED, UNKNOWN]}
+        evidence: {type: object, additionalProperties: true}
+        coverage: {type: object, additionalProperties: true, description: Coverage of declared validation obligations; not a diagnosis probability}
+        missing_observations: {type: array, items: {type: string}}
+        validated_at: {type: string, format: date-time}
+        evidence_snapshot_hash: {type: string}
+        causal_coverage_applicable: {type: boolean}
+    GroundingDelta:
+      type: object
+      required: [hypothesis_revision_id, current_level, current_coverage, conflict_detected, suggested_revision_need, occurred_at]
+      properties:
+        hypothesis_revision_id: {type: string}
+        previous_level: {type: string}
+        current_level: {type: string, enum: [SUPPORTED, PARTIAL, REFUTED, UNKNOWN]}
+        evidence_change: {type: array, items: {type: string}}
+        new_supporting_evidence_ids: {type: array, items: {type: string}}
+        new_contradicting_evidence_ids: {type: array, items: {type: string}}
+        current_coverage: {type: object, additionalProperties: true}
+        conflict_detected: {type: boolean}
+        suggested_revision_need: {type: boolean}
+        occurred_at: {type: string, format: date-time}
+    BeliefDelta:
+      type: object
+      required: [hypothesis_revision_id, previous_confidence, new_confidence, direction, revision_required, committed, occurred_at]
+      properties:
+        hypothesis_revision_id: {type: string}
+        previous_confidence: {type: number, minimum: 0, maximum: 1}
+        new_confidence: {type: number, minimum: 0, maximum: 1}
+        direction: {type: string}
+        evidence_ids: {type: array, items: {type: string}}
+        validation_result_ids: {type: array, items: {type: string}}
+        revision_required: {type: boolean}
+        revision_reason: {type: string}
+        committed: {type: boolean}
+        occurred_at: {type: string, format: date-time}
+    AgentDiagnosis:
+      type: object
+      required: [id, hypothesis_revision_id, statement, category, mechanism, target_refs, model_confidence, grounding_level, evidence_snapshot_hash, execution_snapshot, provisional, submitted_at]
+      properties:
+        id: {type: string}
+        hypothesis_revision_id: {type: string}
+        statement: {type: string}
+        category: {type: string}
+        mechanism: {type: string}
+        target_refs: {type: array, items: {$ref: '#/components/schemas/ResourceRef'}}
+        model_confidence: {type: number, minimum: 0, maximum: 1}
+        evidence_ids: {type: array, items: {type: string}}
+        validation_result_ids: {type: array, items: {type: string}}
+        grounding_level: {type: string, enum: [SUPPORTED, PARTIAL, REFUTED, UNKNOWN]}
+        evidence_snapshot_hash: {type: string}
+        execution_snapshot: {$ref: '#/components/schemas/ExecutionSnapshot'}
+        provisional: {type: boolean}
+        submitted_at: {type: string, format: date-time}
+    RecoveryOption:
+      type: object
+      required: [action, target, reason]
+      properties:
+        action: {type: string, enum: [restart_pod, scale_deployment, rollback_deployment]}
+        target: {type: string}
+        parameters: {type: object, additionalProperties: true}
+        reason: {type: string}
+    AgentRecoveryPlan:
+      type: object
+      required: [id, goal, primary_action, expected_outcome, rollback_plan, verification_plan, risk_reason, diagnosis_version, evidence_snapshot_hash, execution_snapshot]
+      properties:
+        id: {type: string}
+        goal: {type: string}
+        primary_action: {$ref: '#/components/schemas/RecoveryOption'}
+        alternatives: {type: array, maxItems: 3, items: {$ref: '#/components/schemas/RecoveryOption'}}
+        expected_outcome: {type: string}
+        rollback_plan: {type: string}
+        verification_plan: {type: string}
+        risk_reason: {type: string}
+        diagnosis_version: {type: string}
+        evidence_snapshot_hash: {type: string}
+        execution_snapshot: {$ref: '#/components/schemas/ExecutionSnapshot'}
+    BrainBudget:
+      type: object
+      required: [max_turns, max_active_hypotheses, max_hypothesis_branches, max_revisions_per_lineage, max_tool_calls, max_parallel_read_tools, max_optional_skills_per_turn, max_structured_corrections, max_reflection_cost_units]
+      properties:
+        max_turns: {type: integer, minimum: 1}
+        max_active_hypotheses: {type: integer, minimum: 1}
+        max_hypothesis_branches: {type: integer, minimum: 1}
+        max_revisions_per_lineage: {type: integer, minimum: 1}
+        max_tool_calls: {type: integer, minimum: 1}
+        max_parallel_read_tools: {type: integer, minimum: 1}
+        max_optional_skills_per_turn: {type: integer, minimum: 0}
+        max_structured_corrections: {type: integer, minimum: 0}
+        max_reflection_cost_units: {type: integer, minimum: 0}
+    BrainBudgetUsage:
+      type: object
+      required: [turns, active_hypotheses, hypothesis_branches, tool_calls, structured_corrections, reflection_cost_units]
+      properties:
+        turns: {type: integer, minimum: 0}
+        active_hypotheses: {type: integer, minimum: 0}
+        hypothesis_branches: {type: integer, minimum: 0}
+        tool_calls: {type: integer, minimum: 0}
+        structured_corrections: {type: integer, minimum: 0}
+        reflection_cost_units: {type: integer, minimum: 0}
+    BrainBudgetState:
+      type: object
+      required: [limits, usage]
+      properties:
+        limits: {$ref: '#/components/schemas/BrainBudget'}
+        usage: {$ref: '#/components/schemas/BrainBudgetUsage'}
+    TerminationEvent:
+      type: object
+      required: [reason, trigger_turn_id, evidence_snapshot_hash, remaining_budget, occurred_at]
+      properties:
+        reason: {type: string, enum: [DIAGNOSIS_CONFIDENT, DIAGNOSIS_PROVISIONAL, EVIDENCE_SATURATED, BUDGET_EXHAUSTED, HUMAN_ESCALATION, SAFETY_BLOCKED, APPROVAL_REJECTED, RECOVERY_SUCCEEDED, RECOVERY_FAILED, EXECUTION_OUTCOME_UNKNOWN, FATAL_INFRASTRUCTURE_ERROR]}
+        trigger_turn_id: {type: string}
+        final_hypothesis_revision_id: {type: string}
+        evidence_snapshot_hash: {type: string}
+        execution_snapshot: {$ref: '#/components/schemas/ExecutionSnapshot'}
+        unresolved_gaps: {type: array, items: {type: string}}
+        remaining_budget: {$ref: '#/components/schemas/BrainBudgetUsage'}
+        occurred_at: {type: string, format: date-time}
     AgentRunLedger:
       type: object
       required: [workflow, strategy, architecture, agents, model_usage]
       properties:
         workflow: {type: string}
-        strategy: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot]}
+        strategy: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}
         architecture: {type: string}
         skill_snapshot_hash: {type: string}
         ranking_policy_hash: {type: string}
@@ -333,13 +657,13 @@ components:
       required: [objective, tasks, stop_conditions, round_limit, created_at]
       properties:
         objective: {type: string}
-        tasks: {type: array, maxItems: 4, items: {$ref: '#/components/schemas/WorkerTask'}}
+        tasks: {type: array, maxItems: 18, items: {$ref: '#/components/schemas/WorkerTask'}}
         stop_conditions: {type: array, items: {type: string}}
-        round_limit: {type: integer, minimum: 1, maximum: 2}
+        round_limit: {type: integer, minimum: 1, maximum: 18}
         created_at: {type: string, format: date-time}
     WorkerTask:
       type: object
-      required: [id, source, question, required]
+      required: [id, question]
       properties:
         id: {type: string}
         source: {type: string, enum: [metric, log, trace, topology]}
@@ -508,14 +832,14 @@ components:
         result: {type: string}
     RecoveryPermission:
       type: object
-      required: [objective_diagnosis_confidence, action_safety, verification_confidence, diagnosis_stability, autonomy_score, level, allowed, reason]
+      required: [level, allowed, reason]
       properties:
         objective_diagnosis_confidence: {type: number, minimum: 0, maximum: 1}
         action_safety: {type: number, minimum: 0, maximum: 1}
         verification_confidence: {type: number, minimum: 0, maximum: 1}
         diagnosis_stability: {type: number, minimum: 0, maximum: 1}
         autonomy_score: {type: number, minimum: 0, maximum: 1}
-        level: {type: string, enum: [auto, approval, escalate, requires_recovery_assessment]}
+        level: {type: string, enum: [auto, approval, escalate, requires_recovery_assessment, AUTO, HUMAN]}
         allowed: {type: boolean}
         reason: {type: string}
     MemoryAccessEvent:

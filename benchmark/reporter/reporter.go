@@ -68,132 +68,170 @@ func WriteManifestDir(dir string, manifest Manifest) error {
 }
 
 type CaseResult struct {
-	CaseID                      string        `json:"case_id"`
-	Seed                        int64         `json:"seed"`
-	Repetition                  int           `json:"repetition"`
-	DatasetSplit                string        `json:"dataset_split,omitempty"`
-	WorkerID                    string        `json:"worker_id,omitempty"`
-	Namespace                   string        `json:"namespace,omitempty"`
-	IncidentID                  string        `json:"incident_id,omitempty"`
-	Category                    string        `json:"category"`
-	Status                      string        `json:"status"`
-	Score                       scorer.Score  `json:"score"`
-	Duration                    time.Duration `json:"duration"`
-	Error                       string        `json:"error,omitempty"`
-	CaseRestarts                int           `json:"case_restarts,omitempty"`
-	RootCauseCategory           string        `json:"root_cause_category,omitempty"`
-	RootCauseVariant            string        `json:"root_cause_variant,omitempty"`
-	Service                     string        `json:"service,omitempty"`
-	Resource                    string        `json:"resource,omitempty"`
-	Confidence                  float64       `json:"confidence"`
-	DiagnosisMethod             string        `json:"diagnosis_method,omitempty"`
-	CausalMode                  string        `json:"causal_mode,omitempty"`
-	AgentIterations             int           `json:"agent_iterations"`
-	AgentToolUses               int           `json:"agent_tool_uses"`
-	AgentToolCost               int           `json:"agent_tool_cost"`
-	AgentTokens                 int           `json:"agent_tokens"`
-	InputTokens                 int           `json:"input_tokens"`
-	OutputTokens                int           `json:"output_tokens"`
-	ReasoningTokens             int           `json:"reasoning_tokens"`
-	EstimatedModelCost          float64       `json:"estimated_model_cost"`
-	Architecture                string        `json:"architecture,omitempty"`
-	PlannerTasks                int           `json:"planner_tasks"`
-	WorkerFindings              int           `json:"worker_findings"`
-	DebateRounds                int           `json:"debate_rounds"`
-	MemoryReads                 int           `json:"memory_reads"`
-	AgentCorrections            int           `json:"agent_corrections"`
-	SafetyRejections            int           `json:"safety_rejections"`
-	SelfCorrectionAttempts      int           `json:"self_correction_attempts"`
-	SelfCorrectionSucceeded     bool          `json:"self_correction_succeeded"`
-	HypothesisCount             int           `json:"hypothesis_count"`
-	HypothesisConverged         bool          `json:"hypothesis_converged"`
-	EvidenceQueries             int           `json:"evidence_queries"`
-	EvidenceEfficiency          float64       `json:"evidence_efficiency"`
-	IndependentEvidenceRequests int           `json:"independent_evidence_requests"`
-	NewEvidenceIDs              int           `json:"new_evidence_ids"`
-	ConvergenceRounds           int           `json:"convergence_rounds"`
-	CognitiveProposals          int           `json:"cognitive_proposals"`
-	CognitiveAcceptedProposals  int           `json:"cognitive_accepted_proposals"`
-	CognitiveUsefulProposals    int           `json:"cognitive_useful_proposals"`
-	CognitiveRejectedProposals  int           `json:"cognitive_rejected_proposals"`
-	ConfidenceUpdates           int           `json:"confidence_updates"`
-	AttributedEvidence          int           `json:"attributed_evidence"`
-	TopologyCandidates          int           `json:"topology_candidates"`
-	RecoveryProposed            bool          `json:"recovery_proposed"`
-	ApprovalRequested           bool          `json:"approval_requested"`
-	ApprovalGranted             bool          `json:"approval_granted"`
-	RecoveryExecuted            bool          `json:"recovery_executed"`
-	VerificationOK              bool          `json:"verification_ok"`
-	SafetyBlocked               bool          `json:"safety_blocked"`
-	DryRunSuccess               bool          `json:"dry_run_success"`
-	RecoveryDurationMS          float64       `json:"recovery_duration_ms"`
-	SafetyViolation             bool          `json:"safety_violation"`
-	ApprovalBypass              bool          `json:"approval_bypass"`
-	NamespaceViolation          bool          `json:"namespace_violation"`
-	DuplicateMutation           bool          `json:"duplicate_mutation"`
-	InfrastructureFailure       bool          `json:"infrastructure_failure"`
-	ArbitrationGateFailures     []string      `json:"arbitration_gate_failures,omitempty"`
-	JudgeError                  string        `json:"judge_error,omitempty"`
+	CaseID                            string        `json:"case_id"`
+	Seed                              int64         `json:"seed"`
+	Repetition                        int           `json:"repetition"`
+	DatasetSplit                      string        `json:"dataset_split,omitempty"`
+	WorkerID                          string        `json:"worker_id,omitempty"`
+	Namespace                         string        `json:"namespace,omitempty"`
+	IncidentID                        string        `json:"incident_id,omitempty"`
+	Category                          string        `json:"category"`
+	Status                            string        `json:"status"`
+	Score                             scorer.Score  `json:"score"`
+	Duration                          time.Duration `json:"duration"`
+	Error                             string        `json:"error,omitempty"`
+	CaseRestarts                      int           `json:"case_restarts,omitempty"`
+	RootCauseCategory                 string        `json:"root_cause_category,omitempty"`
+	RootCauseVariant                  string        `json:"root_cause_variant,omitempty"`
+	Service                           string        `json:"service,omitempty"`
+	Resource                          string        `json:"resource,omitempty"`
+	Confidence                        float64       `json:"confidence"`
+	DiagnosisMethod                   string        `json:"diagnosis_method,omitempty"`
+	CausalMode                        string        `json:"causal_mode,omitempty"`
+	AgentIterations                   int           `json:"agent_iterations"`
+	AgentToolUses                     int           `json:"agent_tool_uses"`
+	AgentToolCost                     int           `json:"agent_tool_cost"`
+	AgentTokens                       int           `json:"agent_tokens"`
+	InputTokens                       int           `json:"input_tokens"`
+	OutputTokens                      int           `json:"output_tokens"`
+	ReasoningTokens                   int           `json:"reasoning_tokens"`
+	EstimatedModelCost                float64       `json:"estimated_model_cost"`
+	Architecture                      string        `json:"architecture,omitempty"`
+	PlannerTasks                      int           `json:"planner_tasks"`
+	WorkerFindings                    int           `json:"worker_findings"`
+	DebateRounds                      int           `json:"debate_rounds"`
+	MemoryReads                       int           `json:"memory_reads"`
+	AgentCorrections                  int           `json:"agent_corrections"`
+	SafetyRejections                  int           `json:"safety_rejections"`
+	SelfCorrectionAttempts            int           `json:"self_correction_attempts"`
+	SelfCorrectionSucceeded           bool          `json:"self_correction_succeeded"`
+	HypothesisCount                   int           `json:"hypothesis_count"`
+	HypothesisConverged               bool          `json:"hypothesis_converged"`
+	HypothesisTop1Correct             bool          `json:"hypothesis_top_1_correct"`
+	HypothesisTop3Correct             bool          `json:"hypothesis_top_3_correct"`
+	EvidenceQueries                   int           `json:"evidence_queries"`
+	EvidenceEfficiency                float64       `json:"evidence_efficiency"`
+	IndependentEvidenceRequests       int           `json:"independent_evidence_requests"`
+	NewEvidenceIDs                    int           `json:"new_evidence_ids"`
+	ConvergenceRounds                 int           `json:"convergence_rounds"`
+	CognitiveProposals                int           `json:"cognitive_proposals"`
+	CognitiveAcceptedProposals        int           `json:"cognitive_accepted_proposals"`
+	CognitiveUsefulProposals          int           `json:"cognitive_useful_proposals"`
+	CognitiveRejectedProposals        int           `json:"cognitive_rejected_proposals"`
+	HypothesisCorrectionOpportunities int           `json:"hypothesis_correction_opportunities"`
+	HypothesisCorrections             int           `json:"hypothesis_corrections"`
+	GroundedHypothesisCorrections     int           `json:"grounded_hypothesis_corrections"`
+	GroundedDecision                  bool          `json:"grounded_decision"`
+	AutomaticRecoveryDiagnosis        bool          `json:"automatic_recovery_diagnosis"`
+	GroundedAutomaticRecovery         bool          `json:"grounded_automatic_recovery"`
+	NonControlToolResults             int           `json:"non_control_tool_results"`
+	InformativeToolResults            int           `json:"informative_tool_results"`
+	ReflectionTriggers                int           `json:"reflection_triggers"`
+	AcceptedReflections               int           `json:"accepted_reflections"`
+	SkillActivations                  int           `json:"skill_activations"`
+	AcceptedSkillActivations          int           `json:"accepted_skill_activations"`
+	SkillDrift                        int           `json:"skill_drift"`
+	HypothesisAdmissions              int           `json:"hypothesis_admissions"`
+	AcceptedHypothesisAdmissions      int           `json:"accepted_hypothesis_admissions"`
+	GroundableHypothesisAdmissions    int           `json:"groundable_hypothesis_admissions"`
+	UnsupportedDiagnosis              bool          `json:"unsupported_diagnosis"`
+	IncompleteToolProvenance          int           `json:"incomplete_tool_provenance"`
+	ConfidenceUpdates                 int           `json:"confidence_updates"`
+	AttributedEvidence                int           `json:"attributed_evidence"`
+	TopologyCandidates                int           `json:"topology_candidates"`
+	RecoveryProposed                  bool          `json:"recovery_proposed"`
+	ApprovalRequested                 bool          `json:"approval_requested"`
+	ApprovalGranted                   bool          `json:"approval_granted"`
+	RecoveryExecuted                  bool          `json:"recovery_executed"`
+	VerificationOK                    bool          `json:"verification_ok"`
+	SafetyBlocked                     bool          `json:"safety_blocked"`
+	DryRunSuccess                     bool          `json:"dry_run_success"`
+	RecoveryDurationMS                float64       `json:"recovery_duration_ms"`
+	SafetyViolation                   bool          `json:"safety_violation"`
+	ApprovalBypass                    bool          `json:"approval_bypass"`
+	NamespaceViolation                bool          `json:"namespace_violation"`
+	DuplicateMutation                 bool          `json:"duplicate_mutation"`
+	InfrastructureFailure             bool          `json:"infrastructure_failure"`
+	ArbitrationGateFailures           []string      `json:"arbitration_gate_failures,omitempty"`
+	JudgeError                        string        `json:"judge_error,omitempty"`
 }
 type Summary struct {
-	Total                           int     `json:"total"`
-	Passed                          int     `json:"passed"`
-	Failed                          int     `json:"failed"`
-	DiagnosisFailures               int     `json:"diagnosis_failures"`
-	InfrastructureFailures          int     `json:"infrastructure_failures"`
-	InfrastructureFailureRate       float64 `json:"infrastructure_failure_rate"`
-	SemanticJudgedCases             int     `json:"semantic_judged_cases"`
-	SemanticJudgeFailures           int     `json:"semantic_judge_failures"`
-	SemanticRootCauseAccuracy       float64 `json:"semantic_root_cause_accuracy"`
-	Valid                           bool    `json:"valid"`
-	RootCauseAccuracy               float64 `json:"root_cause_accuracy"`
-	RootCauseLocalizationAccuracy   float64 `json:"root_cause_localization_accuracy"`
-	CategoryAccuracy                float64 `json:"category_accuracy"`
-	VariantAccuracy                 float64 `json:"variant_accuracy"`
-	ServiceAccuracy                 float64 `json:"service_accuracy"`
-	ResourceAccuracy                float64 `json:"resource_accuracy"`
-	EvidencePrecision               float64 `json:"evidence_precision"`
-	EvidenceRecall                  float64 `json:"evidence_recall"`
-	EvidenceGroundedness            float64 `json:"evidence_groundedness"`
-	DecisionAccuracy                float64 `json:"decision_accuracy"`
-	ConfidenceBrierScore            float64 `json:"confidence_brier_score"`
-	ConfidenceECE                   float64 `json:"confidence_ece"`
-	HighConfidenceErrorRate         float64 `json:"high_confidence_error_rate"`
-	CategoryMacroF1                 float64 `json:"category_macro_f1"`
-	MeanDurationSeconds             float64 `json:"mean_duration_seconds"`
-	P95LatencySeconds               float64 `json:"p95_latency_seconds"`
-	RecoverySuccess                 float64 `json:"recovery_success"`
-	SafetyViolations                int     `json:"safety_violations"`
-	MeanModelCost                   float64 `json:"mean_model_cost"`
-	MeanInputTokens                 float64 `json:"mean_input_tokens"`
-	MeanOutputTokens                float64 `json:"mean_output_tokens"`
-	MeanReasoningTokens             float64 `json:"mean_reasoning_tokens"`
-	MeanAgentIterations             float64 `json:"mean_agent_iterations"`
-	MeanAgentToolUses               float64 `json:"mean_agent_tool_uses"`
-	MeanAgentToolCost               float64 `json:"mean_agent_tool_cost"`
-	MeanAgentTokens                 float64 `json:"mean_agent_tokens"`
-	MeanAgentCorrections            float64 `json:"mean_agent_corrections"`
-	TotalSafetyRejections           int     `json:"total_safety_rejections"`
-	MeanSafetyRejections            float64 `json:"mean_safety_rejections"`
-	SelfCorrectionCases             int     `json:"self_correction_cases"`
-	SelfCorrectionSuccesses         int     `json:"self_correction_successes"`
-	SelfCorrectionSuccessRate       float64 `json:"self_correction_success_rate"`
-	HypothesisConvergenceRate       float64 `json:"hypothesis_convergence_rate"`
-	MeanHypothesisCount             float64 `json:"mean_hypothesis_count"`
-	MeanEvidenceQueries             float64 `json:"mean_evidence_queries"`
-	MeanEvidenceEfficiency          float64 `json:"mean_evidence_efficiency"`
-	MeanIndependentEvidenceRequests float64 `json:"mean_independent_evidence_requests"`
-	MeanNewEvidenceIDs              float64 `json:"mean_new_evidence_ids"`
-	MeanConvergenceRounds           float64 `json:"mean_convergence_rounds"`
-	CorrectRCAperEvidenceRequest    float64 `json:"correct_rca_per_evidence_request"`
-	MedianEvidenceRequestsCorrect   float64 `json:"median_evidence_requests_correct"`
-	CognitiveProposals              int     `json:"cognitive_proposals"`
-	CognitiveAcceptedProposals      int     `json:"cognitive_accepted_proposals"`
-	CognitiveUsefulProposals        int     `json:"cognitive_useful_proposals"`
-	CognitiveRejectedProposals      int     `json:"cognitive_rejected_proposals"`
-	CognitiveProposalPrecision      float64 `json:"cognitive_proposal_precision"`
-	CognitiveProposalAcceptance     float64 `json:"cognitive_proposal_acceptance"`
-	MeanConfidenceUpdates           float64 `json:"mean_confidence_updates"`
+	Total                             int     `json:"total"`
+	Passed                            int     `json:"passed"`
+	Failed                            int     `json:"failed"`
+	DiagnosisFailures                 int     `json:"diagnosis_failures"`
+	InfrastructureFailures            int     `json:"infrastructure_failures"`
+	InfrastructureFailureRate         float64 `json:"infrastructure_failure_rate"`
+	SemanticJudgedCases               int     `json:"semantic_judged_cases"`
+	SemanticJudgeFailures             int     `json:"semantic_judge_failures"`
+	SemanticRootCauseAccuracy         float64 `json:"semantic_root_cause_accuracy"`
+	Valid                             bool    `json:"valid"`
+	RootCauseAccuracy                 float64 `json:"root_cause_accuracy"`
+	RootCauseLocalizationAccuracy     float64 `json:"root_cause_localization_accuracy"`
+	CategoryAccuracy                  float64 `json:"category_accuracy"`
+	VariantAccuracy                   float64 `json:"variant_accuracy"`
+	ServiceAccuracy                   float64 `json:"service_accuracy"`
+	ResourceAccuracy                  float64 `json:"resource_accuracy"`
+	EvidencePrecision                 float64 `json:"evidence_precision"`
+	EvidenceRecall                    float64 `json:"evidence_recall"`
+	EvidenceGroundedness              float64 `json:"evidence_groundedness"`
+	DecisionAccuracy                  float64 `json:"decision_accuracy"`
+	ConfidenceBrierScore              float64 `json:"confidence_brier_score"`
+	ConfidenceECE                     float64 `json:"confidence_ece"`
+	HighConfidenceErrorRate           float64 `json:"high_confidence_error_rate"`
+	CategoryMacroF1                   float64 `json:"category_macro_f1"`
+	MeanDurationSeconds               float64 `json:"mean_duration_seconds"`
+	P95LatencySeconds                 float64 `json:"p95_latency_seconds"`
+	RecoverySuccess                   float64 `json:"recovery_success"`
+	SafetyViolations                  int     `json:"safety_violations"`
+	MeanModelCost                     float64 `json:"mean_model_cost"`
+	MeanInputTokens                   float64 `json:"mean_input_tokens"`
+	MeanOutputTokens                  float64 `json:"mean_output_tokens"`
+	MeanReasoningTokens               float64 `json:"mean_reasoning_tokens"`
+	MeanAgentIterations               float64 `json:"mean_agent_iterations"`
+	MeanAgentToolUses                 float64 `json:"mean_agent_tool_uses"`
+	MeanAgentToolCost                 float64 `json:"mean_agent_tool_cost"`
+	MeanAgentTokens                   float64 `json:"mean_agent_tokens"`
+	MeanAgentCorrections              float64 `json:"mean_agent_corrections"`
+	TotalSafetyRejections             int     `json:"total_safety_rejections"`
+	MeanSafetyRejections              float64 `json:"mean_safety_rejections"`
+	SelfCorrectionCases               int     `json:"self_correction_cases"`
+	SelfCorrectionSuccesses           int     `json:"self_correction_successes"`
+	SelfCorrectionSuccessRate         float64 `json:"self_correction_success_rate"`
+	HypothesisConvergenceRate         float64 `json:"hypothesis_convergence_rate"`
+	MeanHypothesisCount               float64 `json:"mean_hypothesis_count"`
+	HypothesisTop1Accuracy            float64 `json:"hypothesis_top_1_accuracy"`
+	HypothesisTop3Accuracy            float64 `json:"hypothesis_top_3_accuracy"`
+	MeanEvidenceQueries               float64 `json:"mean_evidence_queries"`
+	MeanEvidenceEfficiency            float64 `json:"mean_evidence_efficiency"`
+	MeanIndependentEvidenceRequests   float64 `json:"mean_independent_evidence_requests"`
+	MeanNewEvidenceIDs                float64 `json:"mean_new_evidence_ids"`
+	MeanConvergenceRounds             float64 `json:"mean_convergence_rounds"`
+	CorrectRCAperEvidenceRequest      float64 `json:"correct_rca_per_evidence_request"`
+	MedianEvidenceRequestsCorrect     float64 `json:"median_evidence_requests_correct"`
+	CognitiveProposals                int     `json:"cognitive_proposals"`
+	CognitiveAcceptedProposals        int     `json:"cognitive_accepted_proposals"`
+	CognitiveUsefulProposals          int     `json:"cognitive_useful_proposals"`
+	CognitiveRejectedProposals        int     `json:"cognitive_rejected_proposals"`
+	CognitiveProposalPrecision        float64 `json:"cognitive_proposal_precision"`
+	CognitiveProposalAcceptance       float64 `json:"cognitive_proposal_acceptance"`
+	HypothesisCorrectionOpportunities int     `json:"hypothesis_correction_opportunities"`
+	HypothesisCorrections             int     `json:"hypothesis_corrections"`
+	GroundedHypothesisCorrections     int     `json:"grounded_hypothesis_corrections"`
+	HypothesisCorrectionRate          float64 `json:"hypothesis_correction_rate"`
+	GroundedDecisions                 int     `json:"grounded_decisions"`
+	GroundedDecisionRate              float64 `json:"grounded_decision_rate"`
+	AutomaticRecoveryDiagnoses        int     `json:"automatic_recovery_diagnoses"`
+	GroundedAutomaticRecoveries       int     `json:"grounded_automatic_recoveries"`
+	GroundedAutomaticRecoveryRate     float64 `json:"grounded_automatic_recovery_rate"`
+	ToolEfficiency                    float64 `json:"tool_efficiency"`
+	ReflectionTriggerPrecision        float64 `json:"reflection_trigger_precision"`
+	SkillAdherence                    float64 `json:"skill_adherence"`
+	SkillDrift                        int     `json:"skill_drift"`
+	AdmissionPrecision                float64 `json:"admission_precision"`
+	UnsupportedHypothesisRate         float64 `json:"unsupported_hypothesis_rate"`
+	ToolProvenanceCompleteness        float64 `json:"tool_provenance_completeness"`
+	MeanConfidenceUpdates             float64 `json:"mean_confidence_updates"`
 }
 
 func Write(root string, m Manifest, items []CaseResult) (Summary, error) {
@@ -224,9 +262,14 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 	var iterations, toolUses, toolCost, tokens, corrections, confidenceUpdates int
 	var inputTokens, outputTokens, reasoningTokens int
 	var modelCost float64
-	var safetyRejections, hypothesisConverged, hypothesisCount, evidenceQueries int
+	var safetyRejections, hypothesisConverged, hypothesisCount, hypothesisTop1, hypothesisTop3, evidenceQueries int
 	var independentEvidenceRequests, newEvidenceIDs, convergenceRounds int
 	var cognitiveProposals, cognitiveAccepted, cognitiveUseful, cognitiveRejected int
+	var correctionOpportunities, hypothesisCorrections, groundedCorrections int
+	var groundedDecisions, diagnosisCount, automaticRecoveryDiagnoses, groundedAutomaticRecoveries int
+	var nonControlToolResults, informativeToolResults, reflectionTriggers, acceptedReflections int
+	var skillActivations, acceptedSkillActivations, skillDrift int
+	var acceptedAdmissions, groundableAdmissions, unsupportedDiagnoses, incompleteToolProvenance int
 	var selfCorrectionCases, selfCorrectionSuccesses int
 	var evidenceEfficiency float64
 	var correctEvidenceRequests []float64
@@ -305,6 +348,12 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 		if item.HypothesisConverged {
 			hypothesisConverged++
 		}
+		if item.HypothesisTop1Correct {
+			hypothesisTop1++
+		}
+		if item.HypothesisTop3Correct {
+			hypothesisTop3++
+		}
 		hypothesisCount += item.HypothesisCount
 		evidenceQueries += item.EvidenceQueries
 		evidenceEfficiency += item.EvidenceEfficiency
@@ -315,6 +364,34 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 		cognitiveAccepted += item.CognitiveAcceptedProposals
 		cognitiveUseful += item.CognitiveUsefulProposals
 		cognitiveRejected += item.CognitiveRejectedProposals
+		correctionOpportunities += item.HypothesisCorrectionOpportunities
+		hypothesisCorrections += item.HypothesisCorrections
+		groundedCorrections += item.GroundedHypothesisCorrections
+		if item.GroundedDecision {
+			groundedDecisions++
+		}
+		if item.HypothesisCount > 0 {
+			diagnosisCount++
+		}
+		if item.AutomaticRecoveryDiagnosis {
+			automaticRecoveryDiagnoses++
+			if item.GroundedAutomaticRecovery {
+				groundedAutomaticRecoveries++
+			}
+		}
+		nonControlToolResults += item.NonControlToolResults
+		informativeToolResults += item.InformativeToolResults
+		reflectionTriggers += item.ReflectionTriggers
+		acceptedReflections += item.AcceptedReflections
+		skillActivations += item.SkillActivations
+		acceptedSkillActivations += item.AcceptedSkillActivations
+		skillDrift += item.SkillDrift
+		acceptedAdmissions += item.AcceptedHypothesisAdmissions
+		groundableAdmissions += item.GroundableHypothesisAdmissions
+		if item.UnsupportedDiagnosis {
+			unsupportedDiagnoses++
+		}
+		incompleteToolProvenance += item.IncompleteToolProvenance
 		if item.Score.StrictRootCause {
 			correctEvidenceRequests = append(correctEvidenceRequests, float64(item.IndependentEvidenceRequests))
 		}
@@ -366,6 +443,8 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 		}
 		sum.HypothesisConvergenceRate = float64(hypothesisConverged) / denominator
 		sum.MeanHypothesisCount = float64(hypothesisCount) / denominator
+		sum.HypothesisTop1Accuracy = float64(hypothesisTop1) / denominator
+		sum.HypothesisTop3Accuracy = float64(hypothesisTop3) / denominator
 		sum.MeanEvidenceQueries = float64(evidenceQueries) / denominator
 		sum.MeanEvidenceEfficiency = evidenceEfficiency / denominator
 		sum.MeanIndependentEvidenceRequests = float64(independentEvidenceRequests) / denominator
@@ -384,6 +463,38 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 		if cognitiveProposals > 0 {
 			sum.CognitiveProposalPrecision = float64(cognitiveUseful) / float64(cognitiveProposals)
 			sum.CognitiveProposalAcceptance = float64(cognitiveAccepted) / float64(cognitiveProposals)
+		}
+		sum.HypothesisCorrectionOpportunities = correctionOpportunities
+		sum.HypothesisCorrections = hypothesisCorrections
+		sum.GroundedHypothesisCorrections = groundedCorrections
+		if correctionOpportunities > 0 {
+			sum.HypothesisCorrectionRate = float64(groundedCorrections) / float64(correctionOpportunities)
+		}
+		sum.GroundedDecisions = groundedDecisions
+		if diagnosisCount > 0 {
+			sum.GroundedDecisionRate = float64(groundedDecisions) / float64(diagnosisCount)
+			sum.UnsupportedHypothesisRate = float64(unsupportedDiagnoses) / float64(diagnosisCount)
+		}
+		sum.AutomaticRecoveryDiagnoses = automaticRecoveryDiagnoses
+		sum.GroundedAutomaticRecoveries = groundedAutomaticRecoveries
+		if automaticRecoveryDiagnoses > 0 {
+			sum.GroundedAutomaticRecoveryRate = float64(groundedAutomaticRecoveries) / float64(automaticRecoveryDiagnoses)
+		}
+		if nonControlToolResults > 0 {
+			sum.ToolEfficiency = float64(informativeToolResults) / float64(nonControlToolResults)
+		}
+		if reflectionTriggers > 0 {
+			sum.ReflectionTriggerPrecision = float64(acceptedReflections) / float64(reflectionTriggers)
+		}
+		if skillActivations > 0 {
+			sum.SkillAdherence = float64(acceptedSkillActivations) / float64(skillActivations)
+		}
+		sum.SkillDrift = skillDrift
+		if acceptedAdmissions > 0 {
+			sum.AdmissionPrecision = float64(groundableAdmissions) / float64(acceptedAdmissions)
+		}
+		if toolUses > 0 {
+			sum.ToolProvenanceCompleteness = 1 - float64(incompleteToolProvenance)/float64(toolUses)
 		}
 		sum.MeanConfidenceUpdates = float64(confidenceUpdates) / denominator
 		sum.ConfidenceBrierScore, sum.ConfidenceECE, sum.HighConfidenceErrorRate = confidenceCalibration(evaluationItems)
@@ -421,6 +532,7 @@ func WriteDir(dir string, m Manifest, items []CaseResult) (Summary, error) {
 		return sum, err
 	}
 	report := fmt.Sprintf("# KubePilot Diagnosis Benchmark Report\n\n- Run: `%s`\n- Profile: `%s`\n- Dataset split: `%s`\n- Strategy: `%s`\n- Cases: %d\n- Infrastructure failures: %d (%.2f%%)\n- Valid run: %t\n- Strict Diagnosis Accuracy: %.2f%%\n- LLM-Judged Semantic RCA Accuracy: %.2f%% (%d judged; %d judge failures)\n- Recovery Success: %.2f%%\n- Safety Violations: %d\n- Mean Model Cost: %.6f\n- P95 Latency: %.3fs\n- Root Cause Localization Accuracy: %.2f%%\n- Fault Category Accuracy: %.2f%%\n- Root Cause Variant Accuracy: %.2f%%\n- Category Macro F1: %.2f%%\n- Evidence Precision: %.2f%%\n- Evidence Recall: %.2f%%\n- Evidence Groundedness: %.2f%%\n- Confidence Brier Score: %.4f\n- Confidence ECE: %.4f\n- Mean Input / Output / Reasoning Tokens: %.2f / %.2f / %.2f\n- Mean Agent Iterations: %.2f\n- Mean Agent Tool Uses: %.2f\n- Mean Tool Complexity Cost: %.2f\n- Mean Safety Corrections: %.2f\n- Mean Independent Collector Requests: %.2f\n- Mean New Evidence IDs: %.2f\n- Mean Convergence Rounds: %.2f\n- Correct RCA / Independent Request: %.4f\n- Median Independent Requests (correct cases): %.2f\n- Cognitive Proposals: %d (accepted %d; useful %d; rejected %d)\n- Cognitive Proposal Precision / Acceptance: %.2f%% / %.2f%%\n\nStrict Diagnosis Accuracy remains an exact, evidence-grounded metric. The LLM-judged semantic metric is reported separately and fails closed when a verdict is unavailable. Infrastructure failures are excluded from model metrics. A run with more than 2%% infrastructure failures is invalid. Tool complexity cost is not a monetary metric.\n", m.RunID, m.Profile, m.DatasetSplit, m.DiagnosisMethod, sum.Total, sum.InfrastructureFailures, sum.InfrastructureFailureRate*100, sum.Valid, sum.RootCauseAccuracy*100, sum.SemanticRootCauseAccuracy*100, sum.SemanticJudgedCases, sum.SemanticJudgeFailures, sum.RecoverySuccess*100, sum.SafetyViolations, sum.MeanModelCost, sum.P95LatencySeconds, sum.RootCauseLocalizationAccuracy*100, sum.CategoryAccuracy*100, sum.VariantAccuracy*100, sum.CategoryMacroF1*100, sum.EvidencePrecision*100, sum.EvidenceRecall*100, sum.EvidenceGroundedness*100, sum.ConfidenceBrierScore, sum.ConfidenceECE, sum.MeanInputTokens, sum.MeanOutputTokens, sum.MeanReasoningTokens, sum.MeanAgentIterations, sum.MeanAgentToolUses, sum.MeanAgentToolCost, sum.MeanAgentCorrections, sum.MeanIndependentEvidenceRequests, sum.MeanNewEvidenceIDs, sum.MeanConvergenceRounds, sum.CorrectRCAperEvidenceRequest, sum.MedianEvidenceRequestsCorrect, sum.CognitiveProposals, sum.CognitiveAcceptedProposals, sum.CognitiveUsefulProposals, sum.CognitiveRejectedProposals, sum.CognitiveProposalPrecision*100, sum.CognitiveProposalAcceptance*100)
+	report += fmt.Sprintf("\n## Self-Reflective Brain Metrics\n\n- Hypothesis Top-1 / Top-3 Accuracy: %.2f%% / %.2f%%\n- Hypothesis Correction Rate: %.2f%% (%d grounded corrections / %d opportunities)\n- Grounded Decision Rate: %.2f%% (%d decisions)\n- Automatic Recovery Grounded Decision Rate: %.2f%% (%d/%d)\n- Tool Efficiency: %.2f%%\n- Reflection Trigger Precision: %.2f%%\n- Skill Adherence / Drift: %.2f%% / %d\n- Admission Precision: %.2f%%\n- Unsupported Hypothesis Rate: %.2f%%\n- Tool Provenance Completeness: %.2f%%\n", sum.HypothesisTop1Accuracy*100, sum.HypothesisTop3Accuracy*100, sum.HypothesisCorrectionRate*100, sum.GroundedHypothesisCorrections, sum.HypothesisCorrectionOpportunities, sum.GroundedDecisionRate*100, sum.GroundedDecisions, sum.GroundedAutomaticRecoveryRate*100, sum.GroundedAutomaticRecoveries, sum.AutomaticRecoveryDiagnoses, sum.ToolEfficiency*100, sum.ReflectionTriggerPrecision*100, sum.SkillAdherence*100, sum.SkillDrift, sum.AdmissionPrecision*100, sum.UnsupportedHypothesisRate*100, sum.ToolProvenanceCompleteness*100)
 	err = os.WriteFile(filepath.Join(dir, "report.md"), []byte(report), 0o640)
 	return sum, err
 }
@@ -603,13 +715,13 @@ func writeCSV(path string, items []CaseResult) error {
 	defer f.Close()
 	w := csv.NewWriter(f)
 	defer w.Flush()
-	_ = w.Write([]string{"case_id", "seed", "repetition", "split", "incident_id", "strategy", "causal_mode", "architecture", "category", "predicted_category", "predicted_variant", "status", "infrastructure_failure", "root_cause_correct", "strict_root_cause", "semantic_root_cause", "semantic_confidence", "recovery_success", "safety_violation", "approval_bypass", "namespace_violation", "duplicate_mutation", "evidence_precision", "evidence_recall", "confidence", "input_tokens", "output_tokens", "reasoning_tokens", "estimated_model_cost", "agent_tool_uses", "tool_complexity_cost", "planner_tasks", "worker_findings", "debate_rounds", "memory_reads", "independent_evidence_requests", "new_evidence_ids", "convergence_rounds", "cognitive_proposals", "cognitive_accepted_proposals", "cognitive_useful_proposals", "cognitive_rejected_proposals", "duration_seconds", "error", "judge_error"})
+	_ = w.Write([]string{"case_id", "seed", "repetition", "split", "incident_id", "strategy", "causal_mode", "architecture", "category", "predicted_category", "predicted_variant", "status", "infrastructure_failure", "root_cause_correct", "strict_root_cause", "semantic_root_cause", "semantic_confidence", "recovery_success", "safety_violation", "approval_bypass", "namespace_violation", "duplicate_mutation", "evidence_precision", "evidence_recall", "confidence", "input_tokens", "output_tokens", "reasoning_tokens", "estimated_model_cost", "agent_tool_uses", "tool_complexity_cost", "planner_tasks", "worker_findings", "debate_rounds", "memory_reads", "independent_evidence_requests", "new_evidence_ids", "convergence_rounds", "cognitive_proposals", "cognitive_accepted_proposals", "cognitive_useful_proposals", "cognitive_rejected_proposals", "hypothesis_top_1_correct", "hypothesis_top_3_correct", "hypothesis_correction_opportunities", "hypothesis_corrections", "grounded_hypothesis_corrections", "grounded_decision", "automatic_recovery_diagnosis", "grounded_automatic_recovery", "non_control_tool_results", "informative_tool_results", "reflection_triggers", "accepted_reflections", "skill_activations", "accepted_skill_activations", "skill_drift", "hypothesis_admissions", "accepted_hypothesis_admissions", "groundable_hypothesis_admissions", "unsupported_diagnosis", "incomplete_tool_provenance", "duration_seconds", "error", "judge_error"})
 	for _, v := range items {
 		semantic := ""
 		if v.Score.SemanticRootCause != nil {
 			semantic = strconv.FormatBool(*v.Score.SemanticRootCause)
 		}
-		_ = w.Write([]string{v.CaseID, strconv.FormatInt(v.Seed, 10), strconv.Itoa(v.Repetition), v.DatasetSplit, v.IncidentID, v.DiagnosisMethod, v.CausalMode, v.Architecture, v.Category, v.RootCauseCategory, v.RootCauseVariant, v.Status, strconv.FormatBool(v.InfrastructureFailure), strconv.FormatBool(v.Score.RootCauseCorrect), strconv.FormatBool(v.Score.StrictRootCause), semantic, strconv.FormatFloat(v.Score.SemanticConfidence, 'f', 4, 64), strconv.FormatBool(v.VerificationOK), strconv.FormatBool(v.SafetyViolation), strconv.FormatBool(v.ApprovalBypass), strconv.FormatBool(v.NamespaceViolation), strconv.FormatBool(v.DuplicateMutation), strconv.FormatFloat(v.Score.EvidencePrecision, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceRecall, 'f', 4, 64), strconv.FormatFloat(v.Confidence, 'f', 4, 64), strconv.Itoa(v.InputTokens), strconv.Itoa(v.OutputTokens), strconv.Itoa(v.ReasoningTokens), strconv.FormatFloat(v.EstimatedModelCost, 'f', 8, 64), strconv.Itoa(v.AgentToolUses), strconv.Itoa(v.AgentToolCost), strconv.Itoa(v.PlannerTasks), strconv.Itoa(v.WorkerFindings), strconv.Itoa(v.DebateRounds), strconv.Itoa(v.MemoryReads), strconv.Itoa(v.IndependentEvidenceRequests), strconv.Itoa(v.NewEvidenceIDs), strconv.Itoa(v.ConvergenceRounds), strconv.Itoa(v.CognitiveProposals), strconv.Itoa(v.CognitiveAcceptedProposals), strconv.Itoa(v.CognitiveUsefulProposals), strconv.Itoa(v.CognitiveRejectedProposals), strconv.FormatFloat(v.Duration.Seconds(), 'f', 3, 64), v.Error, v.JudgeError})
+		_ = w.Write([]string{v.CaseID, strconv.FormatInt(v.Seed, 10), strconv.Itoa(v.Repetition), v.DatasetSplit, v.IncidentID, v.DiagnosisMethod, v.CausalMode, v.Architecture, v.Category, v.RootCauseCategory, v.RootCauseVariant, v.Status, strconv.FormatBool(v.InfrastructureFailure), strconv.FormatBool(v.Score.RootCauseCorrect), strconv.FormatBool(v.Score.StrictRootCause), semantic, strconv.FormatFloat(v.Score.SemanticConfidence, 'f', 4, 64), strconv.FormatBool(v.VerificationOK), strconv.FormatBool(v.SafetyViolation), strconv.FormatBool(v.ApprovalBypass), strconv.FormatBool(v.NamespaceViolation), strconv.FormatBool(v.DuplicateMutation), strconv.FormatFloat(v.Score.EvidencePrecision, 'f', 4, 64), strconv.FormatFloat(v.Score.EvidenceRecall, 'f', 4, 64), strconv.FormatFloat(v.Confidence, 'f', 4, 64), strconv.Itoa(v.InputTokens), strconv.Itoa(v.OutputTokens), strconv.Itoa(v.ReasoningTokens), strconv.FormatFloat(v.EstimatedModelCost, 'f', 8, 64), strconv.Itoa(v.AgentToolUses), strconv.Itoa(v.AgentToolCost), strconv.Itoa(v.PlannerTasks), strconv.Itoa(v.WorkerFindings), strconv.Itoa(v.DebateRounds), strconv.Itoa(v.MemoryReads), strconv.Itoa(v.IndependentEvidenceRequests), strconv.Itoa(v.NewEvidenceIDs), strconv.Itoa(v.ConvergenceRounds), strconv.Itoa(v.CognitiveProposals), strconv.Itoa(v.CognitiveAcceptedProposals), strconv.Itoa(v.CognitiveUsefulProposals), strconv.Itoa(v.CognitiveRejectedProposals), strconv.FormatBool(v.HypothesisTop1Correct), strconv.FormatBool(v.HypothesisTop3Correct), strconv.Itoa(v.HypothesisCorrectionOpportunities), strconv.Itoa(v.HypothesisCorrections), strconv.Itoa(v.GroundedHypothesisCorrections), strconv.FormatBool(v.GroundedDecision), strconv.FormatBool(v.AutomaticRecoveryDiagnosis), strconv.FormatBool(v.GroundedAutomaticRecovery), strconv.Itoa(v.NonControlToolResults), strconv.Itoa(v.InformativeToolResults), strconv.Itoa(v.ReflectionTriggers), strconv.Itoa(v.AcceptedReflections), strconv.Itoa(v.SkillActivations), strconv.Itoa(v.AcceptedSkillActivations), strconv.Itoa(v.SkillDrift), strconv.Itoa(v.HypothesisAdmissions), strconv.Itoa(v.AcceptedHypothesisAdmissions), strconv.Itoa(v.GroundableHypothesisAdmissions), strconv.FormatBool(v.UnsupportedDiagnosis), strconv.Itoa(v.IncompleteToolProvenance), strconv.FormatFloat(v.Duration.Seconds(), 'f', 3, 64), v.Error, v.JudgeError})
 	}
 	return w.Error()
 }

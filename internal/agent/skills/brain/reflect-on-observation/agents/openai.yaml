@@ -1,0 +1,4 @@
+interface:
+  display_name: "reflect-on-observation"
+  short_description: "KubePilot reflect-on-observation procedure"
+  default_prompt: "Apply the reflect-on-observation procedure to the current grounded incident state."

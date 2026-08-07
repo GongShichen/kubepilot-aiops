@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/kubepilot-aiops/kubepilot/internal/causal"
 	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
@@ -14,31 +15,62 @@ type Collector interface {
 	Collect(context.Context, *domain.Incident, domain.EvidenceRequest) ([]domain.Evidence, error)
 }
 type WorkflowState struct {
-	Workflow           string                                 `json:"workflow"`
-	Incident           *domain.Incident                       `json:"incident"`
-	EvidencePlan       EvidencePlan                           `json:"evidence_plan"`
-	DryRun             *domain.DryRunResult                   `json:"dry_run,omitempty"`
-	ExecutionContext   *domain.ExecutionContext               `json:"execution_context,omitempty"`
-	VerificationState  VerificationState                      `json:"verification_state"`
-	ModelSnapshotHash  string                                 `json:"model_snapshot_hash,omitempty"`
-	ToolCalls          int                                    `json:"tool_calls"`
-	DiagnosisAttempts  int                                    `json:"diagnosis_attempts"`
-	Errors             []string                               `json:"errors,omitempty"`
-	RankedEvidence     []domain.Evidence                      `json:"ranked_evidence,omitempty"`
-	StateAssertions    []domain.StateAssertion                `json:"state_assertions,omitempty"`
-	DiagnosisRuntime   *CognitiveDiagnosisState               `json:"diagnosis_runtime,omitempty"`
-	Features           domain.IncidentFeatures                `json:"incident_features"`
-	CandidateLists     map[string][]domain.RetrievalCandidate `json:"candidate_lists,omitempty"`
-	Candidates         []domain.RetrievalCandidate            `json:"candidates,omitempty"`
-	CausalPatterns     []domain.CausalPattern                 `json:"causal_patterns,omitempty"`
-	IncidentGraph      *topology.IncidentGraph                `json:"incident_graph,omitempty"`
-	CausalMatches      []causal.PatternMatch                  `json:"causal_matches,omitempty"`
-	CausalEvidence     []causal.HypothesisCausalEvidence      `json:"causal_evidence,omitempty"`
-	CausalProposal     *causalknowledge.Proposal              `json:"causal_proposal,omitempty"`
-	CausalValidation   *causalknowledge.ValidationResult      `json:"causal_validation,omitempty"`
-	HypothesisDrafts   []domain.HypothesisDraft               `json:"hypothesis_drafts,omitempty"`
-	VerifiedHypotheses []domain.VerifiedHypothesis            `json:"verified_hypotheses,omitempty"`
-	DiagnosisLedger    domain.DiagnosisLedger                 `json:"diagnosis_ledger"`
+	Workflow              string                                 `json:"workflow"`
+	Incident              *domain.Incident                       `json:"incident"`
+	EvidencePlan          EvidencePlan                           `json:"evidence_plan"`
+	DryRun                *domain.DryRunResult                   `json:"dry_run,omitempty"`
+	ExecutionContext      *domain.ExecutionContext               `json:"execution_context,omitempty"`
+	VerificationState     VerificationState                      `json:"verification_state"`
+	ModelSnapshotHash     string                                 `json:"model_snapshot_hash,omitempty"`
+	ToolCalls             int                                    `json:"tool_calls"`
+	DiagnosisAttempts     int                                    `json:"diagnosis_attempts"`
+	Errors                []string                               `json:"errors,omitempty"`
+	RankedEvidence        []domain.Evidence                      `json:"ranked_evidence,omitempty"`
+	StateAssertions       []domain.StateAssertion                `json:"state_assertions,omitempty"`
+	DiagnosisRuntime      *CognitiveDiagnosisState               `json:"diagnosis_runtime,omitempty"`
+	Features              domain.IncidentFeatures                `json:"incident_features"`
+	CandidateLists        map[string][]domain.RetrievalCandidate `json:"candidate_lists,omitempty"`
+	Candidates            []domain.RetrievalCandidate            `json:"candidates,omitempty"`
+	CausalPatterns        []domain.CausalPattern                 `json:"causal_patterns,omitempty"`
+	IncidentGraph         *topology.IncidentGraph                `json:"incident_graph,omitempty"`
+	CausalMatches         []causal.PatternMatch                  `json:"causal_matches,omitempty"`
+	CausalEvidence        []causal.HypothesisCausalEvidence      `json:"causal_evidence,omitempty"`
+	CausalProposal        *causalknowledge.Proposal              `json:"causal_proposal,omitempty"`
+	CausalValidation      *causalknowledge.ValidationResult      `json:"causal_validation,omitempty"`
+	HypothesisDrafts      []domain.HypothesisDraft               `json:"hypothesis_drafts,omitempty"`
+	VerifiedHypotheses    []domain.VerifiedHypothesis            `json:"verified_hypotheses,omitempty"`
+	DiagnosisLedger       domain.DiagnosisLedger                 `json:"diagnosis_ledger"`
+	BrainMessages         []*schema.Message                      `json:"brain_messages,omitempty"`
+	BrainPhase            domain.BrainPhase                      `json:"brain_phase,omitempty"`
+	ResumeBrainPhase      domain.BrainPhase                      `json:"resume_brain_phase,omitempty"`
+	BrainTurns            []domain.BrainTurn                     `json:"brain_turns,omitempty"`
+	IncidentUnderstanding *domain.IncidentUnderstanding          `json:"incident_understanding,omitempty"`
+	SkillActivations      []domain.SkillActivation               `json:"skill_activations,omitempty"`
+	ActiveSkillRefs       []domain.SkillRef                      `json:"active_skill_refs,omitempty"`
+	ActiveSkillPrompt     string                                 `json:"active_skill_prompt,omitempty"`
+	ActiveSkillCategories []domain.BrainToolCategory             `json:"active_skill_categories,omitempty"`
+	LoadedSkillReferences map[string]string                      `json:"loaded_skill_references,omitempty"`
+	RequestedSkills       []SkillRequest                         `json:"requested_skills,omitempty"`
+	ActiveToolCategory    domain.BrainToolCategory               `json:"active_tool_category,omitempty"`
+	ToolExecutions        []domain.BrainToolExecution            `json:"brain_tool_executions,omitempty"`
+	AgentHypotheses       []domain.AgentHypothesis               `json:"agent_hypotheses,omitempty"`
+	HypothesisAdmissions  []domain.HypothesisAdmission           `json:"hypothesis_admissions,omitempty"`
+	HypothesisGroundings  []domain.HypothesisGrounding           `json:"hypothesis_groundings,omitempty"`
+	GroundingDeltas       []domain.GroundingDelta                `json:"grounding_deltas,omitempty"`
+	GroundingDeltaCursor  int                                    `json:"grounding_delta_cursor,omitempty"`
+	BeliefDeltas          []domain.BeliefDelta                   `json:"belief_deltas,omitempty"`
+	Reflections           []domain.ReflectionRecord              `json:"reflections,omitempty"`
+	AgentDiagnosis        *domain.AgentDiagnosis                 `json:"agent_diagnosis,omitempty"`
+	AgentRecoveryPlan     *domain.AgentRecoveryPlan              `json:"agent_recovery_plan,omitempty"`
+	Termination           *domain.TerminationEvent               `json:"termination,omitempty"`
+	BrainBudget           domain.BrainBudgetState                `json:"brain_budget"`
+	ExecutionSnapshot     domain.ExecutionSnapshot               `json:"execution_snapshot"`
+	WorkflowAttempt       *domain.WorkflowAttempt                `json:"workflow_attempt,omitempty"`
+	EvidenceSnapshotHash  string                                 `json:"evidence_snapshot_hash,omitempty"`
+	PendingToolMessages   []*schema.Message                      `json:"pending_tool_messages,omitempty"`
+	PendingReflection     *domain.ReflectionTrigger              `json:"pending_reflection,omitempty"`
+	PendingTermination    domain.TerminationReason               `json:"pending_termination,omitempty"`
+	BrainToolPolicy       domain.ToolCallingPolicy               `json:"brain_tool_policy"`
 }
 
 const WorkflowName = domain.WorkflowRuntimeName

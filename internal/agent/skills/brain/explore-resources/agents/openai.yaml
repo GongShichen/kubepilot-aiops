@@ -1,0 +1,4 @@
+interface:
+  display_name: "explore-resources"
+  short_description: "KubePilot explore-resources procedure"
+  default_prompt: "Apply the explore-resources procedure to the current grounded incident state."

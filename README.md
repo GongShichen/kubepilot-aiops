@@ -1,12 +1,12 @@
-# KubePilot: An Evidence-Grounded Autonomous Diagnosis Runtime with an Eino Cognitive Layer
+# KubePilot: An Eino-native Self-Reflective Autonomous SRE Agent Runtime
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-KubePilot is an Eino-based autonomous SRE control plane for evidence-grounded Kubernetes incident diagnosis and safety-governed recovery. Its MVP core loop is:
+KubePilot is an Eino-native autonomous SRE Agent whose LLM Brain owns investigation, open-world hypotheses, belief revision, diagnosis, and recovery planning. Its Runtime is the evidence-grounded environment and Safety Kernel:
 
-> Observe → Interpret → Request discriminative evidence → Update belief → Safe recovery or human escalation
+> Observe → Ground → Revise belief → Act → Verify → Safe recovery or human escalation
 
-The project deliberately separates model autonomy from mutation authority. Agents may plan, inspect, challenge hypotheses, and propose recovery; deterministic server code owns evidence identity, budgets, confidence gates, namespace boundaries, dry-run validation, approval, idempotency, execution, and post-action verification.
+The Runtime can return evidence, contradictions, validation coverage, and causal-path coverage. It cannot generate KubePilot hypotheses, choose the final root cause, judge whether a mechanism is plausible, change model confidence, or replace an LLM diagnosis with a deterministic candidate. No hidden chain-of-thought is stored; only structured plans, actions, evidence, grounding, beliefs, reflections, and lineage are audited.
 
 No checked-in benchmark result claims that KubePilot is better than a baseline. A superiority claim is valid only after a formal paired run produces a positive 95% confidence interval against the best baseline.
 
@@ -14,30 +14,44 @@ No checked-in benchmark result claims that KubePilot is better than a baseline. 
 
 ```mermaid
 flowchart TD
-    I["incident_intake"] --> CI["cognitive_intent"]
-    CI --> QC["query_compiler"]
-    QC --> EC["evidence_collection"]
-    EC --> SA["signal_assertion_builder"]
-    SA --> CG["candidate_generation"]
-    CG --> CR["cognitive_reasoning"]
-    CR --> CF["causal_falsification"]
-    CF --> OA{"objective_arbitration"}
-    OA -->|"valuable, bounded request"| QC
-    OA -->|"objective gate passed"| RP["recovery_permission"]
-    OA -->|"unresolved"| H["NEEDS_ATTENTION"]
+    I["incident_intake"] --> C["brain_context_builder"]
+    C --> M["brain_model"]
+    M --> G["brain_action_gateway"]
+    G --> R{"tool_category_router"}
+    R --> E["Evidence ToolsNode"]
+    R --> K["Retrieval ToolsNode"]
+    R --> Q["Reasoning ToolsNode"]
+    R --> P["Recovery ToolsNode"]
+    R --> T["Control ToolsNode"]
+    E --> C1["tool_result_classifier"]
+    K --> C1
+    Q --> C1
+    P --> C1
+    C1 --> O["observation_update"]
+    O --> GD["belief_update: GroundingDelta"]
+    GD --> RR{"reflection_router"}
+    RR -->|"belief revision required"| RF["reflection_update"]
+    RF --> BC["belief_commit"]
+    BC --> C
+    RR -->|"continue"| C
+    T --> TR{"termination_router"}
+    TR -->|"recovery request"| RP["recovery_permission"]
+    TR -->|"complete or escalate"| F["incident_finalizer"]
     RP --> DR["Kubernetes DryRunAll"]
     DR --> AP["Human Approval Interrupt"]
     AP --> EX["Idempotent Executor"]
     EX --> V["Post-action Verification"]
+    V -->|"confirmed failure"| RF
+    V -->|"success or unknown"| F
 ```
 
-Each named stage is an Eino graph node with the shared `WorkflowState`, callbacks, checkpoints, and resume semantics. Eino owns model and tool lifecycles; the invoked Go services own facts, signals, state assertions, candidate validation, causal coverage, falsification, scoring, and safety gates. The Causal Engine accepts only server-issued signal, state-assertion, graph-node, and topology-edge IDs—never free-form model reasoning.
+`WorkflowState` is the sole mutable state. Eino `ChatModelNode` owns Brain calls, category-isolated `ToolsNode`s own capabilities, and Lambda nodes own context, routing, persistence, policy, and Safety Kernel boundaries. Every Brain, Tool, Grounding, Reflection, approval, and verification boundary is checkpointed. The graph has a step budget derived from the cognitive budget but no Agent or Incident wall-clock limit.
 
-The Cognitive Runtime is one bounded Eino component with four operations: Planner, Interpreter, Comparator, and Investigator. It can interpret grounded observations, compare candidate pairs, and propose discriminative evidence requests. It cannot add facts, create an executable cause, alter the objective score, or authorize recovery. Server code stops the active loop when a request is repeated, unavailable, yields no new evidence, has no unobserved assertion, or has `DiagnosticValue = ExpectedEntropyReduction × DecisionImpact < 0.05`.
+Tool results are typed as `EVIDENCE`, `VALIDATION`, `CONSTRAINT`, `ERROR`, or `STATE_CHANGE`. Constraint and infrastructure results never become incident evidence. Every result carries tool, schema, collector, target, time-window, parser, artifact, Evidence ID, and—after mutation—approval/resource-version provenance.
 
-The Objective Arbiter computes `0.50 × Evidence + 0.30 × Causal + 0.20 × ObservationCoverage − 0.30 × Contradiction`. Evidence is independent, source-weighted support; observation coverage measures distinct abnormal states, phases, and mechanism nodes, so a signal is not counted twice. Objective score, margin, and gates alone determine recovery eligibility. A grounded cognitive preference is ordinal-only: within a near tie it affects presentation, the next candidate pair, and human-review priority, never confidence or automation.
+The Runtime emits non-probabilistic `GroundingLevel`, supporting/contradicting Evidence IDs, and obligation coverage. `GroundingDelta` states what changed objectively; only an LLM Reflection may emit a subjective `BeliefDelta`. Statement, mechanism, target, or falsification changes create immutable hypothesis revisions with explicit lineage.
 
-Only structured `HypothesisArgument`, `Critique`, Evidence IDs, score changes, and `ArbitrationResult` are stored. Chain-of-Thought is never requested or persisted.
+Versioned fine-grained Skills are executable capability contracts rather than one large prompt. Each declares preconditions, server-owned inputs, procedure, allowed tool categories, required IDs, output contract, stop/failure conditions, handoff, dependencies, conflicts, and phase compatibility. Skill, model, tool-schema, and policy hashes are frozen in an `ExecutionSnapshot`; resume requires the same snapshot, while migration creates a new Workflow Attempt and invalidates stale diagnosis/recovery artifacts.
 
 ## Diagnosis strategies and MVP baselines
 
@@ -51,9 +65,11 @@ Only structured `HypothesisArgument`, `Critique`, Evidence IDs, score changes, a
 | `active-diagnosis` | Cognitive Runtime plus the two-round, server-valued Planner/Investigator loop. |
 | `react` | One bounded Diagnosis ReAct agent with Metric, Log, Trace, and Kubernetes tools; no Planner, debate, long-term memory, or causal enhancement. |
 | `direct`, `rag` | Compatibility baselines: one structured model call without, or with, scoped Episodic Memory. |
-| `kubepilot` | Compatibility alias for the full active-diagnosis runtime. |
+| `kubepilot` | Eino-native LLM Brain with open-world hypothesis lineage, evidence grounding, reflection, versioned Skills, and safe recovery. |
+| `kubepilot-no-reflection` | KubePilot Brain ablation with the Reflection path disabled. |
+| `kubepilot-no-optional-skills` | KubePilot Brain ablation with optional Skill activation disabled. |
 
-Legacy request values are accepted for one compatibility window: `llm-only → direct` and `vector-rag → rag`. Incidents and artifacts persist only canonical IDs. Formal MVP comparisons use `rule-only`, `evidence-only`, `cognitive`, `active-diagnosis`, and `react` with the same model profile, collectors, per-Agent output cap, recovery path, approval policy, executor, and verification controller.
+Legacy request values are accepted for one compatibility window: `llm-only → direct` and `vector-rag → rag`. Incidents and artifacts persist only canonical IDs. Formal comparisons keep all baselines independent and add KubePilot Brain plus the two ablations under the same model profile, collectors, 8192-token response cap, recovery path, approval policy, executor, and verification controller.
 
 The comparison writer rejects a run when strategy footprints do not differ as specified. This prevents labels from accidentally measuring the same runtime.
 
@@ -115,6 +131,8 @@ It includes payment latency caused by a payment-pod memory leak, Redis unavailab
 Each family contributes four Dev, four Validation, and twelve hidden Test scenarios. A formal Test comparison runs 72 scenarios with three paired load/fault seeds: 216 paired cases per strategy. Strategy order is deterministically rotated per parent Run ID, and the Kubernetes baseline is restored and checked before every case.
 
 The main table reports Strict Diagnosis Accuracy, Recovery Success, Safety Violations, mean model cost, and P95 latency. Reports also preserve category, variant, service, resource, evidence, calibration, tool-complexity, and failure breakdowns. `ToolCost` is a complexity unit, never currency; monetary cost uses separate prompt, visible completion, reasoning-token, and pricing-snapshot fields for every diagnosis and recovery-proposal model call.
+
+The Brain evaluation additionally treats **Hypothesis Correction Rate**, **Grounded Decision Rate**, and **Tool Efficiency** as first-class outcomes. It separately reports Semantic RCA, Hypothesis Top-K, Reflection precision, Skill adherence/drift, Admission precision, unsupported hypotheses, and recovery safety. A grounded decision requires cited Evidence, validation of the final immutable revision, complete lineage, matching evidence/execution snapshots, and complete Tool provenance; every automatically recovered diagnosis must satisfy this contract.
 
 Statistics are fixed in code:
 
@@ -197,8 +215,9 @@ Useful local endpoints:
 
 The OpenAPI specification is in `api/openapi.yaml`. Relevant endpoints include:
 
-- `POST /api/v1/incidents` with `direct`, `rag`, `react`, or `kubepilot`, plus an optional controlled causal mode.
-- `GET /api/v1/incidents/{id}/investigation` for Plan, findings, debate, and arbitration without hidden reasoning.
+- `POST /api/v1/incidents` with the independent baselines, `kubepilot`, or either KubePilot ablation.
+- `GET /api/v1/incidents/{id}/investigation` for Brain turns, Skills, typed Tool provenance, hypothesis lineage, Grounding/Belief deltas, diagnosis, termination, and recovery without hidden reasoning.
+- `POST /api/v1/incidents/{id}/workflow-attempts/migrate` for explicit snapshot migration and stale-artifact invalidation.
 - `GET /api/v1/incidents/{id}/agent-runs` for strategy, architecture, hierarchy, model usage, tools, budgets, and safety events.
 - `POST /api/v1/benchmarks/runs` for strategies, split, seeds, repetitions, model profile, and auto-approval policy.
 - `GET /api/v1/benchmarks/runs/{id}/results` for the exact persisted result artifact.

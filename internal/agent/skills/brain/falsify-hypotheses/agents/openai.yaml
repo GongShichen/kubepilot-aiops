@@ -1,0 +1,4 @@
+interface:
+  display_name: "falsify-hypotheses"
+  short_description: "KubePilot falsify-hypotheses procedure"
+  default_prompt: "Apply the falsify-hypotheses procedure to the current grounded incident state."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "form-hypotheses"
+  short_description: "KubePilot form-hypotheses procedure"
+  default_prompt: "Apply the form-hypotheses procedure to the current grounded incident state."

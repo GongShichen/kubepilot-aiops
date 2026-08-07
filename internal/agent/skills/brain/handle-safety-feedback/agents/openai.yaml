@@ -1,0 +1,4 @@
+interface:
+  display_name: "handle-safety-feedback"
+  short_description: "KubePilot handle-safety-feedback procedure"
+  default_prompt: "Apply the handle-safety-feedback procedure to the current grounded incident state."

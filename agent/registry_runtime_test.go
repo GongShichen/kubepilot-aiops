@@ -80,7 +80,7 @@ func TestRegistryProceduralMemoryAndSupervisorRuntimeMetadata(t *testing.T) {
 		}
 	}
 
-	supervisor := &Supervisor{skillSnapshotHash: "skills", rankingPolicyHash: "ranking", hooks: &supervisorHooks{}}
+	supervisor := &Supervisor{skillSnapshotHash: "skills", brainSkillHash: "brain-skills", rankingPolicyHash: "ranking", hooks: &supervisorHooks{}}
 	sink := workflowgraph.EventSink(func(context.Context, workflowgraph.WorkflowEvent) {})
 	supervisor.SetEventSink(sink)
 	if supervisor.eventSink == nil || supervisor.hooks.eventSink == nil {
@@ -89,6 +89,10 @@ func TestRegistryProceduralMemoryAndSupervisorRuntimeMetadata(t *testing.T) {
 	skillHash, rankingHash, rerankerHash := supervisor.RuntimeHashes()
 	if skillHash != "skills" || rankingHash != "ranking" || rerankerHash != "" {
 		t.Fatalf("unexpected runtime hashes: %q %q %q", skillHash, rankingHash, rerankerHash)
+	}
+	brainSkillHash, brainRankingHash, brainRerankerHash := supervisor.RuntimeHashesForMethod(domain.DiagnosisMethodKubePilot)
+	if brainSkillHash != "brain-skills" || brainRankingHash != "ranking" || brainRerankerHash != "" {
+		t.Fatalf("unexpected Brain runtime hashes: %q %q %q", brainSkillHash, brainRankingHash, brainRerankerHash)
 	}
 }
 

@@ -1,0 +1,134 @@
+version: 1
+tool_policy:
+  max_same_tool_repeat: 3
+  max_no_information_streak: 2
+  require_reason: true
+  require_expected_observation: true
+  require_hypothesis_binding_after_admission: true
+  reject_exact_request_repeat: true
+  reject_unchanged_constraint_retry: true
+skills:
+  - id: brain-kernel
+    version: "1"
+    mandatory: true
+    compatible_phases: [INTAKE, PLANNING, INVESTIGATION, REFLECTION, DIAGNOSIS, RECOVERY, VERIFICATION, ESCALATION]
+    allowed_tool_categories: [EVIDENCE, RETRIEVAL, REASONING, RECOVERY, CONTROL]
+    output_contract: agent-action-intent-v1
+  - id: understand-incident
+    version: "1"
+    requires: [brain-kernel]
+    mandatory: true
+    compatible_phases: [INTAKE]
+    allowed_tool_categories: [CONTROL]
+    output_contract: incident-understanding-v1
+  - id: plan-investigation
+    version: "1"
+    requires: [brain-kernel]
+    mandatory: true
+    compatible_phases: [PLANNING]
+    allowed_tool_categories: [REASONING, CONTROL]
+    output_contract: investigation-plan-v1
+  - id: explore-resources
+    version: "1"
+    requires: [brain-kernel]
+    compatible_phases: [PLANNING, INVESTIGATION]
+    allowed_tool_categories: [EVIDENCE, RETRIEVAL]
+    output_contract: resource-exploration-v1
+  - id: select-tools
+    version: "1"
+    requires: [brain-kernel]
+    compatible_phases: [PLANNING, INVESTIGATION]
+    allowed_tool_categories: [EVIDENCE, RETRIEVAL, REASONING, CONTROL]
+    output_contract: agent-action-intent-v1
+  - id: investigate-metrics
+    version: "1"
+    requires: [brain-kernel, select-tools]
+    conflicts: [plan-recovery]
+    compatible_phases: [INVESTIGATION]
+    allowed_tool_categories: [EVIDENCE]
+    output_contract: evidence-request-v1
+    references: [metric-signals.md]
+  - id: investigate-logs
+    version: "1"
+    requires: [brain-kernel, select-tools]
+    conflicts: [plan-recovery]
+    compatible_phases: [INVESTIGATION]
+    allowed_tool_categories: [EVIDENCE]
+    output_contract: evidence-request-v1
+    references: [log-signals.md]
+  - id: investigate-traces
+    version: "1"
+    requires: [brain-kernel, select-tools]
+    conflicts: [plan-recovery]
+    compatible_phases: [INVESTIGATION]
+    allowed_tool_categories: [EVIDENCE]
+    output_contract: evidence-request-v1
+    references: [trace-signals.md]
+  - id: inspect-kubernetes
+    version: "1"
+    requires: [brain-kernel, select-tools]
+    compatible_phases: [INVESTIGATION, RECOVERY, VERIFICATION]
+    allowed_tool_categories: [EVIDENCE]
+    output_contract: evidence-request-v1
+    references: [kubernetes-resources.md]
+  - id: form-hypotheses
+    version: "1"
+    requires: [brain-kernel]
+    mandatory: true
+    compatible_phases: [INVESTIGATION]
+    allowed_tool_categories: [REASONING]
+    output_contract: hypothesis-submission-v1
+  - id: revise-hypotheses
+    version: "1"
+    requires: [brain-kernel, form-hypotheses]
+    compatible_phases: [INVESTIGATION, REFLECTION]
+    allowed_tool_categories: [REASONING]
+    output_contract: hypothesis-revision-v1
+  - id: reflect-on-observation
+    version: "1"
+    requires: [brain-kernel]
+    mandatory: true
+    compatible_phases: [REFLECTION]
+    allowed_tool_categories: [REASONING, CONTROL]
+    output_contract: belief-delta-v1
+  - id: falsify-hypotheses
+    version: "1"
+    requires: [brain-kernel, form-hypotheses]
+    compatible_phases: [INVESTIGATION]
+    allowed_tool_categories: [EVIDENCE, REASONING]
+    output_contract: falsification-request-v1
+  - id: synthesize-diagnosis
+    version: "1"
+    requires: [brain-kernel, form-hypotheses]
+    mandatory: true
+    compatible_phases: [DIAGNOSIS]
+    allowed_tool_categories: [REASONING, CONTROL]
+    output_contract: agent-diagnosis-v1
+  - id: plan-recovery
+    version: "1"
+    requires: [brain-kernel, synthesize-diagnosis]
+    conflicts: [investigate-metrics, investigate-logs, investigate-traces]
+    mandatory: true
+    compatible_phases: [RECOVERY]
+    allowed_tool_categories: [RECOVERY, CONTROL]
+    output_contract: recovery-plan-v1
+  - id: handle-safety-feedback
+    version: "1"
+    requires: [brain-kernel]
+    compatible_phases: [INVESTIGATION, RECOVERY, VERIFICATION]
+    allowed_tool_categories: [EVIDENCE, REASONING, RECOVERY, CONTROL]
+    output_contract: safety-response-v1
+  - id: verify-recovery
+    version: "1"
+    requires: [brain-kernel, plan-recovery]
+    mandatory: true
+    compatible_phases: [VERIFICATION]
+    allowed_tool_categories: [CONTROL]
+    output_contract: verification-decision-v1
+  - id: escalate-incident
+    version: "1"
+    requires: [brain-kernel]
+    mandatory: true
+    compatible_phases: [ESCALATION]
+    allowed_tool_categories: [CONTROL]
+    output_contract: termination-event-v1

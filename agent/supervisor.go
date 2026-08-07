@@ -13,6 +13,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	workflowgraph "github.com/kubepilot-aiops/kubepilot/graph"
+	"github.com/kubepilot-aiops/kubepilot/internal/brainruntime"
 	"github.com/kubepilot-aiops/kubepilot/internal/causal"
 	causaldiscovery "github.com/kubepilot-aiops/kubepilot/internal/causal/discovery"
 	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
@@ -24,6 +25,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/topology"
 	topologyknowledge "github.com/kubepilot-aiops/kubepilot/internal/topology/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
+	captools "github.com/kubepilot-aiops/kubepilot/tools"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -35,8 +37,12 @@ type Supervisor struct {
 	eventSink         workflowgraph.EventSink
 	hooks             *supervisorHooks
 	skillSnapshotHash string
+	brainSkillHash    string
+	brainToolHash     string
+	brainPolicyHash   string
 	rankingPolicyHash string
 	rerankerService   reranker.Service
+	brainStates       *sync.Map
 }
 
 type supervisorHooks struct{ eventSink workflowgraph.EventSink }
@@ -53,6 +59,23 @@ func (s *Supervisor) RuntimeHashes() (string, string, string) {
 		rerankerHash = s.rerankerService.ConfigHash()
 	}
 	return s.skillSnapshotHash, s.rankingPolicyHash, rerankerHash
+}
+
+// RuntimeHashesForMethod preserves the frozen legacy Skill snapshot for every
+// baseline while selecting the versioned Brain Skill bundle only for the
+// KubePilot Brain strategies.
+func (s *Supervisor) RuntimeHashesForMethod(method string) (string, string, string) {
+	skill, ranking, reranker := s.RuntimeHashes()
+	if domain.IsKubePilotBrainMethod(method) {
+		skill = s.brainSkillHash
+	}
+	return skill, ranking, reranker
+}
+
+// BrainExecutionSnapshot returns the immutable executable dependency set for
+// a new Workflow Attempt. It does not mutate or validate an existing attempt.
+func (s *Supervisor) BrainExecutionSnapshot(modelConfigHash string) domain.ExecutionSnapshot {
+	return domain.ExecutionSnapshot{SkillSnapshotHash: s.brainSkillHash, ModelConfigHash: modelConfigHash, ToolSchemaHash: s.brainToolHash, PolicyHash: s.brainPolicyHash}
 }
 
 type SupervisorDeps struct {
@@ -129,6 +152,25 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 		}
 		return nil
 	}
+	brainResolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		return nil, err
+	}
+	brainDeps := constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory, Transition: transition}
+	brainTools, err := buildBrainCapabilities(brainDeps, brainResolver)
+	if err != nil {
+		return nil, err
+	}
+	brainToolHash, err := brainTools.SchemaHash(ctx, captools.NodeBrainEvidence, captools.NodeBrainRetrieval, captools.NodeBrainReasoning, captools.NodeBrainRecovery, captools.NodeBrainControl)
+	if err != nil {
+		return nil, err
+	}
+	brainStates := &sync.Map{}
+	brainRuntime := &brainGraphRuntime{resolver: brainResolver, tools: brainTools, toolHash: brainToolHash, policyHash: brainruntime.Hash(brainResolver.ToolPolicy()), agents: deps.Agents, deps: brainDeps, states: brainStates}
+	brainGraph, err := buildBrainGraph(ctx, brainRuntime)
+	if err != nil {
+		return nil, err
+	}
 	// WorkflowState is the graph payload: every node returns the same
 	// per-invocation state pointer and every branch receives that output. Do
 	// not maintain a second Eino local state copy here. A local copy and the
@@ -140,9 +182,23 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	add := func(name string, fn func(context.Context, *WorkflowState) (*WorkflowState, error)) error {
 		return g.AddLambdaNode(name, compose.InvokableLambda(fn), compose.WithNodeName(name))
 	}
+	if err := g.AddGraphNode("kubepilot_brain", brainGraph,
+		compose.WithGraphCompileOptions(
+			compose.WithGraphName("kubepilot_brain_loop"),
+			compose.WithMaxRunSteps(BrainGraphMaxSteps),
+		),
+		compose.WithNodeName("kubepilot_brain_loop"),
+	); err != nil {
+		return nil, err
+	}
 	if err := add("incident_intake", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
 		s.Workflow = WorkflowName
-		s.Incident.SkillSnapshotHash = deps.Agents.SkillSnapshotHash()
+		method, _ := domain.NormalizeDiagnosisMethod(s.Incident.DiagnosisMethod)
+		if domain.IsKubePilotBrainMethod(method) {
+			s.Incident.SkillSnapshotHash = brainResolver.SnapshotHash()
+		} else {
+			s.Incident.SkillSnapshotHash = deps.Agents.SkillSnapshotHash()
+		}
 		if deps.RankingPolicy != nil {
 			s.Incident.RankingPolicyHash = deps.RankingPolicy.Hash
 		}
@@ -156,6 +212,16 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 			return s, err
 		}
 		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("brain_recovery_permission", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		return brainRecoveryPermissionNode(ctx, s, transition)
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("brain_dry_run", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		return brainDryRunNode(ctx, s, deps)
 	}); err != nil {
 		return nil, err
 	}
@@ -304,16 +370,32 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 			if errors.Is(err, ErrActionResultUnknown) {
 				status = domain.StatusNeedsAttention
 				execution.Outcome = "unknown"
+				setFinalBrainTermination(s, domain.TerminationExecutionOutcomeUnknown, []string{"recovery mutation outcome could not be confirmed"})
 			} else {
 				execution.Outcome = "failed"
+				if domain.IsKubePilotBrainMethod(s.Incident.DiagnosisMethod) && brainReflectionAvailable(s, domain.ReflectionRecoveryFailure) {
+					trigger := domain.ReflectionRecoveryFailure
+					s.PendingReflection = &trigger
+					s.PendingTermination = domain.TerminationRecoveryFailed
+					s.BrainPhase = domain.BrainPhaseReflection
+					s.ResumeBrainPhase = domain.BrainPhaseEscalation
+					s.Termination = nil
+					if s.Incident.Investigation != nil {
+						s.Incident.Investigation.Termination = nil
+					}
+				} else {
+					setFinalBrainTermination(s, domain.TerminationRecoveryFailed, []string{"registered recovery action failed"})
+				}
 			}
 			s.Errors = append(s.Errors, err.Error())
+			appendBrainStateChange(s, "executor", strings.ToUpper(execution.Outcome), "recovery execution did not produce a confirmed mutation", true, brainApprovalID(s))
 			_ = transition(ctx, s.Incident, status)
 			return s, nil
 		}
 		execution.ConfirmedMutations++
 		execution.Outcome = "succeeded"
 		execution.CompletedAt = time.Now().UTC()
+		appendBrainStateChange(s, "executor", "MUTATION_CONFIRMED", "registered Kubernetes mutation completed", true, brainApprovalID(s))
 		if err := transition(ctx, s.Incident, domain.StatusVerifying); err != nil {
 			return s, err
 		}
@@ -330,13 +412,20 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	if err := add("incident_finalizer", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
 		s.Incident.UpdatedAt = time.Now().UTC()
 		s.Incident.DiagnosisLedger = &s.DiagnosisLedger
+		if s.WorkflowAttempt != nil {
+			s.WorkflowAttempt.Status = domain.WorkflowAttemptCompleted
+			s.WorkflowAttempt.CompletedAt = time.Now().UTC()
+			s.Incident.WorkflowAttempt = s.WorkflowAttempt
+			if s.Incident.Investigation != nil {
+				s.Incident.Investigation.WorkflowAttempt = s.WorkflowAttempt
+			}
+		}
 		return s, nil
 	}); err != nil {
 		return nil, err
 	}
 	for _, edge := range [][2]string{
 		{compose.START, "incident_intake"},
-		{"incident_intake", "cognitive_intent"},
 		{"cognitive_intent", "query_compiler"},
 		{"query_compiler", "evidence_collection"},
 		{"evidence_collection", "signal_assertion_builder"},
@@ -350,6 +439,43 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 		if err := g.AddEdge(edge[0], edge[1]); err != nil {
 			return nil, err
 		}
+	}
+	if err := g.AddBranch("incident_intake", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+		if s == nil || s.Incident == nil {
+			return "", fmt.Errorf("incident intake is missing workflow state")
+		}
+		method, valid := domain.NormalizeDiagnosisMethod(s.Incident.DiagnosisMethod)
+		if !valid {
+			return "", fmt.Errorf("invalid diagnosis method %q", s.Incident.DiagnosisMethod)
+		}
+		if domain.IsKubePilotBrainMethod(method) {
+			return "kubepilot_brain", nil
+		}
+		return "cognitive_intent", nil
+	}, map[string]bool{"kubepilot_brain": true, "cognitive_intent": true})); err != nil {
+		return nil, err
+	}
+	if err := g.AddEdge("kubepilot_brain", "brain_recovery_permission"); err != nil {
+		return nil, err
+	}
+	if err := g.AddBranch("brain_recovery_permission", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+		if s == nil || s.Incident == nil {
+			return "", fmt.Errorf("Brain recovery permission is missing workflow state")
+		}
+		if s.Incident.Status == domain.StatusProposing && s.Incident.Proposal != nil {
+			return "brain_dry_run", nil
+		}
+		return "incident_finalizer", nil
+	}, map[string]bool{"brain_dry_run": true, "incident_finalizer": true})); err != nil {
+		return nil, err
+	}
+	if err := g.AddBranch("brain_dry_run", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+		if s != nil && s.DryRun != nil && s.DryRun.Success && s.Incident != nil && s.Incident.Proposal != nil {
+			return "deterministic_proposal_validator", nil
+		}
+		return "kubepilot_brain", nil
+	}, map[string]bool{"deterministic_proposal_validator": true, "kubepilot_brain": true})); err != nil {
+		return nil, err
 	}
 	if err := g.AddBranch("objective_arbitration", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
 		if s == nil || s.Incident == nil {
@@ -393,20 +519,28 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 		return nil, err
 	}
 	if err := g.AddBranch("deterministic_action_executor", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+		if s.PendingReflection != nil && domain.IsKubePilotBrainMethod(s.Incident.DiagnosisMethod) {
+			return "kubepilot_brain", nil
+		}
 		if s.Incident.Status != domain.StatusVerifying {
 			return "incident_finalizer", nil
 		}
 		return "deterministic_verification_controller", nil
-	}, map[string]bool{"incident_finalizer": true, "deterministic_verification_controller": true})); err != nil {
+	}, map[string]bool{"incident_finalizer": true, "deterministic_verification_controller": true, "kubepilot_brain": true})); err != nil {
 		return nil, err
 	}
-	if err := g.AddEdge("deterministic_verification_controller", "incident_finalizer"); err != nil {
+	if err := g.AddBranch("deterministic_verification_controller", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+		if s.PendingReflection != nil && domain.IsKubePilotBrainMethod(s.Incident.DiagnosisMethod) {
+			return "kubepilot_brain", nil
+		}
+		return "incident_finalizer", nil
+	}, map[string]bool{"incident_finalizer": true, "kubepilot_brain": true})); err != nil {
 		return nil, err
 	}
 	if err := g.AddEdge("incident_finalizer", compose.END); err != nil {
 		return nil, err
 	}
-	options := []compose.GraphCompileOption{compose.WithGraphName(WorkflowName), compose.WithMaxRunSteps(GraphMaxSteps)}
+	options := []compose.GraphCompileOption{compose.WithGraphName(WorkflowName), compose.WithMaxRunSteps(BrainGraphMaxSteps)}
 	if deps.Checkpoints != nil {
 		options = append(options, compose.WithCheckPointStore(deps.Checkpoints))
 	}
@@ -426,7 +560,7 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	if deps.RankingPolicy != nil {
 		rankingHash = deps.RankingPolicy.Hash
 	}
-	return &Supervisor{runnable: run, checkpoints: deleter, hooks: hooks, skillSnapshotHash: deps.Agents.SkillSnapshotHash(), rankingPolicyHash: rankingHash, rerankerService: deps.Reranker}, nil
+	return &Supervisor{runnable: run, checkpoints: deleter, hooks: hooks, skillSnapshotHash: deps.Agents.SkillSnapshotHash(), brainSkillHash: brainResolver.SnapshotHash(), brainToolHash: brainToolHash, brainPolicyHash: brainRuntime.policyHash, rankingPolicyHash: rankingHash, rerankerService: deps.Reranker, brainStates: brainStates}, nil
 }
 
 type verificationRoundResult struct {
@@ -468,6 +602,8 @@ func runVerificationController(ctx context.Context, state *WorkflowState, deps S
 			if err := transition(ctx, state.Incident, domain.StatusResolved); err != nil {
 				return state, err
 			}
+			appendBrainStateChange(state, "verification", "VERIFICATION_SUCCEEDED", combined.Message, true, brainApprovalID(state))
+			setFinalBrainTermination(state, domain.TerminationRecoverySucceeded, nil)
 			return state, nil
 		}
 		remaining := time.Until(deadline)
@@ -477,6 +613,20 @@ func runVerificationController(ctx context.Context, state *WorkflowState, deps S
 			state.Incident.Verification = &combined
 			if err := transition(ctx, state.Incident, domain.StatusRecoveryFailed); err != nil {
 				return state, err
+			}
+			appendBrainStateChange(state, "verification", "VERIFICATION_FAILED", combined.Message, true, brainApprovalID(state))
+			if domain.IsKubePilotBrainMethod(state.Incident.DiagnosisMethod) && brainReflectionAvailable(state, domain.ReflectionVerificationFail) {
+				trigger := domain.ReflectionVerificationFail
+				state.PendingReflection = &trigger
+				state.PendingTermination = domain.TerminationRecoveryFailed
+				state.BrainPhase = domain.BrainPhaseReflection
+				state.ResumeBrainPhase = domain.BrainPhaseEscalation
+				state.Termination = nil
+				if state.Incident.Investigation != nil {
+					state.Incident.Investigation.Termination = nil
+				}
+			} else {
+				setFinalBrainTermination(state, domain.TerminationRecoveryFailed, []string{combined.Message})
 			}
 			return state, nil
 		}
@@ -857,6 +1007,11 @@ func approvalNode(ctx context.Context, s *WorkflowState, transition func(context
 		if err := transition(ctx, s.Incident, domain.StatusAwaitingApproval); err != nil {
 			return s, err
 		}
+		if s.WorkflowAttempt != nil {
+			s.WorkflowAttempt.Status = domain.WorkflowAttemptInterrupted
+			s.WorkflowAttempt.InterruptedAt = time.Now().UTC()
+		}
+		appendBrainStateChange(s, "approval_interrupt", "APPROVAL_REQUESTED", "recovery approval requested", true, "")
 		return s, compose.StatefulInterrupt(ctx, map[string]any{"incident_id": s.Incident.ID, "proposal_id": s.Incident.Proposal.ID, "expires_at": s.Incident.Proposal.ExpiresAt}, &approvalInterruptState{State: s})
 	}
 	if has && state != nil && state.State != nil {
@@ -866,7 +1021,12 @@ func approvalNode(ctx context.Context, s *WorkflowState, transition func(context
 	if !isResume || !hasData || data == nil {
 		return s, fmt.Errorf("approval resume data is required")
 	}
+	if s.WorkflowAttempt != nil {
+		s.WorkflowAttempt.Status = domain.WorkflowAttemptActive
+	}
 	if !data.Approved {
+		appendBrainStateChange(s, "approval_interrupt", "APPROVAL_REJECTED", "operator rejected recovery approval", true, "approval:"+ulid.Make().String())
+		setFinalBrainTermination(s, domain.TerminationApprovalRejected, []string{"operator rejected recovery approval"})
 		if err := transition(ctx, s.Incident, domain.StatusRejected); err != nil {
 			return s, err
 		}
@@ -874,10 +1034,18 @@ func approvalNode(ctx context.Context, s *WorkflowState, transition func(context
 	}
 	s.ExecutionContext = &data.Context
 	s.Incident.ExecutionContext = &data.Context
+	appendBrainStateChange(s, "approval_interrupt", "APPROVAL_GRANTED", "operator approved the frozen recovery plan", true, data.Context.ApprovalID)
 	if err := transition(ctx, s.Incident, domain.StatusRecovering); err != nil {
 		return s, err
 	}
 	return s, nil
+}
+
+func brainApprovalID(state *WorkflowState) string {
+	if state != nil && state.ExecutionContext != nil {
+		return state.ExecutionContext.ApprovalID
+	}
+	return ""
 }
 func validateExecutionContext(s *WorkflowState) error {
 	if s.ExecutionContext == nil || s.Incident.Proposal == nil || s.DryRun == nil {
@@ -909,22 +1077,42 @@ func safeIncident(in *domain.Incident) map[string]any {
 func (s *Supervisor) Run(ctx context.Context, in *domain.Incident) (*WorkflowState, error) {
 	handler := workflowgraph.NewEinoCallback(in.ID, s.eventSink)
 	ctx = withAgentCallbacks(ctx, handler)
-	state, err := s.runnable.Invoke(ctx, &WorkflowState{Workflow: WorkflowName, Incident: in, ModelSnapshotHash: in.ModelConfigHash}, compose.WithCheckPointID("incident:"+in.ID), compose.WithRuntimeMaxSteps(GraphMaxSteps), compose.WithCallbacks(handler))
+	initial := &WorkflowState{Workflow: WorkflowName, Incident: in, ModelSnapshotHash: in.ModelConfigHash, WorkflowAttempt: in.WorkflowAttempt}
+	if in.ExecutionSnapshot != nil {
+		initial.ExecutionSnapshot = *in.ExecutionSnapshot
+	}
+	maxSteps := GraphMaxSteps
+	if domain.IsKubePilotBrainMethod(in.DiagnosisMethod) {
+		maxSteps = BrainGraphMaxSteps
+		ctx = withBrainWorkflowState(ctx, initial)
+		ctx = withBrainStateRegistry(ctx, s.brainStates, in.ID)
+		if s.brainStates != nil {
+			s.brainStates.Store(in.ID, initial)
+		}
+	}
+	state, err := s.runnable.Invoke(ctx, initial, compose.WithCheckPointID("incident:"+in.ID), compose.WithRuntimeMaxSteps(maxSteps), compose.WithCallbacks(handler))
 	if err == nil && s.checkpoints != nil {
 		_ = s.checkpoints.Delete(ctx, "incident:"+in.ID)
+	}
+	if s.brainStates != nil {
+		s.brainStates.Delete(in.ID)
 	}
 	return state, err
 }
 func (s *Supervisor) Resume(ctx context.Context, id, interruptID string, data *ApprovalResumeData) (*WorkflowState, error) {
 	ctx = compose.ResumeWithData(ctx, interruptID, data)
+	ctx = withBrainStateRegistry(ctx, s.brainStates, id)
 	handler := workflowgraph.NewEinoCallback(id, s.eventSink)
 	ctx = withAgentCallbacks(ctx, handler)
 	// A checkpoint resume must use a nil input. Supplying a fresh empty state
 	// would replace the state restored by Eino before the interrupt boundary and
 	// can cause upstream collection nodes to run again.
-	state, err := s.runnable.Invoke(ctx, nil, compose.WithCheckPointID("incident:"+id), compose.WithRuntimeMaxSteps(GraphMaxSteps), compose.WithCallbacks(handler))
+	state, err := s.runnable.Invoke(ctx, nil, compose.WithCheckPointID("incident:"+id), compose.WithRuntimeMaxSteps(BrainGraphMaxSteps), compose.WithCallbacks(handler))
 	if err == nil && s.checkpoints != nil {
 		_ = s.checkpoints.Delete(ctx, "incident:"+id)
+	}
+	if s.brainStates != nil {
+		s.brainStates.Delete(id)
 	}
 	return state, err
 }

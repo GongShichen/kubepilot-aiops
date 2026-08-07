@@ -1,0 +1,4 @@
+interface:
+  display_name: "brain-kernel"
+  short_description: "KubePilot brain-kernel procedure"
+  default_prompt: "Apply the brain-kernel procedure to the current grounded incident state."

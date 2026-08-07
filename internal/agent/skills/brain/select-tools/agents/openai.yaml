@@ -1,0 +1,4 @@
+interface:
+  display_name: "select-tools"
+  short_description: "KubePilot select-tools procedure"
+  default_prompt: "Apply the select-tools procedure to the current grounded incident state."

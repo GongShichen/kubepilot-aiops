@@ -1,0 +1,4 @@
+interface:
+  display_name: "verify-recovery"
+  short_description: "KubePilot verify-recovery procedure"
+  default_prompt: "Apply the verify-recovery procedure to the current grounded incident state."

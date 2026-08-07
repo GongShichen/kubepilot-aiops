@@ -1,0 +1,4 @@
+interface:
+  display_name: "investigate-traces"
+  short_description: "KubePilot investigate-traces procedure"
+  default_prompt: "Apply the investigate-traces procedure to the current grounded incident state."

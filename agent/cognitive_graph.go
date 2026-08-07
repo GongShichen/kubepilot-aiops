@@ -31,7 +31,7 @@ func cognitiveModeForMethod(method string) (cognitiveDiagnosisMode, bool) {
 		return cognitiveDiagnosisMode{}, true
 	case domain.DiagnosisMethodCognitive:
 		return cognitiveDiagnosisMode{Cognitive: true}, true
-	case domain.DiagnosisMethodActive, domain.DiagnosisMethodKubePilot:
+	case domain.DiagnosisMethodActive:
 		return cognitiveDiagnosisMode{Cognitive: true, Active: true}, true
 	default:
 		return cognitiveDiagnosisMode{}, false

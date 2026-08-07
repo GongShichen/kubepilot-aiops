@@ -48,12 +48,16 @@ func (i *parallelInjector) Inject(ctx context.Context, scenario scenarios.Scenar
 type parallelClient struct{}
 
 func (*parallelClient) Create(_ context.Context, scenario scenarios.Scenario) (*domain.Incident, error) {
-	return &domain.Incident{ID: scenario.ID, Status: domain.StatusNeedsAttention, Namespace: scenario.Namespace}, nil
+	return &domain.Incident{ID: scenario.ID, Status: domain.StatusNeedsAttention, Namespace: scenario.Namespace, Investigation: completedParallelInvestigation()}, nil
 }
 func (*parallelClient) Get(_ context.Context, id string) (*domain.Incident, error) {
-	return &domain.Incident{ID: id, Status: domain.StatusNeedsAttention}, nil
+	return &domain.Incident{ID: id, Status: domain.StatusNeedsAttention, Investigation: completedParallelInvestigation()}, nil
 }
 func (*parallelClient) Approve(context.Context, *domain.Incident) error { return nil }
+
+func completedParallelInvestigation() *domain.Investigation {
+	return &domain.Investigation{Architecture: "test-runtime", CompletedAt: time.Now().UTC()}
+}
 
 func TestParallelRunnerUsesStableIsolatedShardsAndGlobalGate(t *testing.T) {
 	probe := &concurrencyProbe{seen: map[string]bool{}}

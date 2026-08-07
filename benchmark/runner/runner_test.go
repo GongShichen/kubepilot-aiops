@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kubepilot-aiops/kubepilot/benchmark/injector"
+	"github.com/kubepilot-aiops/kubepilot/benchmark/reporter"
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
@@ -260,5 +261,28 @@ func TestRunnerWaitsForCompletedInvestigationAfterTerminalStatusEvent(t *testing
 	}
 	if incident.RootCauseVariant != "redis_unavailable" || incident.Investigation == nil || incident.Investigation.CompletedAt.IsZero() {
 		t.Fatalf("returned an incomplete diagnosis: %+v", incident)
+	}
+}
+
+func TestPopulateHypothesisTopKUsesOnlyAdmittedCurrentBrainRevisions(t *testing.T) {
+	now := time.Now().UTC()
+	scenario := scenarios.Scenario{Variant: "cpu_saturation", GroundTruth: scenarios.GroundTruth{RootCauseCategory: "resource", Service: "payment", Resource: "payment"}}
+	incident := &domain.Incident{Investigation: &domain.Investigation{
+		Architecture: "eino-native-self-reflective-brain",
+		HypothesisAdmissions: []domain.HypothesisAdmission{
+			{HypothesisRevisionID: "wrong", Decision: "ADMITTED"},
+			{HypothesisRevisionID: "correct", Decision: "ADMITTED"},
+			{HypothesisRevisionID: "refuted", Decision: "ADMITTED"},
+		},
+		AgentHypotheses: []domain.AgentHypothesis{
+			{ID: "refuted", Category: "resource", Mechanism: "cpu_saturation", TargetRefs: []domain.ResourceRef{{Service: "payment", Resource: "payment"}}, ModelConfidence: .99, Status: domain.HypothesisRefuted, CreatedAt: now},
+			{ID: "wrong", Category: "dependency", Mechanism: "timeout", TargetRefs: []domain.ResourceRef{{Service: "payment", Resource: "payment"}}, ModelConfidence: .8, Status: domain.HypothesisInvestigating, CreatedAt: now},
+			{ID: "correct", Category: "resource", Mechanism: "cpu_saturation", TargetRefs: []domain.ResourceRef{{Service: "payment", Resource: "payment"}}, ModelConfidence: .7, Status: domain.HypothesisSupported, CreatedAt: now},
+		},
+	}}
+	var result reporter.CaseResult
+	populateHypothesisTopK(&result, scenario, incident)
+	if result.HypothesisTop1Correct || !result.HypothesisTop3Correct {
+		t.Fatalf("unexpected hypothesis Top-K result: %+v", result)
 	}
 }

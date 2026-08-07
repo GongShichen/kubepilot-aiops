@@ -2,6 +2,9 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -9,6 +12,7 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 type ToolCategory string
@@ -31,6 +35,11 @@ const (
 	NodeRecoveryReact    = "recovery_react"
 	NodeSupervisorReact  = "supervisor_react"
 	NodeActionExecutor   = "deterministic_action_executor"
+	NodeBrainEvidence    = "brain_evidence_tools"
+	NodeBrainRetrieval   = "brain_retrieval_tools"
+	NodeBrainReasoning   = "brain_reasoning_tools"
+	NodeBrainRecovery    = "brain_recovery_tools"
+	NodeBrainControl     = "brain_control_tools"
 )
 
 type Registration struct {
@@ -179,6 +188,71 @@ func (r *Registry) ToolsForNode(node string) ([]tool.BaseTool, error) {
 		out = append(out, r.items[name].tool)
 	}
 	return out, nil
+}
+
+func (r *Registry) ToolInfosForNode(ctx context.Context, node string) ([]*schema.ToolInfo, error) {
+	items, err := r.ToolsForNode(node)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]*schema.ToolInfo, 0, len(items))
+	for _, item := range items {
+		info, infoErr := item.Info(ctx)
+		if infoErr != nil {
+			return nil, infoErr
+		}
+		infos = append(infos, info)
+	}
+	return infos, nil
+}
+
+// SchemaHash freezes the exact model-visible schemas and registration policy
+// for an Execution Snapshot. Handler implementation details are represented by
+// the source hash recorded by the deployment.
+func (r *Registry) SchemaHash(ctx context.Context, nodes ...string) (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	type schemaRecord struct {
+		Node         string           `json:"node"`
+		Name         string           `json:"name"`
+		Info         *schema.ToolInfo `json:"info"`
+		Registration Registration     `json:"registration"`
+	}
+	records := []schemaRecord{}
+	seen := map[string]bool{}
+	for _, node := range nodes {
+		for name, item := range r.items {
+			allowed := false
+			for _, candidate := range item.meta.AllowedNodes {
+				if candidate == node {
+					allowed = true
+					break
+				}
+			}
+			key := node + "\x00" + name
+			if !allowed || seen[key] {
+				continue
+			}
+			seen[key] = true
+			info, err := item.tool.Info(ctx)
+			if err != nil {
+				return "", err
+			}
+			records = append(records, schemaRecord{Node: node, Name: name, Info: info, Registration: item.meta})
+		}
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Node != records[j].Node {
+			return records[i].Node < records[j].Node
+		}
+		return records[i].Name < records[j].Name
+	})
+	raw, err := json.Marshal(records)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 // ToolsNodeConfig is the single bridge from KubePilot capabilities to Eino

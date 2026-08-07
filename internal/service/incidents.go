@@ -274,6 +274,20 @@ func (m *IncidentManager) Retry(ctx context.Context, id string) (*domain.Inciden
 	if in.Status != domain.StatusNeedsAttention && in.Status != domain.StatusRecoveryFailed {
 		return nil, fmt.Errorf("incident cannot be retried from %s", in.Status)
 	}
+	now := time.Now().UTC()
+	brainAttempt := domain.IsKubePilotBrainMethod(in.DiagnosisMethod)
+	var migratedFrom string
+	sequence := 1
+	if brainAttempt && in.WorkflowAttempt != nil {
+		migratedFrom = in.WorkflowAttempt.ID
+		sequence = in.WorkflowAttempt.Sequence + 1
+		in.WorkflowAttempt.Status = domain.WorkflowAttemptInvalidated
+		in.WorkflowAttempt.CompletedAt = now
+		in.WorkflowAttempt.InvalidatedArtifactIDs = workflowAttemptArtifacts(in)
+		if err = m.Store.Update(ctx, in); err != nil {
+			return nil, fmt.Errorf("invalidate previous Workflow Attempt: %w", err)
+		}
+	}
 	if err = domain.Transition(in, domain.StatusReceived); err != nil {
 		return nil, err
 	}
@@ -286,16 +300,60 @@ func (m *IncidentManager) Retry(ctx context.Context, id string) (*domain.Inciden
 	in.DiagnosisError = ""
 	in.SkillSnapshotHash, in.RankingPolicyHash, in.RerankerConfigHash = "", "", ""
 	in.AgentBudget, in.DiagnosisLedger = nil, nil
-	in.UpdatedAt = time.Now().UTC()
+	if brainAttempt {
+		in.Investigation = nil
+		in.ExecutionSnapshot = nil
+		in.WorkflowAttempt = &domain.WorkflowAttempt{ID: "attempt:" + ulid.Make().String(), IncidentID: in.ID, Sequence: sequence, CheckpointID: "incident:" + in.ID, Status: domain.WorkflowAttemptActive, MigratedFromAttemptID: migratedFrom, StartedAt: now}
+	}
+	in.UpdatedAt = now
 	if m.Checkpoints != nil {
 		_ = m.Checkpoints.Delete(ctx, "incident:"+id)
 	}
 	if err = m.Store.Update(ctx, in); err != nil {
 		return nil, err
 	}
-	m.audit(ctx, id, "incident_retried", "diagnosis workflow restarted", nil)
-	go m.diagnose(id)
+	if brainAttempt {
+		m.audit(ctx, id, "workflow_attempt_migrated", "diagnosis workflow restarted with a new immutable attempt", map[string]any{"attempt_id": in.WorkflowAttempt.ID, "sequence": sequence, "migrated_from_attempt_id": migratedFrom})
+	} else {
+		m.audit(ctx, id, "incident_retried", "diagnosis workflow restarted", nil)
+	}
+	if m.Supervisor != nil {
+		go m.diagnose(id)
+	}
 	return in, nil
+}
+
+func (m *IncidentManager) MigrateWorkflowAttempt(ctx context.Context, id string) (*domain.Incident, error) {
+	in, err := m.Store.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !domain.IsKubePilotBrainMethod(in.DiagnosisMethod) {
+		return nil, fmt.Errorf("workflow attempt migration is available only for KubePilot Brain strategies")
+	}
+	return m.Retry(ctx, id)
+}
+
+func workflowAttemptArtifacts(in *domain.Incident) []string {
+	if in == nil {
+		return nil
+	}
+	values := []string{}
+	if in.Investigation != nil {
+		if in.Investigation.AgentDiagnosis != nil {
+			values = append(values, in.Investigation.AgentDiagnosis.ID)
+		}
+		if in.Investigation.AgentRecoveryPlan != nil {
+			values = append(values, in.Investigation.AgentRecoveryPlan.ID)
+		}
+	}
+	if in.Proposal != nil {
+		values = append(values, in.Proposal.ID)
+	}
+	if in.DryRun != nil && in.DryRun.MutationSpecHash != "" {
+		values = append(values, "dry-run:"+in.DryRun.MutationSpecHash)
+	}
+	return values
 }
 func (m *IncidentManager) diagnose(id string) {
 	// An incident may legitimately require multiple bounded Agent turns and
@@ -314,6 +372,11 @@ func (m *IncidentManager) diagnose(id string) {
 		SnapshotIdentity() (string, string, string)
 	}); ok {
 		in.ModelConfigHash, in.ModelProtocol, in.ModelName = identity.SnapshotIdentity()
+	}
+	if domain.IsKubePilotBrainMethod(in.DiagnosisMethod) && in.WorkflowAttempt != nil && in.WorkflowAttempt.ExecutionSnapshot == (domain.ExecutionSnapshot{}) {
+		snapshot := m.Supervisor.BrainExecutionSnapshot(in.ModelConfigHash)
+		in.ExecutionSnapshot = &snapshot
+		in.WorkflowAttempt.ExecutionSnapshot = snapshot
 	}
 	state, err := m.Supervisor.Run(workflowCtx, in)
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -396,7 +459,7 @@ func (m *IncidentManager) resumeWorkflow(id string, approved bool, idempotencyKe
 	if err != nil {
 		return
 	}
-	currentSkill, currentRanking, currentReranker := m.Supervisor.RuntimeHashes()
+	currentSkill, currentRanking, currentReranker := m.Supervisor.RuntimeHashesForMethod(in.DiagnosisMethod)
 	if in.SkillSnapshotHash != currentSkill || in.RankingPolicyHash != currentRanking || in.RerankerConfigHash != currentReranker {
 		_ = domain.Transition(in, domain.StatusNeedsAttention)
 		in.DiagnosisError = "workflow runtime configuration changed; explicit retry is required"

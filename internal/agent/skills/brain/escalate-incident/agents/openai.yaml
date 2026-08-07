@@ -1,0 +1,4 @@
+interface:
+  display_name: "escalate-incident"
+  short_description: "KubePilot escalate-incident procedure"
+  default_prompt: "Apply the escalate-incident procedure to the current grounded incident state."
