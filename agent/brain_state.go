@@ -40,8 +40,12 @@ func (r *brainGraphRuntime) classifyToolResults(ctx context.Context, messages []
 		if output.Provenance.WindowEnd.IsZero() {
 			output.Provenance.WindowEnd = output.Provenance.ObservedAt
 		}
+		if len(output.Provenance.TargetRefs) == 0 {
+			output.Provenance.TargetRefs = brainProvenanceTargets(state, envelope)
+		}
 		result := domain.ToolResultRecord{Class: output.Class, Provenance: output.Provenance, Status: output.Status, Summary: output.Summary, NewInformation: output.NewInformation, ConstraintCode: output.ConstraintCode, Infrastructure: output.Infrastructure, OccurredAt: time.Now().UTC()}
 		state.ToolExecutions = append(state.ToolExecutions, domain.BrainToolExecution{Envelope: envelope, Result: result})
+		state.Observations = append(state.Observations, result)
 		// Closing actions and rejected attempts after exhaustion remain fully
 		// audited, but cannot push usage beyond MaxToolCalls.
 		if !state.BrainBudget.ToolCallsExhausted {
@@ -69,9 +73,9 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 		state.Incident.Evidence = mergeEvidence(state.Incident.Evidence, output.Evidence)
 	}
 	if len(output.Patterns) > 0 {
-		state.CausalPatterns = append([]domain.CausalPattern(nil), output.Patterns...)
+		state.BrainCausalPatterns = append([]domain.CausalPattern(nil), output.Patterns...)
 	}
-	if len(output.Candidates) > 0 || len(output.Patterns) > 0 {
+	if len(output.HistoricalIncidents) > 0 || len(output.Patterns) > 0 || len(output.Memory) > 0 {
 		r.auditRetrieval(state, output)
 	}
 	for _, hypothesis := range output.Hypotheses {
@@ -117,6 +121,9 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 	if output.GroundingDelta != nil {
 		state.GroundingDeltas = append(state.GroundingDeltas, *output.GroundingDelta)
 	}
+	if len(output.Comparisons) > 0 {
+		state.HypothesisComparisons = append(state.HypothesisComparisons, output.Comparisons...)
+	}
 	if output.BeliefDelta != nil {
 		state.BeliefDeltas = append(state.BeliefDeltas, *output.BeliefDelta)
 	}
@@ -125,7 +132,9 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 		state.BrainPhase, state.ActiveToolCategory = domain.BrainPhasePlanning, domain.BrainToolReasoning
 	}
 	if output.InvestigationPlan != nil {
-		state.Incident.Investigation.Plan = *output.InvestigationPlan
+		plan := *output.InvestigationPlan
+		state.InvestigationPlan = &plan
+		state.Incident.Investigation.Plan = plan
 		state.BrainPhase, state.ActiveToolCategory = domain.BrainPhaseInvestigation, domain.BrainToolReasoning
 	}
 	if output.Diagnosis != nil {
@@ -146,10 +155,19 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 				state.Incident.RootCauseResource = target.Service
 			}
 		}
-		if output.Diagnosis.Provisional {
-			state.BrainPhase, state.ActiveToolCategory = domain.BrainPhaseEscalation, domain.BrainToolControl
-		} else {
-			state.BrainPhase, state.ActiveToolCategory = domain.BrainPhaseRecovery, domain.BrainToolRecovery
+		if output.DiagnosisFinalized {
+			if output.Diagnosis.Provisional {
+				state.BrainPhase, state.ActiveToolCategory = domain.BrainPhaseEscalation, domain.BrainToolControl
+			} else {
+				state.BrainPhase, state.ActiveToolCategory = domain.BrainPhaseRecovery, domain.BrainToolRecovery
+			}
+		}
+	}
+	if output.DiagnosisValidation != nil {
+		state.DiagnosisValidations = append(state.DiagnosisValidations, *output.DiagnosisValidation)
+		if !output.DiagnosisValidation.Valid {
+			trigger := domain.ReflectionGroundingFailure
+			state.PendingReflection = &trigger
 		}
 	}
 	if output.RecoveryPlan != nil {
@@ -228,11 +246,17 @@ func (r *brainGraphRuntime) auditRetrieval(state *WorkflowState, output brainCap
 	}
 	execution := state.ToolExecutions[len(state.ToolExecutions)-1]
 	event := domain.MemoryAccessEvent{IncidentID: state.Incident.ID, Agent: "kubepilot-brain", Scope: domain.MemoryScope{Cluster: state.Incident.Cluster, Namespace: state.Incident.Namespace}, QueryHash: brainruntime.Hash(execution.Envelope.Intent), PolicyVersion: state.ExecutionSnapshot.PolicyHash, CreatedAt: time.Now().UTC()}
-	if len(output.Candidates) > 0 {
+	if len(output.HistoricalIncidents) > 0 {
 		event.Kind = domain.MemoryEpisodic
-		for _, candidate := range output.Candidates {
+		for _, candidate := range output.HistoricalIncidents {
 			event.ResultIDs = append(event.ResultIDs, candidate.IncidentID)
 			event.Results = append(event.Results, domain.MemoryAccessResult{ID: candidate.IncidentID, Score: candidate.Rank.FinalScore, Version: candidate.Revision})
+		}
+	} else if len(output.Memory) > 0 {
+		event.Kind = domain.MemoryProcedural
+		for _, item := range output.Memory {
+			event.ResultIDs = append(event.ResultIDs, item.ID)
+			event.Results = append(event.Results, domain.MemoryAccessResult{ID: item.ID, Score: item.Score, Version: item.Version})
 		}
 	} else {
 		event.Kind = domain.MemorySemantic
@@ -376,6 +400,9 @@ func (r *brainGraphRuntime) syncInvestigation(state *WorkflowState) {
 		return
 	}
 	inv := state.Incident.Investigation
+	if state.InvestigationPlan != nil {
+		inv.Plan = *state.InvestigationPlan
+	}
 	inv.BrainTurns = append([]domain.BrainTurn(nil), state.BrainTurns...)
 	inv.AssistantTurns = append([]domain.AssistantTurnRecord(nil), state.AssistantTurns...)
 	inv.IncidentUnderstanding = state.IncidentUnderstanding
@@ -384,10 +411,12 @@ func (r *brainGraphRuntime) syncInvestigation(state *WorkflowState) {
 	inv.AgentHypotheses = append([]domain.AgentHypothesis(nil), state.AgentHypotheses...)
 	inv.HypothesisAdmissions = append([]domain.HypothesisAdmission(nil), state.HypothesisAdmissions...)
 	inv.HypothesisGroundings = append([]domain.HypothesisGrounding(nil), state.HypothesisGroundings...)
+	inv.HypothesisComparisons = append([]domain.HypothesisComparison(nil), state.HypothesisComparisons...)
 	inv.GroundingDeltas = append([]domain.GroundingDelta(nil), state.GroundingDeltas...)
 	inv.BeliefDeltas = append([]domain.BeliefDelta(nil), state.BeliefDeltas...)
 	inv.Reflections = append([]domain.ReflectionRecord(nil), state.Reflections...)
-	inv.AgentDiagnosis, inv.AgentRecoveryPlan, inv.Termination = state.AgentDiagnosis, state.AgentRecoveryPlan, state.Termination
+	inv.AgentDiagnosis, inv.AgentRecoveryPlan, inv.RecoveryPermission, inv.Termination = state.AgentDiagnosis, state.AgentRecoveryPlan, state.RecoveryPermission, state.Termination
+	inv.DiagnosisValidations = append([]domain.DiagnosisValidation(nil), state.DiagnosisValidations...)
 	inv.BrainBudget, inv.ExecutionSnapshot = &state.BrainBudget, &state.ExecutionSnapshot
 	inv.WorkflowAttempt = state.WorkflowAttempt
 	inv.Signals, inv.Assertions = collectSignals(state.Incident.Evidence), append([]domain.StateAssertion(nil), state.StateAssertions...)
@@ -418,13 +447,35 @@ func envelopeFromToolCall(state *WorkflowState, callID, toolName string) domain.
 	return domain.AgentActionEnvelope{ActionID: callID, IncidentID: state.Incident.ID, TurnID: currentBrainTurnID(state), Phase: state.BrainPhase, ToolName: toolName, ToolCategory: categoryForToolName(toolName), SkillRefs: append([]domain.SkillRef(nil), state.ActiveSkillRefs...), EvidenceSnapshotHash: state.EvidenceSnapshotHash, IdempotencyKey: brainruntime.Hash(struct{ Incident, Call string }{state.Incident.ID, callID}), Intent: intent}
 }
 
+func brainProvenanceTargets(state *WorkflowState, envelope domain.AgentActionEnvelope) []domain.ResourceRef {
+	refs := append([]domain.ResourceRef(nil), envelope.Intent.TargetScope...)
+	for _, hypothesisID := range envelope.Intent.HypothesisIDs {
+		if hypothesis, ok := findAgentHypothesis(state.AgentHypotheses, hypothesisID); ok {
+			refs = append(refs, hypothesis.TargetRefs...)
+		}
+	}
+	if len(refs) == 0 && state != nil && state.Incident != nil {
+		refs = append(refs, domain.ResourceRef{Namespace: state.Incident.Namespace, Service: state.Incident.Service, Resource: state.Incident.Resource, Kind: "IncidentScope"})
+	}
+	seen := map[string]bool{}
+	out := make([]domain.ResourceRef, 0, len(refs))
+	for _, ref := range refs {
+		key := ref.Namespace + "\x00" + ref.Service + "\x00" + ref.Resource + "\x00" + ref.Kind
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
 func categoryForToolName(name string) domain.BrainToolCategory {
 	switch name {
-	case "query_prometheus_evidence", "query_loki_evidence", "query_trace_evidence", "query_kubernetes_evidence":
+	case "query_metrics", "search_logs", "query_traces", "inspect_kubernetes", "discover_resources":
 		return domain.BrainToolEvidence
-	case "retrieve_incidents", "retrieve_causal_patterns":
+	case "retrieve_incidents", "retrieve_runbooks", "retrieve_patterns":
 		return domain.BrainToolRetrieval
-	case "submit_hypotheses", "revise_hypothesis", "validate_hypothesis", "commit_belief_delta", "submit_diagnosis", "submit_investigation_plan":
+	case "submit_hypotheses", "revise_hypothesis", "validate_hypothesis", "compare_hypotheses", "commit_belief_delta", "submit_diagnosis", "validate_diagnosis", "submit_investigation_plan":
 		return domain.BrainToolReasoning
 	case "submit_recovery_plan":
 		return domain.BrainToolRecovery

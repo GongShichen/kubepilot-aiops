@@ -50,6 +50,7 @@ func brainRecoveryPermissionNode(ctx context.Context, state *WorkflowState, tran
 	if eligibility.Allowed {
 		permission.Level, permission.Reason = "AUTO", "complete grounded diagnosis chain and snapshot consistency"
 	}
+	state.RecoveryPermission = permission
 	state.Incident.Investigation.RecoveryPermission = permission
 	if !eligibility.Allowed || state.AgentRecoveryPlan == nil {
 		if state.AgentRecoveryPlan == nil && reason == "" {
@@ -86,7 +87,7 @@ func brainDryRunNode(ctx context.Context, state *WorkflowState, deps SupervisorD
 	result, err := dryRunProposal(ctx, deps.Executor, state.Incident)
 	state.DryRun, state.Incident.DryRun = result, result
 	now := time.Now().UTC()
-	provenance := domain.ToolResultProvenance{ToolCallID: "dry-run:" + ulid.Make().String(), ToolName: "dry_run", ToolSchemaHash: state.ExecutionSnapshot.ToolSchemaHash, Collector: "safety-kernel", WindowStart: now, WindowEnd: now, ObservedAt: now, ParserVersion: "dry-run-v1"}
+	provenance := domain.ToolResultProvenance{ToolCallID: "dry-run:" + ulid.Make().String(), ToolName: "dry_run_recovery", ToolSchemaHash: state.ExecutionSnapshot.ToolSchemaHash, Collector: "safety-kernel", WindowStart: now, WindowEnd: now, ObservedAt: now, ParserVersion: "dry-run-v1"}
 	if state.Incident.Proposal != nil && result != nil {
 		provenance.MutationSpecHash, provenance.TargetUID, provenance.ResourceVersion = result.MutationSpecHash, state.Incident.Proposal.TargetUID, state.Incident.Proposal.ResourceVersion
 		provenance.TargetRefs = []domain.ResourceRef{{Namespace: state.Incident.Proposal.Namespace, Resource: state.Incident.Proposal.Target}}
@@ -101,7 +102,7 @@ func brainDryRunNode(ctx context.Context, state *WorkflowState, deps SupervisorD
 		state.BrainPhase, state.ActiveToolCategory = domain.BrainPhaseRecovery, domain.BrainToolRecovery
 		state.AgentRecoveryPlan, state.Incident.Proposal = nil, nil
 	}
-	state.ToolExecutions = append(state.ToolExecutions, domain.BrainToolExecution{Envelope: domain.AgentActionEnvelope{ActionID: provenance.ToolCallID, IncidentID: state.Incident.ID, TurnID: currentBrainTurnID(state), Phase: domain.BrainPhaseRecovery, ToolName: "dry_run", ToolCategory: domain.BrainToolRecovery, EvidenceSnapshotHash: state.EvidenceSnapshotHash}, Result: record})
+	state.ToolExecutions = append(state.ToolExecutions, domain.BrainToolExecution{Envelope: domain.AgentActionEnvelope{ActionID: provenance.ToolCallID, IncidentID: state.Incident.ID, TurnID: currentBrainTurnID(state), Phase: domain.BrainPhaseRecovery, ToolName: "dry_run_recovery", ToolCategory: domain.BrainToolRecovery, EvidenceSnapshotHash: state.EvidenceSnapshotHash}, Result: record})
 	return state, nil
 }
 

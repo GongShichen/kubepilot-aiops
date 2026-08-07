@@ -190,7 +190,7 @@ func parseBrainSkill(raw []byte) (string, string, string, error) {
 		return "", "", "", fmt.Errorf("name and description are required")
 	}
 	content := strings.TrimSpace(parts[1])
-	for _, heading := range []string{"## Preconditions", "## Inputs", "## Procedure", "## Allowed actions", "## Output contract", "## Stop and failure conditions", "## Handoff"} {
+	for _, heading := range []string{"## Preconditions", "## Server-Owned Inputs", "## Procedure", "## Allowed Tools", "## Required IDs", "## Output Contract", "## Output Example", "## Stop & Failure Conditions", "## Handoff"} {
 		if !strings.Contains(content, heading) {
 			return "", "", "", fmt.Errorf("missing %s", heading)
 		}

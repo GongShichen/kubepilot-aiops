@@ -15,6 +15,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/kubepilot-aiops/kubepilot/internal/brainruntime"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	captools "github.com/kubepilot-aiops/kubepilot/tools"
 )
 
 type brainGraphModel struct {
@@ -101,6 +102,9 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 		}
 		return call("commit_belief_delta", map[string]any{"intent": fmt.Sprintf("revise belief after %d current evidence records", len(payload.Evidence)), "expected_observation": []string{"audited subjective belief delta"}, "hypothesis_id": selected, "new_confidence": maxFloat(.05, confidence[selected]-.1), "direction": "decrease", "evidence_ids": evidenceIDs, "revision_required": false})
 	case domain.BrainPhaseDiagnosis:
+		if payload.Diagnosis != nil {
+			return call("validate_diagnosis", map[string]any{"intent": "append Runtime grounding and snapshot validation", "expected_observation": []string{"validated or provisional diagnosis status"}, "diagnosis_id": payload.Diagnosis.ID})
+		}
 		grounding := payload.Groundings[0]
 		return call("submit_diagnosis", map[string]any{"intent": "select the best grounded hypothesis", "expected_observation": []string{"persisted LLM diagnosis with separate Runtime grounding"}, "hypothesis_id": grounding.HypothesisRevisionID, "statement": "gateway is degraded by local resource pressure", "category": "resource", "mechanism": "resource pressure", "targets": []any{target}, "model_confidence": confidence[grounding.HypothesisRevisionID], "evidence_ids": grounding.Evidence.SupportingEvidenceIDs, "validation_result_ids": []string{grounding.ID}})
 	case domain.BrainPhaseRecovery:
@@ -121,8 +125,8 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 			hasKubernetes = hasKubernetes || item.Source == "kubernetes"
 		}
 		if !hasMetric {
-			if available["query_prometheus_evidence"] {
-				return call("query_prometheus_evidence", map[string]any{"intent": "test local resource pressure", "expected_observation": []string{"current resource saturation facts"}, "targets": []any{target}, "hypothesis_ids": hypothesisIDs, "evidence_need": []string{"resource pressure signal"}, "signal_kinds": []string{"cpu", "memory"}, "window_minutes": 5})
+			if available["query_metrics"] {
+				return call("query_metrics", map[string]any{"intent": "test local resource pressure", "expected_observation": []string{"current resource saturation facts"}, "targets": []any{target}, "hypothesis_ids": hypothesisIDs, "evidence_need": []string{"resource pressure signal"}, "signal_kinds": []string{"cpu", "memory"}, "window_minutes": 5})
 			}
 			if strings.Contains(system, `<skill id="investigate-metrics"`) {
 				return call("select_tool_category", map[string]any{"intent": "activate the metric evidence boundary", "expected_observation": []string{"Evidence ToolsNode selected for the next turn"}, "category": "EVIDENCE"})
@@ -137,8 +141,8 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 			return call("request_skills", map[string]any{"intent": "load the metric investigation procedure", "expected_observation": []string{"versioned metric Skill activation decision"}, "skill_ids": []string{"investigate-metrics"}, "reason": "resource pressure is a leading discriminating observation", "trigger": "HYPOTHESIS_CONFLICT"})
 		}
 		if !hasKubernetes {
-			if available["query_kubernetes_evidence"] {
-				return call("query_kubernetes_evidence", map[string]any{"intent": "obtain an independent Kubernetes source", "expected_observation": []string{"current workload readiness and restart facts"}, "targets": []any{target}, "hypothesis_ids": hypothesisIDs, "evidence_need": []string{"resource pressure signal"}, "signal_kinds": []string{"workload", "pod"}, "window_minutes": 5})
+			if available["inspect_kubernetes"] {
+				return call("inspect_kubernetes", map[string]any{"intent": "obtain an independent Kubernetes source", "expected_observation": []string{"current workload readiness and restart facts"}, "targets": []any{target}, "hypothesis_ids": hypothesisIDs, "evidence_need": []string{"resource pressure signal"}, "signal_kinds": []string{"workload", "pod"}, "window_minutes": 5})
 			}
 			if strings.Contains(system, `<skill id="inspect-kubernetes"`) {
 				return call("select_tool_category", map[string]any{"intent": "activate the Kubernetes evidence boundary", "expected_observation": []string{"Evidence ToolsNode selected for the next turn"}, "category": "EVIDENCE"})
@@ -218,7 +222,7 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 		t.Fatalf("unexpected pre-approval termination/attempt: termination=%+v attempt=%+v history=%v", inv.Termination, inv.WorkflowAttempt, brainModel.history)
 	}
 	for _, execution := range inv.ToolExecutions {
-		if execution.Result.Provenance.ToolCallID == "" || execution.Result.Provenance.ToolName == "" || execution.Result.Provenance.ToolSchemaHash == "" || execution.Result.Provenance.ObservedAt.IsZero() {
+		if execution.Result.Provenance.ToolCallID == "" || execution.Result.Provenance.ToolName == "" || execution.Result.Provenance.ToolSchemaHash == "" || execution.Result.Provenance.ObservedAt.IsZero() || len(execution.Result.Provenance.TargetRefs) == 0 {
 			t.Fatalf("incomplete Tool Result provenance: %+v", execution.Result.Provenance)
 		}
 	}
@@ -230,7 +234,7 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 	if final.Incident.Status != domain.StatusResolved || final.Termination == nil || final.Termination.Reason != domain.TerminationRecoverySucceeded || final.WorkflowAttempt.Status != domain.WorkflowAttemptCompleted {
 		t.Fatalf("unexpected final Brain state: status=%s termination=%+v attempt=%+v", final.Incident.Status, final.Termination, final.WorkflowAttempt)
 	}
-	if final.DiagnosisRuntime != nil || len(final.Candidates) != 0 || len(final.HypothesisDrafts) != 0 || len(final.VerifiedHypotheses) != 0 || final.Incident.Investigation.Arbitration != nil {
+	if final.DiagnosisRuntime != nil || len(final.Candidates) != 0 || len(final.HypothesisDrafts) != 0 || len(final.VerifiedHypotheses) != 0 || final.Incident.Investigation.Arbitration != nil || final.Incident.DiagnosisLedger != nil {
 		t.Fatalf("KubePilot entered a deterministic baseline path: runtime=%+v candidates=%d drafts=%d verified=%d arbitration=%+v", final.DiagnosisRuntime, len(final.Candidates), len(final.HypothesisDrafts), len(final.VerifiedHypotheses), final.Incident.Investigation.Arbitration)
 	}
 }
@@ -238,9 +242,11 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 func TestNoReflectionAblationBypassesPendingReflection(t *testing.T) {
 	trigger := domain.ReflectionHypothesisRefuted
 	state := &WorkflowState{
-		Incident:          &domain.Incident{ID: "no-reflection", DiagnosisMethod: domain.DiagnosisMethodKubePilotNoReflection},
-		PendingReflection: &trigger,
-		BrainBudget:       domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		Incident: &domain.Incident{ID: "no-reflection", DiagnosisMethod: domain.DiagnosisMethodKubePilotNoReflection},
+		BrainState: BrainState{
+			PendingReflection: &trigger,
+			BrainBudget:       domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		},
 	}
 	next, err := (&brainGraphRuntime{}).reflectionRoute(context.Background(), state)
 	if err != nil {
@@ -255,11 +261,13 @@ func TestReflectionRouteStopsAtBrainTurnBudget(t *testing.T) {
 	trigger := domain.ReflectionGroundingFailure
 	budget := brainruntime.DefaultBudget()
 	state := &WorkflowState{
-		Incident:             &domain.Incident{ID: "reflection-budget", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Investigation: &domain.Investigation{}},
-		PendingReflection:    &trigger,
-		BrainBudget:          domain.BrainBudgetState{Limits: budget, Usage: domain.BrainBudgetUsage{Turns: budget.MaxTurns}},
-		ExecutionSnapshot:    domain.ExecutionSnapshot{SkillSnapshotHash: "skills", ModelConfigHash: "model", ToolSchemaHash: "tools", PolicyHash: "policy"},
-		EvidenceSnapshotHash: "evidence",
+		Incident: &domain.Incident{ID: "reflection-budget", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			PendingReflection:    &trigger,
+			BrainBudget:          domain.BrainBudgetState{Limits: budget, Usage: domain.BrainBudgetUsage{Turns: budget.MaxTurns}},
+			ExecutionSnapshot:    domain.ExecutionSnapshot{SkillSnapshotHash: "skills", ModelConfigHash: "model", ToolSchemaHash: "tools", PolicyHash: "policy"},
+			EvidenceSnapshotHash: "evidence",
+		},
 	}
 	next, err := (&brainGraphRuntime{}).reflectionRoute(context.Background(), state)
 	if err != nil {
@@ -276,10 +284,12 @@ func TestReflectionRouteStopsAtBrainTurnBudget(t *testing.T) {
 func TestVerificationFailureSchedulesOneBudgetedBrainReflection(t *testing.T) {
 	executor := &sequenceVerificationExecutor{samples: []bool{false}}
 	state := &WorkflowState{
-		Incident:          &domain.Incident{ID: "verification-reflection", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Status: domain.StatusVerifying, Investigation: &domain.Investigation{Architecture: "eino-native-self-reflective-brain"}},
-		AgentHypotheses:   []domain.AgentHypothesis{{ID: "h1", ModelConfidence: .8}},
-		BrainBudget:       domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
-		Termination:       &domain.TerminationEvent{Reason: domain.TerminationDiagnosisConfident},
+		Incident: &domain.Incident{ID: "verification-reflection", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Status: domain.StatusVerifying, Investigation: &domain.Investigation{Architecture: "eino-native-self-reflective-brain"}},
+		BrainState: BrainState{
+			AgentHypotheses: []domain.AgentHypothesis{{ID: "h1", ModelConfidence: .8}},
+			BrainBudget:     domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			Termination:     &domain.TerminationEvent{Reason: domain.TerminationDiagnosisConfident},
+		},
 		VerificationState: VerificationState{StartedAt: time.Now().UTC().Add(-time.Second)},
 	}
 	transition := func(_ context.Context, incident *domain.Incident, status domain.IncidentStatus) error {
@@ -310,20 +320,22 @@ func TestUnresolvedHypothesisCannotAuthorizeRecovery(t *testing.T) {
 	snapshot := domain.ExecutionSnapshot{SkillSnapshotHash: "skill", ModelConfigHash: "model", ToolSchemaHash: "tool", PolicyHash: "policy"}
 	selected := domain.AgentHypothesis{ID: "h1", LastValidatedSnapshotHash: "evidence", Status: domain.HypothesisSupported}
 	state := &WorkflowState{
-		Incident:        &domain.Incident{ID: "unresolved", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Status: domain.StatusCollecting, Namespace: "team-a", Resource: "api", Investigation: &domain.Investigation{}},
-		AgentHypotheses: []domain.AgentHypothesis{selected, {ID: "h2", LastValidatedSnapshotHash: "evidence", Status: domain.HypothesisInvestigating}},
-		HypothesisAdmissions: []domain.HypothesisAdmission{
-			{HypothesisRevisionID: "h1", Decision: "ADMITTED", GroundingLevel: domain.AdmissionUnresolved},
-			{HypothesisRevisionID: "h2", Decision: "ADMITTED", GroundingLevel: domain.AdmissionDirect},
+		Incident: &domain.Incident{ID: "unresolved", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Status: domain.StatusCollecting, Namespace: "team-a", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			AgentHypotheses: []domain.AgentHypothesis{selected, {ID: "h2", LastValidatedSnapshotHash: "evidence", Status: domain.HypothesisInvestigating}},
+			HypothesisAdmissions: []domain.HypothesisAdmission{
+				{HypothesisRevisionID: "h1", Decision: "ADMITTED", GroundingLevel: domain.AdmissionUnresolved},
+				{HypothesisRevisionID: "h2", Decision: "ADMITTED", GroundingLevel: domain.AdmissionDirect},
+			},
+			HypothesisGroundings: []domain.HypothesisGrounding{
+				{HypothesisRevisionID: "h1", Level: domain.GroundingSupported, EvidenceSnapshotHash: "evidence", Evidence: domain.GroundingEvidence{EvidenceSupport: .9, IndependentSourceCount: 2}, Coverage: domain.GroundingCoverage{EvidenceNeedCoverage: 1, TargetScopeCoverage: 1, TemporalCoverage: 1}},
+				{HypothesisRevisionID: "h2", Level: domain.GroundingPartial, EvidenceSnapshotHash: "evidence", Evidence: domain.GroundingEvidence{EvidenceSupport: .6}},
+			},
+			AgentDiagnosis:       &domain.AgentDiagnosis{ID: "d1", HypothesisRevisionID: "h1", EvidenceSnapshotHash: "evidence", ExecutionSnapshot: snapshot},
+			AgentRecoveryPlan:    &domain.AgentRecoveryPlan{ID: "r1"},
+			ExecutionSnapshot:    snapshot,
+			EvidenceSnapshotHash: "evidence",
 		},
-		HypothesisGroundings: []domain.HypothesisGrounding{
-			{HypothesisRevisionID: "h1", Level: domain.GroundingSupported, EvidenceSnapshotHash: "evidence", Evidence: domain.GroundingEvidence{EvidenceSupport: .9, IndependentSourceCount: 2}, Coverage: domain.GroundingCoverage{EvidenceNeedCoverage: 1, TargetScopeCoverage: 1, TemporalCoverage: 1}},
-			{HypothesisRevisionID: "h2", Level: domain.GroundingPartial, EvidenceSnapshotHash: "evidence", Evidence: domain.GroundingEvidence{EvidenceSupport: .6}},
-		},
-		AgentDiagnosis:       &domain.AgentDiagnosis{ID: "d1", HypothesisRevisionID: "h1", EvidenceSnapshotHash: "evidence", ExecutionSnapshot: snapshot},
-		AgentRecoveryPlan:    &domain.AgentRecoveryPlan{ID: "r1"},
-		ExecutionSnapshot:    snapshot,
-		EvidenceSnapshotHash: "evidence",
 	}
 	transition := func(_ context.Context, incident *domain.Incident, status domain.IncidentStatus) error {
 		return domain.Transition(incident, status)
@@ -339,7 +351,7 @@ func TestUnresolvedHypothesisCannotAuthorizeRecovery(t *testing.T) {
 }
 
 func TestBrainCannotForgeRuntimeOwnedTerminationOutcome(t *testing.T) {
-	state := &WorkflowState{Incident: &domain.Incident{ID: "termination", DiagnosisMethod: domain.DiagnosisMethodKubePilot}, BrainToolPolicy: brainruntime.DefaultToolCallingPolicy()}
+	state := &WorkflowState{Incident: &domain.Incident{ID: "termination", DiagnosisMethod: domain.DiagnosisMethodKubePilot}, BrainState: BrainState{BrainToolPolicy: brainruntime.DefaultToolCallingPolicy()}}
 	if code, _ := validateBrainTerminationRequest(state, finishBrainInput{Reason: domain.TerminationRecoverySucceeded}); code != "runtime_owned_termination_reason" {
 		t.Fatalf("model-forged recovery outcome was not rejected: %q", code)
 	}
@@ -356,17 +368,19 @@ func TestToolCallBudgetExhaustionRoutesToBrainFinalization(t *testing.T) {
 	budget := brainruntime.DefaultBudget()
 	trigger := domain.ReflectionCriticalEvidence
 	state := &WorkflowState{
-		Incident:           &domain.Incident{ID: "tool-budget", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Investigation: &domain.Investigation{}},
-		BrainPhase:         domain.BrainPhaseInvestigation,
-		ActiveToolCategory: domain.BrainToolEvidence,
-		BrainToolPolicy:    brainruntime.DefaultToolCallingPolicy(),
-		BrainBudget: domain.BrainBudgetState{
-			Limits: budget,
-			Usage:  domain.BrainBudgetUsage{Turns: 10, ToolCalls: budget.MaxToolCalls},
+		Incident: &domain.Incident{ID: "tool-budget", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase:         domain.BrainPhaseInvestigation,
+			ActiveToolCategory: domain.BrainToolEvidence,
+			BrainToolPolicy:    brainruntime.DefaultToolCallingPolicy(),
+			BrainBudget: domain.BrainBudgetState{
+				Limits: budget,
+				Usage:  domain.BrainBudgetUsage{Turns: 10, ToolCalls: budget.MaxToolCalls},
+			},
+			PendingReflection: &trigger,
 		},
-		PendingReflection: &trigger,
 	}
-	message := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "over-budget", Type: "function", Function: schema.FunctionCall{Name: "query_metrics_evidence", Arguments: `{}`}}}}
+	message := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "over-budget", Type: "function", Function: schema.FunctionCall{Name: "query_metrics", Arguments: `{}`}}}}
 	result, err := (&brainGraphRuntime{}).actionGateway(withBrainWorkflowState(context.Background(), state), message)
 	if err != nil {
 		t.Fatal(err)
@@ -375,7 +389,7 @@ func TestToolCallBudgetExhaustionRoutesToBrainFinalization(t *testing.T) {
 		t.Fatalf("ToolCall exhaustion terminated or erased the Brain action: state=%+v message=%+v", state.Termination, result)
 	}
 	decision := authorizeBrainTool(state, domain.AgentActionEnvelope{
-		ActionID: "over-budget", IncidentID: state.Incident.ID, ToolName: "query_metrics_evidence", ToolCategory: domain.BrainToolEvidence,
+		ActionID: "over-budget", IncidentID: state.Incident.ID, ToolName: "query_metrics", ToolCategory: domain.BrainToolEvidence,
 		Intent: domain.AgentActionIntent{Intent: "collect more metrics", ExpectedObservation: []string{"metric evidence"}},
 	})
 	if decision == nil || decision.ConstraintCode != "tool_call_budget_exhausted" {
@@ -393,17 +407,19 @@ func TestToolCallBudgetExhaustionRoutesToBrainFinalization(t *testing.T) {
 func TestToolCallBudgetAllowsAuditedClosingActionsWithoutOverflow(t *testing.T) {
 	budget := brainruntime.DefaultBudget()
 	state := &WorkflowState{
-		Incident:              &domain.Incident{ID: "tool-budget-close", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Investigation: &domain.Investigation{}},
-		BrainPhase:            domain.BrainPhaseDiagnosis,
-		ActiveToolCategory:    domain.BrainToolReasoning,
-		ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
-		BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
-		BrainBudget: domain.BrainBudgetState{
-			Limits:             budget,
-			Usage:              domain.BrainBudgetUsage{Turns: 10, ToolCalls: budget.MaxToolCalls},
-			ToolCallsExhausted: true,
+		Incident: &domain.Incident{ID: "tool-budget-close", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase:            domain.BrainPhaseDiagnosis,
+			ActiveToolCategory:    domain.BrainToolReasoning,
+			ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
+			BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
+			BrainBudget: domain.BrainBudgetState{
+				Limits:             budget,
+				Usage:              domain.BrainBudgetUsage{Turns: 10, ToolCalls: budget.MaxToolCalls},
+				ToolCallsExhausted: true,
+			},
+			ExecutionSnapshot: domain.ExecutionSnapshot{ToolSchemaHash: "schema-hash"},
 		},
-		ExecutionSnapshot: domain.ExecutionSnapshot{ToolSchemaHash: "schema-hash"},
 	}
 	envelope := domain.AgentActionEnvelope{
 		ActionID: "close", IncidentID: state.Incident.ID, ToolName: "submit_diagnosis", ToolCategory: domain.BrainToolReasoning,
@@ -437,11 +453,13 @@ func TestToolCallBudgetFinalizationContextUsesExistingState(t *testing.T) {
 			ID: "tool-budget-context", DiagnosisMethod: domain.DiagnosisMethodKubePilot,
 			Investigation: &domain.Investigation{Architecture: "eino-native-self-reflective-brain"},
 		},
-		BrainPhase:         domain.BrainPhaseInvestigation,
-		ActiveToolCategory: domain.BrainToolEvidence,
-		BrainBudget: domain.BrainBudgetState{
-			Limits: budget,
-			Usage:  domain.BrainBudgetUsage{Turns: 10, ToolCalls: budget.MaxToolCalls},
+		BrainState: BrainState{
+			BrainPhase:         domain.BrainPhaseInvestigation,
+			ActiveToolCategory: domain.BrainToolEvidence,
+			BrainBudget: domain.BrainBudgetState{
+				Limits: budget,
+				Usage:  domain.BrainBudgetUsage{Turns: 10, ToolCalls: budget.MaxToolCalls},
+			},
 		},
 	}
 	runtime := &brainGraphRuntime{resolver: resolver, toolHash: "tool-schema", policyHash: "policy"}
@@ -471,10 +489,12 @@ func TestBrainContextUsesEvidenceViewWithoutCanonicalFacts(t *testing.T) {
 		Signals: []domain.EvidenceSignal{{ID: "signal-1", EvidenceID: "evidence-1", Source: "kubernetes", Signal: "workload_unavailable", Direction: "abnormal", ObservedAt: now}},
 	}
 	state := &WorkflowState{
-		Incident:             &domain.Incident{ID: "evidence-view-context", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Namespace: "team-a", Service: "api", Resource: "api", Evidence: []domain.Evidence{evidence}, Investigation: &domain.Investigation{Architecture: "eino-native-self-reflective-brain"}},
-		BrainBudget:          domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
-		ToolExecutions:       []domain.BrainToolExecution{{Result: domain.ToolResultRecord{Provenance: domain.ToolResultProvenance{ToolCallID: "call-1", RawArtifactHash: "artifact-1", EvidenceIDs: []string{"evidence-1"}}}}},
-		HypothesisGroundings: []domain.HypothesisGrounding{{HypothesisRevisionID: "hypothesis-1", Evidence: domain.GroundingEvidence{SupportingEvidenceIDs: []string{"evidence-1"}}}},
+		Incident: &domain.Incident{ID: "evidence-view-context", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Namespace: "team-a", Service: "api", Resource: "api", Evidence: []domain.Evidence{evidence}, Investigation: &domain.Investigation{Architecture: "eino-native-self-reflective-brain"}},
+		BrainState: BrainState{
+			BrainBudget:          domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			ToolExecutions:       []domain.BrainToolExecution{{Result: domain.ToolResultRecord{Provenance: domain.ToolResultProvenance{ToolCallID: "call-1", RawArtifactHash: "artifact-1", EvidenceIDs: []string{"evidence-1"}}}}},
+			HypothesisGroundings: []domain.HypothesisGrounding{{HypothesisRevisionID: "hypothesis-1", Evidence: domain.GroundingEvidence{SupportingEvidenceIDs: []string{"evidence-1"}}}},
+		},
 	}
 	runtime := &brainGraphRuntime{resolver: resolver, toolHash: "tool-schema", policyHash: "policy"}
 	messages, err := runtime.contextBuilder(context.Background(), state, false)
@@ -498,7 +518,7 @@ func TestClassifiedEvidenceToolResultPersistsOnlyEvidenceView(t *testing.T) {
 	output := brainCapabilityOutput{
 		Class: domain.ToolResultEvidence, Status: "SUCCEEDED", NewInformation: true,
 		Evidence:   []domain.Evidence{{ID: "evidence-1", Source: "metric", Type: "metric_evidence", ObservedAt: now, Summary: "current CPU pressure", Facts: map[string]any{"raw_runtime_fact": "private"}, Signals: []domain.EvidenceSignal{{ID: "signal-1", EvidenceID: "evidence-1", Signal: "cpu_pressure", Direction: "abnormal"}}}},
-		Provenance: domain.ToolResultProvenance{ToolCallID: "call-1", ToolName: "query_prometheus_evidence", EvidenceIDs: []string{"evidence-1"}, RawArtifactHash: "artifact-1", ObservedAt: now},
+		Provenance: domain.ToolResultProvenance{ToolCallID: "call-1", ToolName: "query_metrics", EvidenceIDs: []string{"evidence-1"}, RawArtifactHash: "artifact-1", ObservedAt: now},
 	}
 	projection := modelFacingBrainCapabilityOutput(&WorkflowState{}, output)
 	if len(projection.Evidence) != 0 || len(projection.EvidenceView) != 1 {
@@ -528,15 +548,17 @@ func TestDiagnosisCannotRewriteCommittedHypothesis(t *testing.T) {
 	evidence := domain.Evidence{ID: "e1", Source: "kubernetes", ObservedAt: now}
 	grounding := domain.HypothesisGrounding{ID: "g1", HypothesisRevisionID: hypothesis.ID, Level: domain.GroundingPartial, EvidenceSnapshotHash: "snapshot"}
 	state := &WorkflowState{
-		Incident:              &domain.Incident{ID: "diagnosis-boundary", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Evidence: []domain.Evidence{evidence}},
-		BrainPhase:            domain.BrainPhaseDiagnosis,
-		AgentHypotheses:       []domain.AgentHypothesis{hypothesis},
-		HypothesisGroundings:  []domain.HypothesisGrounding{grounding},
-		EvidenceSnapshotHash:  "snapshot",
-		BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
-		BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
-		ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
-		ActiveToolCategory:    domain.BrainToolReasoning,
+		Incident: &domain.Incident{ID: "diagnosis-boundary", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Evidence: []domain.Evidence{evidence}},
+		BrainState: BrainState{
+			BrainPhase:            domain.BrainPhaseDiagnosis,
+			AgentHypotheses:       []domain.AgentHypothesis{hypothesis},
+			HypothesisGroundings:  []domain.HypothesisGrounding{grounding},
+			EvidenceSnapshotHash:  "snapshot",
+			BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
+			BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
+			ActiveToolCategory:    domain.BrainToolReasoning,
+		},
 	}
 	input := submitBrainDiagnosisInput{
 		Intent:              "persist the selected grounded diagnosis",
@@ -560,8 +582,8 @@ func TestDiagnosisCannotRewriteCommittedHypothesis(t *testing.T) {
 }
 
 func TestBrainHistoryKeepsCompleteVisibleToolTransactions(t *testing.T) {
-	assistant := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call-1", Type: "function", Function: schema.FunctionCall{Name: "query_kubernetes_evidence", Arguments: `{"intent":"inspect readiness","expected_observation":["current pod state"]}`}}}}
-	tool := &schema.Message{Role: schema.Tool, ToolCallID: "call-1", ToolName: "query_kubernetes_evidence", Content: `{"class":"EVIDENCE","status":"OK","summary":"pod is not ready","provenance":{"evidence_ids":["e1"]}}`}
+	assistant := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call-1", Type: "function", Function: schema.FunctionCall{Name: "inspect_kubernetes", Arguments: `{"intent":"inspect readiness","expected_observation":["current pod state"]}`}}}}
+	tool := &schema.Message{Role: schema.Tool, ToolCallID: "call-1", ToolName: "inspect_kubernetes", Content: `{"class":"EVIDENCE","status":"OK","summary":"pod is not ready","provenance":{"evidence_ids":["e1"]}}`}
 	history := boundedBrainMessageHistory([]*schema.Message{assistant, tool}, 8, 64<<10)
 	if len(history) != 2 || strings.TrimSpace(history[0].Content) == "" || !strings.Contains(history[0].Content, "inspect readiness") || !strings.Contains(history[1].Content, "pod is not ready") {
 		t.Fatalf("tool transaction was blank or incomplete: %+v", history)
@@ -591,7 +613,7 @@ func TestBrainHistoryDropsReasoningOnlyAssistantTurn(t *testing.T) {
 }
 
 func TestBrainAssistantToolCallIsPersistedWithVisibleSummary(t *testing.T) {
-	message := &schema.Message{Role: schema.Assistant, ReasoningContent: "hidden", ToolCalls: []schema.ToolCall{{ID: "call-1", Type: "function", Function: schema.FunctionCall{Name: "query_kubernetes_evidence", Arguments: `{"intent":"inspect readiness","expected_observation":["current pod state"]}`}}}}
+	message := &schema.Message{Role: schema.Assistant, ReasoningContent: "hidden", ToolCalls: []schema.ToolCall{{ID: "call-1", Type: "function", Function: schema.FunctionCall{Name: "inspect_kubernetes", Arguments: `{"intent":"inspect readiness","expected_observation":["current pod state"]}`}}}}
 	sanitized, record, persisted := normalizeBrainAssistantOutput(message, "turn-13", time.Now().UTC())
 	if !persisted || !record.Persisted || !record.ToolCallPresent || record.ContentPresent || !record.ReasoningPresent {
 		t.Fatalf("ToolCall Assistant audit was incorrect: %+v", record)
@@ -602,7 +624,7 @@ func TestBrainAssistantToolCallIsPersistedWithVisibleSummary(t *testing.T) {
 }
 
 func TestToolHistoryUsesServerClassifiedResultWithProvenance(t *testing.T) {
-	assistant := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call-1", Type: "function", Function: schema.FunctionCall{Name: "query_kubernetes_evidence", Arguments: `{"intent":"inspect readiness","expected_observation":["current pod state"],"targets":[{"namespace":"team-a","service":"api"}]}`}}}}
+	assistant := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call-1", Type: "function", Function: schema.FunctionCall{Name: "inspect_kubernetes", Arguments: `{"intent":"inspect readiness","expected_observation":["current pod state"],"targets":[{"namespace":"team-a","service":"api"}]}`}}}}
 	now := time.Now().UTC()
 	output := brainCapabilityOutput{Class: domain.ToolResultConstraint, Status: "REJECTED", Summary: "scope denied", ConstraintCode: "cross_namespace_denied", Provenance: domain.ToolResultProvenance{Collector: "constraint-kernel", WindowStart: now, WindowEnd: now, ObservedAt: now, RawArtifactHash: "artifact", ParserVersion: "v1"}}
 	raw, err := json.Marshal(output)
@@ -610,12 +632,14 @@ func TestToolHistoryUsesServerClassifiedResultWithProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := &WorkflowState{
-		Incident:          &domain.Incident{ID: "tool-result", Investigation: &domain.Investigation{}},
-		BrainMessages:     []*schema.Message{assistant},
-		ExecutionSnapshot: domain.ExecutionSnapshot{ToolSchemaHash: "schema-hash"},
-		BrainBudget:       domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		Incident: &domain.Incident{ID: "tool-result", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainMessages:     []*schema.Message{assistant},
+			ExecutionSnapshot: domain.ExecutionSnapshot{ToolSchemaHash: "schema-hash"},
+			BrainBudget:       domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		},
 	}
-	message := &schema.Message{Role: schema.Tool, ToolCallID: "call-1", ToolName: "query_kubernetes_evidence", Content: string(raw)}
+	message := &schema.Message{Role: schema.Tool, ToolCallID: "call-1", ToolName: "inspect_kubernetes", Content: string(raw)}
 	if _, err = (&brainGraphRuntime{}).classifyToolResults(withBrainWorkflowState(context.Background(), state), []*schema.Message{message}); err != nil {
 		t.Fatal(err)
 	}
@@ -634,13 +658,15 @@ func TestToolHistoryUsesServerClassifiedResultWithProvenance(t *testing.T) {
 func TestReflectionCanCorrectPreHypothesisConstraintBySubmittingHypotheses(t *testing.T) {
 	target := domain.ResourceRef{Namespace: "team-a", Service: "api", Resource: "api", Kind: "Service"}
 	state := &WorkflowState{
-		Incident:              &domain.Incident{ID: "reflection-admission", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
-		BrainPhase:            domain.BrainPhaseReflection,
-		ResumeBrainPhase:      domain.BrainPhaseInvestigation,
-		BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
-		BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
-		ActiveToolCategory:    domain.BrainToolReasoning,
-		ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
+		Incident: &domain.Incident{ID: "reflection-admission", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase:            domain.BrainPhaseReflection,
+			ResumeBrainPhase:      domain.BrainPhaseInvestigation,
+			BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
+			BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			ActiveToolCategory:    domain.BrainToolReasoning,
+			ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
+		},
 	}
 	input := submitBrainHypothesesInput{
 		Intent:              "correct the blocked investigation by forming a falsifiable hypothesis",
@@ -655,7 +681,7 @@ func TestReflectionCanCorrectPreHypothesisConstraintBySubmittingHypotheses(t *te
 			ModelConfidence:         .5,
 		}},
 	}
-	output, err := runBrainSubmitHypotheses(withBrainWorkflowState(context.Background(), state), input)
+	output, err := runBrainSubmitHypotheses(withBrainWorkflowState(context.Background(), state), constrainedToolDeps{}, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,14 +696,16 @@ func TestReflectionSkillRequestResolvesAgainstResumePhase(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := &WorkflowState{
-		Incident:              &domain.Incident{ID: "reflection-skill", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
-		BrainPhase:            domain.BrainPhaseReflection,
-		ResumeBrainPhase:      domain.BrainPhaseInvestigation,
-		BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
-		BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
-		ActiveToolCategory:    domain.BrainToolReasoning,
-		ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning, domain.BrainToolControl},
-		Reflections:           []domain.ReflectionRecord{{ID: "reflection:constraint", Trigger: domain.ReflectionConstraintFailure}},
+		Incident: &domain.Incident{ID: "reflection-skill", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase:            domain.BrainPhaseReflection,
+			ResumeBrainPhase:      domain.BrainPhaseInvestigation,
+			BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
+			BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			ActiveToolCategory:    domain.BrainToolReasoning,
+			ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning, domain.BrainToolControl},
+			Reflections:           []domain.ReflectionRecord{{ID: "reflection:constraint", Trigger: domain.ReflectionConstraintFailure}},
+		},
 	}
 	output, err := runBrainRequestSkills(withBrainWorkflowState(context.Background(), state), resolver, requestBrainSkillsInput{
 		Intent:              "load the bounded metric procedure after a denied evidence category",
@@ -718,13 +746,15 @@ func TestRejectedSkillRequestReturnsExplicitConstraintAndAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := &WorkflowState{
-		Incident:              &domain.Incident{ID: "rejected-skill", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
-		BrainPhase:            domain.BrainPhaseReflection,
-		ResumeBrainPhase:      domain.BrainPhaseInvestigation,
-		BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
-		BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
-		ActiveToolCategory:    domain.BrainToolReasoning,
-		ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning, domain.BrainToolControl},
+		Incident: &domain.Incident{ID: "rejected-skill", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase:            domain.BrainPhaseReflection,
+			ResumeBrainPhase:      domain.BrainPhaseInvestigation,
+			BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
+			BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			ActiveToolCategory:    domain.BrainToolReasoning,
+			ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning, domain.BrainToolControl},
+		},
 	}
 	output, err := runBrainRequestSkills(withBrainWorkflowState(context.Background(), state), resolver, requestBrainSkillsInput{
 		Intent: "request a phase-incompatible capability", ExpectedObservation: []string{"explicit rejection decision"}, SkillIDs: []string{"plan-recovery"}, Reason: "attempt recovery during investigation", Trigger: "CONSTRAINT_FAILURE",
@@ -738,5 +768,166 @@ func TestRejectedSkillRequestReturnsExplicitConstraintAndAudit(t *testing.T) {
 	(&brainGraphRuntime{}).applyCapabilityOutput(state, output)
 	if len(state.SkillActivations) != 1 || state.SkillActivations[0].RejectedReason != "incompatible_phase" || state.PendingReflection == nil || *state.PendingReflection != domain.ReflectionConstraintFailure {
 		t.Fatalf("rejected Skill decision was not retained in the audit state: %+v", state)
+	}
+}
+
+type brainRunbookMemory struct {
+	items []domain.MemoryResult
+}
+
+func (m brainRunbookMemory) Read(_ context.Context, query domain.MemoryQuery) ([]domain.MemoryResult, error) {
+	if query.Kind != domain.MemoryProcedural || query.Scope.Namespace == "" {
+		return nil, fmt.Errorf("unexpected runbook query: %+v", query)
+	}
+	return append([]domain.MemoryResult(nil), m.items...), nil
+}
+
+func (brainRunbookMemory) WriteVerifiedIncident(context.Context, domain.IncidentLearningInput) error {
+	return nil
+}
+
+func (brainRunbookMemory) RecordAccess(context.Context, domain.MemoryAccessEvent) error { return nil }
+
+type brainResourceCollector struct{}
+
+func (brainResourceCollector) Collect(_ context.Context, incident *domain.Incident, _ domain.EvidenceRequest) ([]domain.Evidence, error) {
+	return []domain.Evidence{{
+		Source: "kubernetes", Type: "workload_state", Namespace: incident.Namespace, Service: incident.Service, Resource: incident.Resource,
+		Summary: "server-owned dependency topology", Facts: map[string]any{"dependency": "redis"}, ObservedAt: time.Now().UTC(),
+	}}, nil
+}
+
+func TestBrainCapabilitySurfaceHasNoRemovedToolAliases(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := buildBrainCapabilities(constrainedToolDeps{}, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wanted := map[string]bool{
+		"query_metrics": false, "search_logs": false, "query_traces": false, "inspect_kubernetes": false, "discover_resources": false,
+		"retrieve_incidents": false, "retrieve_runbooks": false, "retrieve_patterns": false,
+		"validate_hypothesis": false, "compare_hypotheses": false, "validate_diagnosis": false,
+	}
+	removed := map[string]bool{"query_prometheus_evidence": true, "query_loki_evidence": true, "query_trace_evidence": true, "query_kubernetes_evidence": true, "retrieve_causal_patterns": true}
+	for _, node := range []string{captools.NodeBrainEvidence, captools.NodeBrainRetrieval, captools.NodeBrainReasoning, captools.NodeBrainRecovery, captools.NodeBrainControl} {
+		infos, loadErr := registry.ToolInfosForNode(context.Background(), node)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		for _, info := range infos {
+			if removed[info.Name] {
+				t.Fatalf("removed Brain tool alias %q is still registered", info.Name)
+			}
+			if _, ok := wanted[info.Name]; ok {
+				wanted[info.Name] = true
+			}
+		}
+	}
+	for name, found := range wanted {
+		if !found {
+			t.Errorf("required Brain capability %q is not registered", name)
+		}
+	}
+}
+
+func TestDiscoverResourcesReturnsOnlyServerResolvedScope(t *testing.T) {
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "resource-discovery", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase: domain.BrainPhaseInvestigation, ActiveToolCategory: domain.BrainToolEvidence,
+			ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolEvidence}, BrainToolPolicy: brainruntime.DefaultToolCallingPolicy(), BrainBudget: domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		},
+	}
+	output, err := runBrainDiscoverResources(withBrainWorkflowState(context.Background(), state), constrainedToolDeps{Collectors: map[string]Collector{"kubernetes": brainResourceCollector{}}}, brainEvidenceToolInput{
+		Intent: "resolve observed one-hop dependencies", ExpectedObservation: []string{"typed resource identities"}, Targets: []domain.ResourceRef{{Namespace: "team-a", Service: "api", Resource: "api", Kind: "Service"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRedis := false
+	for _, ref := range output.Resources {
+		if ref.Namespace != "team-a" {
+			t.Fatalf("resource discovery escaped Incident namespace: %+v", ref)
+		}
+		foundRedis = foundRedis || ref.Service == "redis"
+	}
+	if output.Class != domain.ToolResultEvidence || !foundRedis || len(output.Evidence) == 0 || len(output.Provenance.EvidenceIDs) == 0 {
+		t.Fatalf("resource discovery omitted server evidence or one-hop identity: %+v", output)
+	}
+}
+
+func TestRunbookRetrievalIsProceduralContextNotEvidence(t *testing.T) {
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "runbook", Cluster: "cluster-a", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase: domain.BrainPhaseInvestigation, ActiveToolCategory: domain.BrainToolRetrieval,
+			ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolRetrieval}, BrainToolPolicy: brainruntime.DefaultToolCallingPolicy(), BrainBudget: domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		},
+	}
+	memory := brainRunbookMemory{items: []domain.MemoryResult{{ID: "runbook-1", Summary: "restart only after approval", Kind: domain.MemoryProcedural}}}
+	output, err := runBrainRunbookRetrieval(withBrainWorkflowState(context.Background(), state), constrainedToolDeps{Memory: memory}, brainRetrievalToolInput{Intent: "retrieve bounded recovery procedure", ExpectedObservation: []string{"procedural context"}, Terms: []string{"api"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Class != domain.ToolResultValidation || len(output.Memory) != 1 || len(output.Evidence) != 0 || output.Provenance.Collector != "procedural-memory" {
+		t.Fatalf("runbook retrieval was promoted to Incident evidence: %+v", output)
+	}
+}
+
+func TestHypothesisComparisonDoesNotSelectOrMutateBelief(t *testing.T) {
+	first := domain.AgentHypothesis{ID: "h1", ModelConfidence: .8}
+	second := domain.AgentHypothesis{ID: "h2", ModelConfidence: .4}
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "compare", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase: domain.BrainPhaseInvestigation, ActiveToolCategory: domain.BrainToolReasoning, ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
+			BrainToolPolicy: brainruntime.DefaultToolCallingPolicy(), BrainBudget: domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()}, AgentHypotheses: []domain.AgentHypothesis{first, second},
+			HypothesisGroundings: []domain.HypothesisGrounding{{HypothesisRevisionID: "h1", Level: domain.GroundingSupported, Evidence: domain.GroundingEvidence{EvidenceSupport: .9}}, {HypothesisRevisionID: "h2", Level: domain.GroundingPartial, Evidence: domain.GroundingEvidence{EvidenceSupport: .4}}},
+		},
+	}
+	output, err := runBrainCompareHypotheses(withBrainWorkflowState(context.Background(), state), compareBrainHypothesesInput{Intent: "inspect objective validation differences", ExpectedObservation: []string{"coverage and missing observations for both revisions"}, HypothesisIDs: []string{"h1", "h2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output.Comparisons) != 2 || output.Diagnosis != nil || state.AgentHypotheses[0].ModelConfidence != .8 || state.AgentHypotheses[1].ModelConfidence != .4 {
+		t.Fatalf("Runtime comparison selected or changed a diagnosis belief: output=%+v hypotheses=%+v", output, state.AgentHypotheses)
+	}
+}
+
+func TestDiagnosisValidationCannotRewriteBrainDiagnosis(t *testing.T) {
+	now := time.Now().UTC()
+	target := domain.ResourceRef{Namespace: "team-a", Service: "api", Resource: "api", Kind: "Service"}
+	snapshot := domain.ExecutionSnapshot{SkillSnapshotHash: "skills", ModelConfigHash: "model", ToolSchemaHash: "tools", PolicyHash: "policy"}
+	hypothesis := domain.AgentHypothesis{ID: "h1", Statement: "api is degraded by execution contention", Category: "application", Mechanism: "contention", TargetRefs: []domain.ResourceRef{target}, ModelConfidence: .73}
+	grounding := domain.HypothesisGrounding{ID: "g1", HypothesisRevisionID: "h1", Level: domain.GroundingSupported, EvidenceSnapshotHash: "evidence", ValidatedAt: now}
+	diagnosis := &domain.AgentDiagnosis{ID: "d1", HypothesisRevisionID: "h1", Statement: hypothesis.Statement, Category: hypothesis.Category, Mechanism: hypothesis.Mechanism, TargetRefs: hypothesis.TargetRefs, ModelConfidence: hypothesis.ModelConfidence, EvidenceIDs: []string{"e1"}, ValidationResultIDs: []string{"g1"}, EvidenceSnapshotHash: "evidence", ExecutionSnapshot: snapshot, Provisional: true}
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "diagnosis-validation", Namespace: "team-a", Service: "api", Resource: "api", Evidence: []domain.Evidence{{ID: "e1", Source: "kubernetes"}}, Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase: domain.BrainPhaseDiagnosis, ActiveToolCategory: domain.BrainToolReasoning, ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning}, BrainToolPolicy: brainruntime.DefaultToolCallingPolicy(), BrainBudget: domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			AgentHypotheses: []domain.AgentHypothesis{hypothesis}, HypothesisAdmissions: []domain.HypothesisAdmission{{HypothesisRevisionID: "h1", Decision: "ADMITTED"}}, HypothesisGroundings: []domain.HypothesisGrounding{grounding}, AgentDiagnosis: diagnosis, EvidenceSnapshotHash: "evidence", ExecutionSnapshot: snapshot,
+		},
+	}
+	output, err := runBrainValidateDiagnosis(withBrainWorkflowState(context.Background(), state), validateBrainDiagnosisInput{Intent: "validate frozen diagnosis references", ExpectedObservation: []string{"Runtime validation result"}, DiagnosisID: "d1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.DiagnosisValidation == nil || !output.DiagnosisValidation.Valid || !output.DiagnosisFinalized || output.Diagnosis == nil || output.Diagnosis.Provisional || output.Diagnosis.Statement != diagnosis.Statement || output.Diagnosis.ModelConfidence != diagnosis.ModelConfidence {
+		t.Fatalf("diagnosis validation did not preserve immutable Brain semantics: %+v", output)
+	}
+}
+
+func TestWorkflowStateSerializesBrainUnderDedicatedBoundary(t *testing.T) {
+	state := WorkflowState{Incident: &domain.Incident{ID: "checkpoint"}, BrainState: BrainState{BrainPhase: domain.BrainPhaseInvestigation, BrainBudget: domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()}}}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := string(raw)
+	if !strings.Contains(encoded, `"brain":{"phase":"INVESTIGATION"`) || strings.Contains(encoded, `"brain_phase"`) || strings.Contains(encoded, `"brain_messages"`) {
+		t.Fatalf("Brain state did not use the new checkpoint boundary: %s", encoded)
 	}
 }

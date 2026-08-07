@@ -24,13 +24,14 @@ func TestObserveAgentProjectsSelfReflectiveBrainQualityMetrics(t *testing.T) {
 		SkillActivations: []domain.SkillActivation{{SkillID: ref.ID, Version: ref.Version, ContentHash: ref.ContentHash, Status: "ACTIVATED"}},
 		ToolExecutions: []domain.BrainToolExecution{{
 			Envelope: domain.AgentActionEnvelope{ToolCategory: domain.BrainToolEvidence, SkillRefs: []domain.SkillRef{ref}},
-			Result:   domain.ToolResultRecord{Class: domain.ToolResultEvidence, NewInformation: true, Provenance: domain.ToolResultProvenance{ToolCallID: "call-1", ToolName: "query_prometheus_evidence", ToolSchemaHash: snapshot.ToolSchemaHash, Collector: "prometheus", WindowStart: now.Add(-time.Minute), WindowEnd: now, ObservedAt: now, RawArtifactHash: "artifact", ParserVersion: "v1", EvidenceIDs: []string{"e1"}}},
+			Result:   domain.ToolResultRecord{Class: domain.ToolResultEvidence, NewInformation: true, Provenance: domain.ToolResultProvenance{ToolCallID: "call-1", ToolName: "query_metrics", ToolSchemaHash: snapshot.ToolSchemaHash, Collector: "prometheus", TargetRefs: []domain.ResourceRef{{Namespace: "team-a", Service: "api", Kind: "Service"}}, WindowStart: now.Add(-time.Minute), WindowEnd: now, ObservedAt: now, RawArtifactHash: "artifact", ParserVersion: "v1", EvidenceIDs: []string{"e1"}}},
 		}},
 		AgentHypotheses:      []domain.AgentHypothesis{h1, h2},
 		HypothesisAdmissions: []domain.HypothesisAdmission{{HypothesisRevisionID: "h1", Decision: "ADMITTED"}, {HypothesisRevisionID: "h2", Decision: "ADMITTED"}},
 		HypothesisGroundings: []domain.HypothesisGrounding{grounding1, grounding2},
 		Reflections:          []domain.ReflectionRecord{{Trigger: domain.ReflectionHypothesisRefuted, Accepted: true}},
-		AgentDiagnosis:       &domain.AgentDiagnosis{HypothesisRevisionID: "h2", EvidenceIDs: []string{"e1"}, ValidationResultIDs: []string{"g2"}, EvidenceSnapshotHash: "evidence-snapshot", ExecutionSnapshot: snapshot, GroundingLevel: domain.GroundingSupported},
+		AgentDiagnosis:       &domain.AgentDiagnosis{ID: "diagnosis-1", HypothesisRevisionID: "h2", EvidenceIDs: []string{"e1"}, ValidationResultIDs: []string{"g2"}, EvidenceSnapshotHash: "evidence-snapshot", ExecutionSnapshot: snapshot, GroundingLevel: domain.GroundingSupported},
+		DiagnosisValidations: []domain.DiagnosisValidation{{ID: "validation-1", DiagnosisID: "diagnosis-1", HypothesisRevisionID: "h2", Valid: true, GroundingLevel: domain.GroundingSupported, EvidenceSnapshotHash: "evidence-snapshot", ExecutionSnapshot: snapshot, ValidatedAt: now}},
 		ExecutionSnapshot:    &snapshot,
 	}
 	got := ObserveAgent(incident)

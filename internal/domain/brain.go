@@ -140,6 +140,18 @@ type HypothesisGrounding struct {
 	CausalCoverageApplicable bool              `json:"causal_coverage_applicable"`
 }
 
+// HypothesisComparison is a non-ranking view of already validated revisions.
+// It exposes only their independent grounding obligations and never identifies
+// a winner or changes the Brain's confidence.
+type HypothesisComparison struct {
+	HypothesisRevisionID string            `json:"hypothesis_revision_id"`
+	Level                GroundingLevel    `json:"level"`
+	Evidence             GroundingEvidence `json:"evidence"`
+	Coverage             GroundingCoverage `json:"coverage"`
+	MissingObservations  []string          `json:"missing_observations,omitempty"`
+	EvidenceSnapshotHash string            `json:"evidence_snapshot_hash"`
+}
+
 type GroundingDelta struct {
 	HypothesisRevisionID        string            `json:"hypothesis_revision_id"`
 	EvidenceChange              []string          `json:"evidence_change,omitempty"`
@@ -431,6 +443,22 @@ type AgentDiagnosis struct {
 	GroundingLevel       GroundingLevel    `json:"grounding_level"`
 	Provisional          bool              `json:"provisional"`
 	SubmittedAt          time.Time         `json:"submitted_at"`
+}
+
+// DiagnosisValidation is Runtime-owned metadata appended to an immutable LLM
+// diagnosis. It validates references and snapshots without rewriting the
+// diagnosis statement, mechanism, target, top-1 selection, or confidence.
+type DiagnosisValidation struct {
+	ID                   string            `json:"id"`
+	DiagnosisID          string            `json:"diagnosis_id"`
+	HypothesisRevisionID string            `json:"hypothesis_revision_id"`
+	Valid                bool              `json:"valid"`
+	Provisional          bool              `json:"provisional"`
+	GroundingLevel       GroundingLevel    `json:"grounding_level"`
+	ReasonCodes          []string          `json:"reason_codes,omitempty"`
+	EvidenceSnapshotHash string            `json:"evidence_snapshot_hash"`
+	ExecutionSnapshot    ExecutionSnapshot `json:"execution_snapshot"`
+	ValidatedAt          time.Time         `json:"validated_at"`
 }
 
 type TerminationReason string

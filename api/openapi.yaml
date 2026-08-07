@@ -308,10 +308,12 @@ components:
         agent_hypotheses: {type: array, items: {$ref: '#/components/schemas/AgentHypothesis'}}
         hypothesis_admissions: {type: array, items: {$ref: '#/components/schemas/HypothesisAdmission'}}
         hypothesis_groundings: {type: array, items: {$ref: '#/components/schemas/HypothesisGrounding'}}
+        hypothesis_comparisons: {type: array, items: {$ref: '#/components/schemas/HypothesisComparison'}}
         grounding_deltas: {type: array, items: {$ref: '#/components/schemas/GroundingDelta'}}
         belief_deltas: {type: array, items: {$ref: '#/components/schemas/BeliefDelta'}}
         reflections: {type: array, items: {$ref: '#/components/schemas/ReflectionRecord'}}
         agent_diagnosis: {$ref: '#/components/schemas/AgentDiagnosis'}
+        diagnosis_validations: {type: array, items: {$ref: '#/components/schemas/DiagnosisValidation'}}
         agent_recovery_plan: {$ref: '#/components/schemas/AgentRecoveryPlan'}
         termination: {$ref: '#/components/schemas/TerminationEvent'}
         brain_budget: {$ref: '#/components/schemas/BrainBudgetState'}
@@ -522,6 +524,17 @@ components:
         validated_at: {type: string, format: date-time}
         evidence_snapshot_hash: {type: string}
         causal_coverage_applicable: {type: boolean}
+    HypothesisComparison:
+      type: object
+      required: [hypothesis_revision_id, level, evidence, coverage, evidence_snapshot_hash]
+      description: Non-ranking comparison projection; it never selects a winner or mutates model confidence.
+      properties:
+        hypothesis_revision_id: {type: string}
+        level: {type: string, enum: [SUPPORTED, PARTIAL, REFUTED, UNKNOWN]}
+        evidence: {type: object, additionalProperties: true}
+        coverage: {type: object, additionalProperties: true}
+        missing_observations: {type: array, items: {type: string}}
+        evidence_snapshot_hash: {type: string}
     GroundingDelta:
       type: object
       required: [hypothesis_revision_id, current_level, current_coverage, conflict_detected, suggested_revision_need, occurred_at]
@@ -568,6 +581,21 @@ components:
         execution_snapshot: {$ref: '#/components/schemas/ExecutionSnapshot'}
         provisional: {type: boolean}
         submitted_at: {type: string, format: date-time}
+    DiagnosisValidation:
+      type: object
+      required: [id, diagnosis_id, hypothesis_revision_id, valid, provisional, grounding_level, evidence_snapshot_hash, execution_snapshot, validated_at]
+      description: Runtime-owned validation metadata appended to an immutable LLM diagnosis.
+      properties:
+        id: {type: string}
+        diagnosis_id: {type: string}
+        hypothesis_revision_id: {type: string}
+        valid: {type: boolean}
+        provisional: {type: boolean}
+        grounding_level: {type: string, enum: [SUPPORTED, PARTIAL, REFUTED, UNKNOWN]}
+        reason_codes: {type: array, items: {type: string}}
+        evidence_snapshot_hash: {type: string}
+        execution_snapshot: {$ref: '#/components/schemas/ExecutionSnapshot'}
+        validated_at: {type: string, format: date-time}
     RecoveryOption:
       type: object
       required: [action, target, reason]

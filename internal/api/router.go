@@ -242,15 +242,19 @@ func (s *Server) hypotheses(c *gin.Context) {
 	}
 	if incident.Investigation != nil && incident.Investigation.Architecture == "eino-native-self-reflective-brain" {
 		c.JSON(http.StatusOK, gin.H{
-			"hypotheses":         incident.Investigation.AgentHypotheses,
-			"admissions":         incident.Investigation.HypothesisAdmissions,
-			"groundings":         incident.Investigation.HypothesisGroundings,
-			"grounding_deltas":   incident.Investigation.GroundingDeltas,
-			"belief_deltas":      incident.Investigation.BeliefDeltas,
-			"reflections":        incident.Investigation.Reflections,
-			"diagnosis":          incident.Investigation.AgentDiagnosis,
-			"execution_snapshot": incident.Investigation.ExecutionSnapshot,
-			"workflow_attempt":   incident.Investigation.WorkflowAttempt,
+			"hypotheses":            incident.Investigation.AgentHypotheses,
+			"admissions":            incident.Investigation.HypothesisAdmissions,
+			"groundings":            incident.Investigation.HypothesisGroundings,
+			"comparisons":           incident.Investigation.HypothesisComparisons,
+			"grounding_deltas":      incident.Investigation.GroundingDeltas,
+			"belief_deltas":         incident.Investigation.BeliefDeltas,
+			"reflections":           incident.Investigation.Reflections,
+			"diagnosis":             incident.Investigation.AgentDiagnosis,
+			"diagnosis_validations": incident.Investigation.DiagnosisValidations,
+			"recovery_permission":   incident.Investigation.RecoveryPermission,
+			"termination":           incident.Investigation.Termination,
+			"execution_snapshot":    incident.Investigation.ExecutionSnapshot,
+			"workflow_attempt":      incident.Investigation.WorkflowAttempt,
 		})
 		return
 	}

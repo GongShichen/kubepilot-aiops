@@ -51,7 +51,10 @@ func Build(incident *domain.Incident, evidence []domain.Evidence) IncidentGraph 
 			source = incident.Service
 		}
 		addNode(source, "service", map[string]string{"resource": ev.Resource})
-		values := []map[string]any{ev.Content, ev.Data}
+		// Facts is the canonical normalized payload used by the Brain. Content and
+		// Data remain inputs to this shared observation service because frozen
+		// baselines may call it before normalization.
+		values := []map[string]any{ev.Facts, ev.Content, ev.Data}
 		for _, payload := range values {
 			for _, key := range []string{"dependency", "downstream_service", "endpoint_service", "target_service", "upstream_service"} {
 				if value, ok := payload[key].(string); ok {
@@ -71,7 +74,7 @@ func Build(incident *domain.Incident, evidence []domain.Evidence) IncidentGraph 
 				}
 			}
 		}
-		text := strings.ToLower(fmt.Sprint(ev.Summary, " ", ev.Content, " ", ev.Data))
+		text := strings.ToLower(fmt.Sprint(ev.Summary, " ", ev.Facts, " ", ev.Content, " ", ev.Data))
 		for _, token := range []string{"mysql", "postgres", "postgresql", "redis", "kafka"} {
 			if strings.Contains(text, token) {
 				addEdge(source, token, "depends_on")

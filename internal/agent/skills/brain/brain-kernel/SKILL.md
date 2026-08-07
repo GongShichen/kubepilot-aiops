@@ -9,7 +9,7 @@ description: Maintain the invariant boundary for every KubePilot Brain turn.
 
 Every model turn.
 
-## Inputs
+## Server-Owned Inputs
 
 Use the incident, execution snapshot, active phase, budgets, server IDs, and allowed tool catalogue.
 
@@ -21,15 +21,19 @@ Use the incident, execution snapshot, active phase, budgets, server IDs, and all
 4. Choose one bounded action or a terminal control action.
 5. Never claim that memory or model confidence is current evidence.
 
-## Allowed actions
+## Allowed Tools
 
 Use only tools exposed for the active phase and Skills. Never request raw query languages, shell, credentials, hidden provider reasoning, or cross-scope resources.
 
-## Output contract
+## Required IDs
+
+Every Incident, Resource, Evidence, Hypothesis Revision, Validation, Diagnosis, Proposal, Approval, Snapshot, and Tool Call identifier used by this Skill must be copied from the current server-owned context or a Tool result. Never synthesize an identifier.
+
+## Output Contract
 
 Return a valid Eino tool call carrying an AgentActionIntent; plain prose is not a completed turn.
 
-## Output example
+## Output Example
 
 Use the exact exposed tool schema and replace placeholders only with server-issued IDs:
 
@@ -37,7 +41,7 @@ Use the exact exposed tool schema and replace placeholders only with server-issu
 {"tool":"<exposed-tool>","arguments":{"intent":"state the bounded purpose","expected_observation":["name the result that will change the next decision"]}}
 ```
 
-## Stop and failure conditions
+## Stop & Failure Conditions
 
 Stop on a terminal control action, an exhausted budget, or a non-repairable safety boundary.
 

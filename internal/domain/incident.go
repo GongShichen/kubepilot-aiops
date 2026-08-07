@@ -150,10 +150,12 @@ type Investigation struct {
 	AgentHypotheses       []AgentHypothesis           `json:"agent_hypotheses,omitempty"`
 	HypothesisAdmissions  []HypothesisAdmission       `json:"hypothesis_admissions,omitempty"`
 	HypothesisGroundings  []HypothesisGrounding       `json:"hypothesis_groundings,omitempty"`
+	HypothesisComparisons []HypothesisComparison      `json:"hypothesis_comparisons,omitempty"`
 	GroundingDeltas       []GroundingDelta            `json:"grounding_deltas,omitempty"`
 	BeliefDeltas          []BeliefDelta               `json:"belief_deltas,omitempty"`
 	Reflections           []ReflectionRecord          `json:"reflections,omitempty"`
 	AgentDiagnosis        *AgentDiagnosis             `json:"agent_diagnosis,omitempty"`
+	DiagnosisValidations  []DiagnosisValidation       `json:"diagnosis_validations,omitempty"`
 	AgentRecoveryPlan     *AgentRecoveryPlan          `json:"agent_recovery_plan,omitempty"`
 	Termination           *TerminationEvent           `json:"termination,omitempty"`
 	BrainBudget           *BrainBudgetState           `json:"brain_budget,omitempty"`

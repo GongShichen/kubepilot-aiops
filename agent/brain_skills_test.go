@@ -14,7 +14,12 @@ func TestBrainSkillsProvideValidStructuredOutputExamples(t *testing.T) {
 		t.Fatal(err)
 	}
 	for id, pkg := range resolver.packages {
-		marker := "## Output example"
+		for _, section := range []string{"## Preconditions", "## Server-Owned Inputs", "## Procedure", "## Allowed Tools", "## Required IDs", "## Output Contract", "## Output Example", "## Stop & Failure Conditions", "## Handoff"} {
+			if !strings.Contains(pkg.Content, section) {
+				t.Fatalf("brain skill %s is missing required contract section %q", id, section)
+			}
+		}
+		marker := "## Output Example"
 		if !strings.Contains(pkg.Content, marker) {
 			t.Fatalf("brain skill %s has no output example", id)
 		}

@@ -131,7 +131,7 @@ func requiresHypothesisBinding(envelope domain.AgentActionEnvelope) bool {
 	// evidence collectors. Other reasoning tools (understanding, planning and
 	// initial hypothesis submission) intentionally have no prior hypothesis.
 	switch envelope.ToolName {
-	case "validate_hypothesis", "compare_hypotheses", "revise_hypothesis", "commit_belief_delta", "submit_diagnosis":
+	case "validate_hypothesis", "compare_hypotheses", "revise_hypothesis", "commit_belief_delta", "submit_diagnosis", "validate_diagnosis":
 		return true
 	default:
 		return false

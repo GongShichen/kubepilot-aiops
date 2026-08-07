@@ -82,7 +82,7 @@ func modelFacingBrainCapabilityOutput(state *WorkflowState, output brainCapabili
 	projection := output
 	projection.EvidenceView = brainEvidenceViews(state, output.Evidence, 32<<10, 12)
 	projection.Evidence = nil
-	projection.Candidates = compactToolCandidates(output.Candidates, 5)
+	projection.HistoricalIncidents = compactToolCandidates(output.HistoricalIncidents, 5)
 	projection.Patterns = tailCausalPatterns(output.Patterns, 10)
 	return projection
 }

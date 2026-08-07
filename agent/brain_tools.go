@@ -11,6 +11,7 @@ import (
 
 	"github.com/kubepilot-aiops/kubepilot/internal/brainruntime"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	"github.com/kubepilot-aiops/kubepilot/internal/topology"
 	captools "github.com/kubepilot-aiops/kubepilot/tools"
 	"github.com/oklog/ulid/v2"
 )
@@ -61,7 +62,20 @@ type brainRetrievalToolInput struct {
 	Intent              string   `json:"intent" jsonschema:"required"`
 	ExpectedObservation []string `json:"expected_observation" jsonschema:"required,minItems=1"`
 	HypothesisIDs       []string `json:"hypothesis_ids,omitempty"`
+	Terms               []string `json:"terms,omitempty"`
 	Limit               int      `json:"limit,omitempty"`
+}
+
+type compareBrainHypothesesInput struct {
+	Intent              string   `json:"intent" jsonschema:"required"`
+	ExpectedObservation []string `json:"expected_observation" jsonschema:"required,minItems=1"`
+	HypothesisIDs       []string `json:"hypothesis_ids" jsonschema:"required,minItems=2,maxItems=5"`
+}
+
+type validateBrainDiagnosisInput struct {
+	Intent              string   `json:"intent" jsonschema:"required"`
+	ExpectedObservation []string `json:"expected_observation" jsonschema:"required,minItems=1"`
+	DiagnosisID         string   `json:"diagnosis_id" jsonschema:"required"`
 }
 
 type submitIncidentUnderstandingInput struct {
@@ -189,33 +203,38 @@ type submitBrainRecoveryInput struct {
 }
 
 type brainCapabilityOutput struct {
-	Class             domain.ToolResultClass        `json:"class"`
-	Status            string                        `json:"status"`
-	Summary           string                        `json:"summary,omitempty"`
-	Provenance        domain.ToolResultProvenance   `json:"provenance"`
-	NewInformation    bool                          `json:"new_information"`
-	ConstraintCode    string                        `json:"constraint_code,omitempty"`
-	Infrastructure    bool                          `json:"infrastructure_failure,omitempty"`
-	Evidence          []domain.Evidence             `json:"evidence,omitempty"`
-	EvidenceView      []domain.BrainEvidenceView    `json:"evidence_view,omitempty"`
-	Candidates        []domain.RetrievalCandidate   `json:"candidates,omitempty"`
-	Patterns          []domain.CausalPattern        `json:"patterns,omitempty"`
-	Hypotheses        []domain.AgentHypothesis      `json:"hypotheses,omitempty"`
-	Admissions        []domain.HypothesisAdmission  `json:"admissions,omitempty"`
-	Grounding         *domain.HypothesisGrounding   `json:"grounding,omitempty"`
-	GroundingDelta    *domain.GroundingDelta        `json:"grounding_delta,omitempty"`
-	BeliefDelta       *domain.BeliefDelta           `json:"belief_delta,omitempty"`
-	Diagnosis         *domain.AgentDiagnosis        `json:"diagnosis,omitempty"`
-	RecoveryPlan      *domain.AgentRecoveryPlan     `json:"recovery_plan,omitempty"`
-	RequestedSkills   []SkillRequest                `json:"requested_skills,omitempty"`
-	SkillActivations  []domain.SkillActivation      `json:"skill_activations,omitempty"`
-	SelectedCategory  domain.BrainToolCategory      `json:"selected_category,omitempty"`
-	NextPhase         domain.BrainPhase             `json:"next_phase,omitempty"`
-	Termination       *domain.TerminationEvent      `json:"termination,omitempty"`
-	Understanding     *domain.IncidentUnderstanding `json:"incident_understanding,omitempty"`
-	InvestigationPlan *domain.InvestigationPlan     `json:"investigation_plan,omitempty"`
-	ReferenceContent  string                        `json:"reference_content,omitempty"`
-	ReferenceID       string                        `json:"reference_id,omitempty"`
+	Class               domain.ToolResultClass        `json:"class"`
+	Status              string                        `json:"status"`
+	Summary             string                        `json:"summary,omitempty"`
+	Provenance          domain.ToolResultProvenance   `json:"provenance"`
+	NewInformation      bool                          `json:"new_information"`
+	ConstraintCode      string                        `json:"constraint_code,omitempty"`
+	Infrastructure      bool                          `json:"infrastructure_failure,omitempty"`
+	Evidence            []domain.Evidence             `json:"evidence,omitempty"`
+	EvidenceView        []domain.BrainEvidenceView    `json:"evidence_view,omitempty"`
+	Resources           []domain.ResourceRef          `json:"resources,omitempty"`
+	Memory              []domain.MemoryResult         `json:"memory,omitempty"`
+	HistoricalIncidents []domain.RetrievalCandidate   `json:"historical_incidents,omitempty"`
+	Patterns            []domain.CausalPattern        `json:"patterns,omitempty"`
+	Hypotheses          []domain.AgentHypothesis      `json:"hypotheses,omitempty"`
+	Admissions          []domain.HypothesisAdmission  `json:"admissions,omitempty"`
+	Grounding           *domain.HypothesisGrounding   `json:"grounding,omitempty"`
+	GroundingDelta      *domain.GroundingDelta        `json:"grounding_delta,omitempty"`
+	Comparisons         []domain.HypothesisComparison `json:"hypothesis_comparisons,omitempty"`
+	BeliefDelta         *domain.BeliefDelta           `json:"belief_delta,omitempty"`
+	Diagnosis           *domain.AgentDiagnosis        `json:"diagnosis,omitempty"`
+	DiagnosisValidation *domain.DiagnosisValidation   `json:"diagnosis_validation,omitempty"`
+	DiagnosisFinalized  bool                          `json:"diagnosis_finalized,omitempty"`
+	RecoveryPlan        *domain.AgentRecoveryPlan     `json:"recovery_plan,omitempty"`
+	RequestedSkills     []SkillRequest                `json:"requested_skills,omitempty"`
+	SkillActivations    []domain.SkillActivation      `json:"skill_activations,omitempty"`
+	SelectedCategory    domain.BrainToolCategory      `json:"selected_category,omitempty"`
+	NextPhase           domain.BrainPhase             `json:"next_phase,omitempty"`
+	Termination         *domain.TerminationEvent      `json:"termination,omitempty"`
+	Understanding       *domain.IncidentUnderstanding `json:"incident_understanding,omitempty"`
+	InvestigationPlan   *domain.InvestigationPlan     `json:"investigation_plan,omitempty"`
+	ReferenceContent    string                        `json:"reference_content,omitempty"`
+	ReferenceID         string                        `json:"reference_id,omitempty"`
 }
 
 func buildBrainCapabilities(deps constrainedToolDeps, resolver *BrainSkillResolver) (*captools.Registry, error) {
@@ -223,13 +242,20 @@ func buildBrainCapabilities(deps constrainedToolDeps, resolver *BrainSkillResolv
 	capabilities := []captools.Capability{}
 	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
 		source := source
-		name := evidenceToolName(source)
+		name := brainEvidenceToolName(source)
 		capability, err := captools.NewCapability(name, "Collect bounded, server-normalized evidence for the current Incident scope. Raw query languages are not accepted.", func(ctx context.Context, input brainEvidenceToolInput) (brainCapabilityOutput, error) {
 			return runBrainEvidenceTool(ctx, deps, source, name, input)
 		}, brainRegistration(captools.CategoryObservability, captools.NodeBrainEvidence))
 		if err != nil {
 			return nil, err
 		}
+		capabilities = append(capabilities, capability)
+	}
+	if capability, err := captools.NewCapability("discover_resources", "Resolve current-namespace resources and observed one-hop dependencies from server-owned Kubernetes topology. Free-text resource identities are never accepted.", func(ctx context.Context, input brainEvidenceToolInput) (brainCapabilityOutput, error) {
+		return runBrainDiscoverResources(ctx, deps, input)
+	}, brainRegistration(captools.CategoryObservability, captools.NodeBrainEvidence)); err != nil {
+		return nil, err
+	} else {
 		capabilities = append(capabilities, capability)
 	}
 	if capability, err := captools.NewCapability("retrieve_incidents", "Retrieve bounded historical Incident memory as non-factual context.", func(ctx context.Context, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
@@ -239,9 +265,23 @@ func buildBrainCapabilities(deps constrainedToolDeps, resolver *BrainSkillResolv
 	} else {
 		capabilities = append(capabilities, capability)
 	}
-	if capability, err := captools.NewCapability("retrieve_causal_patterns", "Retrieve server-maintained causal patterns as validation context, never as incident facts.", func(ctx context.Context, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
+	if capability, err := captools.NewCapability("retrieve_runbooks", "Retrieve bounded procedural memory as non-factual runbook context.", func(ctx context.Context, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
+		return runBrainRunbookRetrieval(ctx, deps, input)
+	}, brainRegistration(captools.CategoryRetrieval, captools.NodeBrainRetrieval)); err != nil {
+		return nil, err
+	} else {
+		capabilities = append(capabilities, capability)
+	}
+	if capability, err := captools.NewCapability("retrieve_patterns", "Retrieve server-maintained causal patterns as validation context, never as incident facts.", func(ctx context.Context, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
 		return runBrainPatternRetrieval(ctx, deps, input)
 	}, brainRegistration(captools.CategoryRetrieval, captools.NodeBrainRetrieval)); err != nil {
+		return nil, err
+	} else {
+		capabilities = append(capabilities, capability)
+	}
+	if capability, err := captools.NewCapability("compare_hypotheses", "Return a non-ranking comparison of existing hypothesis grounding obligations. The Runtime never selects a winner.", func(ctx context.Context, input compareBrainHypothesesInput) (brainCapabilityOutput, error) {
+		return runBrainCompareHypotheses(ctx, input)
+	}, brainRegistration(captools.CategoryReasoning, captools.NodeBrainReasoning)); err != nil {
 		return nil, err
 	} else {
 		capabilities = append(capabilities, capability)
@@ -249,6 +289,13 @@ func buildBrainCapabilities(deps constrainedToolDeps, resolver *BrainSkillResolv
 	if capability, err := captools.NewCapability("submit_incident_understanding", "Persist a structured interpretation of the Incident without asserting a root cause.", func(ctx context.Context, input submitIncidentUnderstandingInput) (brainCapabilityOutput, error) {
 		return runBrainSubmitUnderstanding(ctx, input)
 	}, brainRegistration(captools.CategoryAgent, controlNodesForBrain()...)); err != nil {
+		return nil, err
+	} else {
+		capabilities = append(capabilities, capability)
+	}
+	if capability, err := captools.NewCapability("validate_diagnosis", "Validate the immutable LLM diagnosis references and snapshots without changing its semantics, selection, or confidence.", func(ctx context.Context, input validateBrainDiagnosisInput) (brainCapabilityOutput, error) {
+		return runBrainValidateDiagnosis(ctx, input)
+	}, brainRegistration(captools.CategoryReasoning, captools.NodeBrainReasoning)); err != nil {
 		return nil, err
 	} else {
 		capabilities = append(capabilities, capability)
@@ -261,14 +308,14 @@ func buildBrainCapabilities(deps constrainedToolDeps, resolver *BrainSkillResolv
 		capabilities = append(capabilities, capability)
 	}
 	if capability, err := captools.NewCapability("submit_hypotheses", "Submit open-world diagnosis hypotheses for structural, scope, permission, and verifiability admission only.", func(ctx context.Context, input submitBrainHypothesesInput) (brainCapabilityOutput, error) {
-		return runBrainSubmitHypotheses(ctx, input)
+		return runBrainSubmitHypotheses(ctx, deps, input)
 	}, brainRegistration(captools.CategoryReasoning, captools.NodeBrainReasoning)); err != nil {
 		return nil, err
 	} else {
 		capabilities = append(capabilities, capability)
 	}
 	if capability, err := captools.NewCapability("revise_hypothesis", "Create an immutable hypothesis revision with explicit lineage and revision reason.", func(ctx context.Context, input reviseBrainHypothesisInput) (brainCapabilityOutput, error) {
-		return runBrainReviseHypothesis(ctx, input)
+		return runBrainReviseHypothesis(ctx, deps, input)
 	}, brainRegistration(captools.CategoryReasoning, captools.NodeBrainReasoning)); err != nil {
 		return nil, err
 	} else {
@@ -344,6 +391,19 @@ func buildBrainCapabilities(deps constrainedToolDeps, resolver *BrainSkillResolv
 	return registry, nil
 }
 
+func brainEvidenceToolName(source string) string {
+	switch source {
+	case "metric":
+		return "query_metrics"
+	case "log":
+		return "search_logs"
+	case "trace":
+		return "query_traces"
+	default:
+		return "inspect_kubernetes"
+	}
+}
+
 func controlNodesForBrain() []string {
 	return []string{captools.NodeBrainEvidence, captools.NodeBrainRetrieval, captools.NodeBrainReasoning, captools.NodeBrainRecovery, captools.NodeBrainControl}
 }
@@ -362,7 +422,7 @@ func runBrainEvidenceTool(ctx context.Context, deps constrainedToolDeps, source,
 		return *denied, nil
 	}
 	for _, target := range input.Targets {
-		admission := (brainruntime.AdmissionService{}).Admit(domain.AgentHypothesis{ID: "scope-check", Statement: "scope check", Mechanism: "scope check", TargetRefs: []domain.ResourceRef{target}, EvidenceNeeds: []string{"scope"}, FalsificationConditions: []string{"scope invalid"}}, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.IncidentGraph, AvailableToolCategories: []domain.BrainToolCategory{domain.BrainToolEvidence}})
+		admission := (brainruntime.AdmissionService{}).Admit(domain.AgentHypothesis{ID: "scope-check", Statement: "scope check", Mechanism: "scope check", TargetRefs: []domain.ResourceRef{target}, EvidenceNeeds: []string{"scope"}, FalsificationConditions: []string{"scope invalid"}}, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.IncidentGraph, ExternalInventory: deps.ExternalInventory, AvailableToolCategories: []domain.BrainToolCategory{domain.BrainToolEvidence}})
 		if admission.Decision != "ADMITTED" {
 			return constraintBrainOutput(envelope, "target_scope_denied", "requested target is outside the Incident scope"), nil
 		}
@@ -399,6 +459,67 @@ func runBrainEvidenceTool(ctx context.Context, deps constrainedToolDeps, source,
 	return brainCapabilityOutput{Class: class, Status: status, Summary: fmt.Sprintf("%s returned %d normalized evidence records", toolName, len(items)), NewInformation: hasNewEvidence(state.Incident.Evidence, items), Evidence: items, Provenance: domain.ToolResultProvenance{ToolName: toolName, Collector: source, TargetRefs: append([]domain.ResourceRef(nil), input.Targets...), WindowStart: start, WindowEnd: end, ObservedAt: end, RawArtifactHash: brainruntime.Hash(items), ParserVersion: "brain-evidence-v1", EvidenceIDs: ids}}, nil
 }
 
+func runBrainDiscoverResources(ctx context.Context, deps constrainedToolDeps, input brainEvidenceToolInput) (brainCapabilityOutput, error) {
+	output, err := runBrainEvidenceTool(ctx, deps, "kubernetes", "discover_resources", input)
+	if err != nil || output.Class == domain.ToolResultConstraint || output.Class == domain.ToolResultError {
+		return output, err
+	}
+	state, stateErr := brainWorkflowState(ctx)
+	if stateErr != nil {
+		return brainCapabilityOutput{}, stateErr
+	}
+	graph := topology.Build(state.Incident, mergeEvidence(state.Incident.Evidence, output.Evidence))
+	output.Resources = resourceRefsFromGraph(state.Incident, graph)
+	output.NewInformation = output.NewInformation || len(output.Resources) > 0
+	output.Summary = fmt.Sprintf("discover_resources returned %d server-resolved resources and %d normalized evidence records", len(output.Resources), len(output.Evidence))
+	output.Provenance.RawArtifactHash = brainruntime.Hash(struct {
+		Resources []domain.ResourceRef `json:"resources"`
+		Evidence  []domain.Evidence    `json:"evidence"`
+	}{output.Resources, output.Evidence})
+	return output, nil
+}
+
+func resourceRefsFromGraph(incident *domain.Incident, graph topology.IncidentGraph) []domain.ResourceRef {
+	if incident == nil {
+		return nil
+	}
+	refs := make([]domain.ResourceRef, 0, len(graph.Nodes))
+	seen := map[string]bool{}
+	for _, node := range graph.Nodes {
+		if strings.TrimSpace(node.ID) == "" {
+			continue
+		}
+		kind := strings.TrimSpace(node.Type)
+		if kind == "" {
+			kind = "Service"
+		} else {
+			kind = strings.ToUpper(kind[:1]) + kind[1:]
+		}
+		ref := domain.ResourceRef{Namespace: incident.Namespace, Kind: kind, Resource: node.ID}
+		switch strings.ToLower(node.Type) {
+		case "service", "database", "cache", "queue":
+			ref.Service = node.ID
+		}
+		if value := strings.TrimSpace(node.Metadata["service"]); value != "" {
+			ref.Service = value
+		}
+		if value := strings.TrimSpace(node.Metadata["resource"]); value != "" {
+			ref.Resource = value
+		}
+		key := ref.Namespace + "\x00" + ref.Kind + "\x00" + ref.Service + "\x00" + ref.Resource
+		if !seen[key] {
+			seen[key] = true
+			refs = append(refs, ref)
+		}
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		left := refs[i].Namespace + "\x00" + refs[i].Kind + "\x00" + refs[i].Service + "\x00" + refs[i].Resource
+		right := refs[j].Namespace + "\x00" + refs[j].Kind + "\x00" + refs[j].Service + "\x00" + refs[j].Resource
+		return left < right
+	})
+	return refs
+}
+
 func runBrainIncidentRetrieval(ctx context.Context, deps constrainedToolDeps, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
 	state, err := brainWorkflowState(ctx)
 	if err != nil {
@@ -425,7 +546,38 @@ func runBrainIncidentRetrieval(ctx context.Context, deps constrainedToolDeps, in
 	if len(candidates) > limit {
 		candidates = candidates[:limit]
 	}
-	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "historical context retrieved; it is not current incident evidence", Candidates: candidates, NewInformation: len(candidates) > 0, Provenance: baseBrainProvenance(envelope, "historical-memory", candidates)}, nil
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "historical context retrieved; it is not current incident evidence", HistoricalIncidents: candidates, NewInformation: len(candidates) > 0, Provenance: baseBrainProvenance(envelope, "historical-memory", candidates)}, nil
+}
+
+func runBrainRunbookRetrieval(ctx context.Context, deps constrainedToolDeps, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
+	state, err := brainWorkflowState(ctx)
+	if err != nil {
+		return brainCapabilityOutput{}, err
+	}
+	envelope := newBrainEnvelope(state, "retrieve_runbooks", domain.BrainToolRetrieval, domain.AgentActionIntent{Intent: input.Intent, HypothesisIDs: input.HypothesisIDs, ExpectedObservation: input.ExpectedObservation})
+	if denied := authorizeBrainTool(state, envelope); denied != nil {
+		return *denied, nil
+	}
+	if deps.Memory == nil {
+		return errorBrainOutput(envelope, "runbook retrieval unavailable", true), nil
+	}
+	limit := input.Limit
+	if limit <= 0 || limit > 10 {
+		limit = 5
+	}
+	terms := uniqueBrainValues(input.Terms)
+	if len(terms) == 0 {
+		terms = uniqueBrainValues([]string{state.Incident.Service, state.Incident.Resource})
+	}
+	items, readErr := deps.Memory.Read(ctx, domain.MemoryQuery{IncidentID: state.Incident.ID, Agent: "kubepilot-brain", Kind: domain.MemoryProcedural, Scope: domain.MemoryScope{Cluster: state.Incident.Cluster, Namespace: state.Incident.Namespace}, Terms: terms, Limit: limit})
+	if readErr != nil {
+		return errorBrainOutput(envelope, "runbook retrieval failed", true), nil
+	}
+	status := "OK"
+	if len(items) == 0 {
+		status = "NO_RESULTS"
+	}
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: status, Summary: "procedural memory retrieved as non-factual context", Memory: items, NewInformation: len(items) > 0, Provenance: baseBrainProvenance(envelope, "procedural-memory", items)}, nil
 }
 
 func runBrainPatternRetrieval(ctx context.Context, deps constrainedToolDeps, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
@@ -433,7 +585,7 @@ func runBrainPatternRetrieval(ctx context.Context, deps constrainedToolDeps, inp
 	if err != nil {
 		return brainCapabilityOutput{}, err
 	}
-	envelope := newBrainEnvelope(state, "retrieve_causal_patterns", domain.BrainToolRetrieval, domain.AgentActionIntent{Intent: input.Intent, HypothesisIDs: input.HypothesisIDs, ExpectedObservation: input.ExpectedObservation})
+	envelope := newBrainEnvelope(state, "retrieve_patterns", domain.BrainToolRetrieval, domain.AgentActionIntent{Intent: input.Intent, HypothesisIDs: input.HypothesisIDs, ExpectedObservation: input.ExpectedObservation})
 	if denied := authorizeBrainTool(state, envelope); denied != nil {
 		return *denied, nil
 	}
@@ -448,7 +600,7 @@ func runBrainPatternRetrieval(ctx context.Context, deps constrainedToolDeps, inp
 	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "causal validation context retrieved; it is not current incident evidence", Patterns: patterns, NewInformation: len(patterns) > 0, Provenance: baseBrainProvenance(envelope, "causal-pattern-store", patterns)}, nil
 }
 
-func runBrainSubmitHypotheses(ctx context.Context, input submitBrainHypothesesInput) (brainCapabilityOutput, error) {
+func runBrainSubmitHypotheses(ctx context.Context, deps constrainedToolDeps, input submitBrainHypothesesInput) (brainCapabilityOutput, error) {
 	state, err := brainWorkflowState(ctx)
 	if err != nil {
 		return brainCapabilityOutput{}, err
@@ -470,7 +622,7 @@ func runBrainSubmitHypotheses(ctx context.Context, input submitBrainHypothesesIn
 	for _, proposal := range input.Hypotheses {
 		id := "hyp:" + ulid.Make().String()
 		hypothesis := domain.AgentHypothesis{ID: id, LineageID: id, Version: 1, Relation: domain.HypothesisRoot, Statement: proposal.Statement, Category: proposal.Category, Mechanism: proposal.Mechanism, TargetRefs: proposal.Targets, EvidenceNeeds: proposal.EvidenceNeeds, FalsificationConditions: proposal.FalsificationConditions, ModelConfidence: proposal.ModelConfidence, Status: domain.HypothesisProposed, CreatedByTurn: currentBrainTurnID(state), CreatedAt: now}
-		admission := (brainruntime.AdmissionService{}).Admit(hypothesis, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.IncidentGraph, AvailableToolCategories: available})
+		admission := (brainruntime.AdmissionService{}).Admit(hypothesis, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.IncidentGraph, ExternalInventory: deps.ExternalInventory, AvailableToolCategories: available})
 		if admission.Decision == "ADMITTED" {
 			hypothesis.Status = domain.HypothesisAdmitted
 		}
@@ -515,7 +667,7 @@ func runBrainSubmitPlan(ctx context.Context, input submitInvestigationPlanInput)
 	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "investigation plan persisted", InvestigationPlan: &plan, NewInformation: true, Provenance: baseBrainProvenance(envelope, "investigation-plan-v1", plan)}, nil
 }
 
-func runBrainReviseHypothesis(ctx context.Context, input reviseBrainHypothesisInput) (brainCapabilityOutput, error) {
+func runBrainReviseHypothesis(ctx context.Context, deps constrainedToolDeps, input reviseBrainHypothesisInput) (brainCapabilityOutput, error) {
 	state, err := brainWorkflowState(ctx)
 	if err != nil {
 		return brainCapabilityOutput{}, err
@@ -547,7 +699,7 @@ func runBrainReviseHypothesis(ctx context.Context, input reviseBrainHypothesisIn
 	}
 	id := "hyp:" + ulid.Make().String()
 	hypothesis := domain.AgentHypothesis{ID: id, LineageID: lineage, Version: version, ParentIDs: append([]string(nil), input.ParentIDs...), Relation: input.Relation, RevisionReason: input.RevisionReason, Statement: input.Hypothesis.Statement, Category: input.Hypothesis.Category, Mechanism: input.Hypothesis.Mechanism, TargetRefs: input.Hypothesis.Targets, EvidenceNeeds: input.Hypothesis.EvidenceNeeds, FalsificationConditions: input.Hypothesis.FalsificationConditions, ModelConfidence: input.Hypothesis.ModelConfidence, Status: domain.HypothesisProposed, CreatedByTurn: currentBrainTurnID(state), CreatedAt: time.Now().UTC()}
-	admission := (brainruntime.AdmissionService{}).Admit(hypothesis, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.IncidentGraph, AvailableToolCategories: availableBrainCategories(state)})
+	admission := (brainruntime.AdmissionService{}).Admit(hypothesis, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.IncidentGraph, ExternalInventory: deps.ExternalInventory, AvailableToolCategories: availableBrainCategories(state)})
 	if admission.Decision == "ADMITTED" {
 		hypothesis.Status = domain.HypothesisAdmitted
 	}
@@ -582,6 +734,36 @@ func runBrainValidateHypothesis(ctx context.Context, input validateBrainHypothes
 	causalNodes := serverValidatedCausalNodes(state.Incident.Evidence, input.SupportingEvidenceIDs, input.ExpectedCausalNodeIDs)
 	grounding, delta := (brainruntime.Grounder{}).Validate(hypothesis, state.Incident.Evidence, brainruntime.ValidationInput{SupportingEvidenceIDs: input.SupportingEvidenceIDs, ContradictingEvidenceIDs: input.ContradictingEvidenceIDs, FulfilledEvidenceNeeds: fulfilledNeeds, MissingObservations: input.MissingObservations, ExpectedCausalNodeIDs: causalNodes, CausalClaim: strings.TrimSpace(hypothesis.Mechanism) != "", TargetScopeDecisions: admission.ResourceScope, WindowStart: state.Incident.EvidenceStartAt, WindowEnd: time.Now().UTC()}, previous)
 	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "server grounding calculated from cited IDs and explicit coverage obligations", Grounding: &grounding, GroundingDelta: &delta, NewInformation: len(delta.EvidenceChange) > 0 || previous == nil || previous.Level != grounding.Level, Provenance: baseBrainProvenance(envelope, "hypothesis-grounding-v1", grounding)}, nil
+}
+
+func runBrainCompareHypotheses(ctx context.Context, input compareBrainHypothesesInput) (brainCapabilityOutput, error) {
+	state, err := brainWorkflowState(ctx)
+	if err != nil {
+		return brainCapabilityOutput{}, err
+	}
+	if state.BrainPhase != domain.BrainPhaseInvestigation && state.BrainPhase != domain.BrainPhaseReflection {
+		return phaseConstraintOutput(state, "compare_hypotheses", domain.BrainToolReasoning, input.Intent, domain.BrainPhaseInvestigation), nil
+	}
+	ids := uniqueBrainValues(input.HypothesisIDs)
+	envelope := newBrainEnvelope(state, "compare_hypotheses", domain.BrainToolReasoning, domain.AgentActionIntent{Intent: input.Intent, HypothesisIDs: ids, ExpectedObservation: input.ExpectedObservation})
+	if denied := authorizeBrainTool(state, envelope); denied != nil {
+		return *denied, nil
+	}
+	if len(ids) < 2 {
+		return constraintBrainOutput(envelope, "comparison_requires_competitors", "at least two distinct hypothesis revisions are required"), nil
+	}
+	comparisons := make([]domain.HypothesisComparison, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := findAgentHypothesis(state.AgentHypotheses, id); !ok {
+			return constraintBrainOutput(envelope, "unknown_hypothesis_revision", "comparison references an unknown hypothesis revision"), nil
+		}
+		grounding, ok := findHypothesisGrounding(state.HypothesisGroundings, id)
+		if !ok {
+			return constraintBrainOutput(envelope, "comparison_requires_validation", "every compared hypothesis must have a validation result"), nil
+		}
+		comparisons = append(comparisons, domain.HypothesisComparison{HypothesisRevisionID: id, Level: grounding.Level, Evidence: grounding.Evidence, Coverage: grounding.Coverage, MissingObservations: append([]string(nil), grounding.MissingObservations...), EvidenceSnapshotHash: grounding.EvidenceSnapshotHash})
+	}
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "grounding obligations compared without ranking or selecting a diagnosis", Comparisons: comparisons, NewInformation: true, Provenance: baseBrainProvenance(envelope, "hypothesis-comparison-v1", comparisons)}, nil
 }
 
 func serverFulfilledEvidenceNeeds(state *WorkflowState, hypothesis domain.AgentHypothesis, supportingIDs []string) []string {
@@ -721,9 +903,77 @@ func runBrainSubmitDiagnosis(ctx context.Context, input submitBrainDiagnosisInpu
 		}
 	}
 	diagnosis := domain.AgentDiagnosis{ID: "diagnosis:" + ulid.Make().String(), HypothesisRevisionID: input.HypothesisID, Statement: input.Statement, Category: input.Category, Mechanism: input.Mechanism, TargetRefs: input.Targets, ModelConfidence: input.ModelConfidence, EvidenceIDs: append([]string(nil), input.EvidenceIDs...), ValidationResultIDs: append([]string(nil), input.ValidationResultIDs...), EvidenceSnapshotHash: state.EvidenceSnapshotHash, ExecutionSnapshot: state.ExecutionSnapshot, GroundingLevel: domain.GroundingUnknown, Provisional: true, SubmittedAt: time.Now().UTC()}
-	diagnosis.GroundingLevel = grounding.Level
-	diagnosis.Provisional = grounding.Level != domain.GroundingSupported || grounding.EvidenceSnapshotHash != state.EvidenceSnapshotHash
-	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "LLM diagnosis persisted with separate Runtime grounding", Diagnosis: &diagnosis, NewInformation: true, Provenance: baseBrainProvenance(envelope, "diagnosis-persistence-v1", diagnosis)}, nil
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "PERSISTED", Summary: "LLM diagnosis persisted unchanged; validate_diagnosis must append Runtime grounding before termination or recovery", Diagnosis: &diagnosis, NewInformation: true, Provenance: baseBrainProvenance(envelope, "diagnosis-persistence-v1", diagnosis)}, nil
+}
+
+func runBrainValidateDiagnosis(ctx context.Context, input validateBrainDiagnosisInput) (brainCapabilityOutput, error) {
+	state, err := brainWorkflowState(ctx)
+	if err != nil {
+		return brainCapabilityOutput{}, err
+	}
+	if state.BrainPhase != domain.BrainPhaseDiagnosis {
+		return phaseConstraintOutput(state, "validate_diagnosis", domain.BrainToolReasoning, input.Intent, domain.BrainPhaseDiagnosis), nil
+	}
+	hypothesisID := ""
+	if state.AgentDiagnosis != nil {
+		hypothesisID = state.AgentDiagnosis.HypothesisRevisionID
+	}
+	envelope := newBrainEnvelope(state, "validate_diagnosis", domain.BrainToolReasoning, domain.AgentActionIntent{Intent: input.Intent, HypothesisIDs: []string{hypothesisID}, ExpectedObservation: input.ExpectedObservation})
+	if denied := authorizeBrainTool(state, envelope); denied != nil {
+		return *denied, nil
+	}
+	validation := domain.DiagnosisValidation{ID: "diagnosis-validation:" + ulid.Make().String(), DiagnosisID: input.DiagnosisID, HypothesisRevisionID: hypothesisID, GroundingLevel: domain.GroundingUnknown, EvidenceSnapshotHash: state.EvidenceSnapshotHash, ExecutionSnapshot: state.ExecutionSnapshot, ValidatedAt: time.Now().UTC(), Provisional: true}
+	if state.AgentDiagnosis == nil || state.AgentDiagnosis.ID != input.DiagnosisID {
+		validation.ReasonCodes = append(validation.ReasonCodes, "diagnosis_not_found")
+		return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "REJECTED", Summary: "diagnosis validation failed", DiagnosisValidation: &validation, Provenance: baseBrainProvenance(envelope, "diagnosis-validation-v1", validation)}, nil
+	}
+	diagnosis := *state.AgentDiagnosis
+	hypothesis, hypothesisOK := findAgentHypothesis(state.AgentHypotheses, diagnosis.HypothesisRevisionID)
+	admission, admissionOK := findHypothesisAdmission(state.HypothesisAdmissions, diagnosis.HypothesisRevisionID)
+	grounding, groundingOK := findHypothesisGrounding(state.HypothesisGroundings, diagnosis.HypothesisRevisionID)
+	if !hypothesisOK {
+		validation.ReasonCodes = append(validation.ReasonCodes, "hypothesis_not_found")
+	}
+	if !admissionOK || admission.Decision != "ADMITTED" {
+		validation.ReasonCodes = append(validation.ReasonCodes, "hypothesis_not_admitted")
+	}
+	if !groundingOK || !brainContainsString(diagnosis.ValidationResultIDs, grounding.ID) {
+		validation.ReasonCodes = append(validation.ReasonCodes, "current_grounding_not_cited")
+	}
+	if groundingOK && grounding.EvidenceSnapshotHash != state.EvidenceSnapshotHash {
+		validation.ReasonCodes = append(validation.ReasonCodes, "grounding_snapshot_stale")
+	}
+	if diagnosis.EvidenceSnapshotHash != state.EvidenceSnapshotHash {
+		validation.ReasonCodes = append(validation.ReasonCodes, "diagnosis_snapshot_stale")
+	}
+	if diagnosis.ExecutionSnapshot != state.ExecutionSnapshot {
+		validation.ReasonCodes = append(validation.ReasonCodes, "execution_snapshot_mismatch")
+	}
+	if hypothesisOK && (diagnosis.Statement != hypothesis.Statement || diagnosis.Category != hypothesis.Category || diagnosis.Mechanism != hypothesis.Mechanism || diagnosis.ModelConfidence != hypothesis.ModelConfidence || brainruntime.Hash(diagnosis.TargetRefs) != brainruntime.Hash(hypothesis.TargetRefs)) {
+		validation.ReasonCodes = append(validation.ReasonCodes, "diagnosis_semantics_changed")
+	}
+	evidenceByID := map[string]bool{}
+	for _, item := range state.Incident.Evidence {
+		evidenceByID[item.ID] = true
+	}
+	for _, id := range diagnosis.EvidenceIDs {
+		if !evidenceByID[id] {
+			validation.ReasonCodes = append(validation.ReasonCodes, "unknown_evidence_id")
+			break
+		}
+	}
+	validation.Valid = len(validation.ReasonCodes) == 0
+	if groundingOK {
+		validation.GroundingLevel = grounding.Level
+	}
+	validation.Provisional = !validation.Valid || validation.GroundingLevel != domain.GroundingSupported
+	diagnosis.GroundingLevel = validation.GroundingLevel
+	diagnosis.Provisional = validation.Provisional
+	status := "VALIDATED"
+	if !validation.Valid {
+		status = "REJECTED"
+	}
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: status, Summary: "Runtime diagnosis validation appended without modifying LLM diagnosis semantics", Diagnosis: &diagnosis, DiagnosisValidation: &validation, DiagnosisFinalized: validation.Valid, NewInformation: true, Provenance: baseBrainProvenance(envelope, "diagnosis-validation-v1", validation)}, nil
 }
 
 func runBrainSubmitRecovery(ctx context.Context, input submitBrainRecoveryInput) (brainCapabilityOutput, error) {
@@ -962,7 +1212,7 @@ func newBrainEnvelope(state *WorkflowState, toolName string, category domain.Bra
 
 func authorizeBrainTool(state *WorkflowState, envelope domain.AgentActionEnvelope) *brainCapabilityOutput {
 	if state != nil && state.BrainBudget.ToolCallsExhausted && !isToolBudgetClosingAction(envelope.ToolName) {
-		return pointer(constraintBrainOutput(envelope, "tool_call_budget_exhausted", "investigation ToolCall budget is exhausted; only submit_diagnosis or finish_investigation may use the existing state"))
+		return pointer(constraintBrainOutput(envelope, "tool_call_budget_exhausted", "investigation ToolCall budget is exhausted; only submit_diagnosis, validate_diagnosis, or finish_investigation may use the existing state"))
 	}
 	allowed := map[domain.BrainToolCategory]bool{domain.BrainToolControl: true}
 	for _, category := range allowedCategoriesForState(state) {

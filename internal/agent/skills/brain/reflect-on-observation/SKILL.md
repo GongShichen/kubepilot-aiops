@@ -9,7 +9,7 @@ description: Reflect on material grounding, constraint, tool, recovery, or verif
 
 The reflection router supplies a valid trigger and remaining reflection budget.
 
-## Inputs
+## Server-Owned Inputs
 
 Use only the triggering Tool Result, GroundingDelta, affected hypotheses, and current budget.
 
@@ -23,15 +23,19 @@ Use only the triggering Tool Result, GroundingDelta, affected hypotheses, and cu
 6. Select one bounded next goal or escalation. A denied Tool Category requires a compatible Skill activation before category selection.
 7. Never retry an unchanged constraint request, and do not repeat the observation verbatim.
 
-## Allowed actions
+## Allowed Tools
 
 Use hypothesis submission when no hypothesis exists; otherwise use reflection submission, belief commit, hypothesis revision, Skill request, or control capabilities only.
 
-## Output contract
+## Required IDs
+
+Every Incident, Resource, Evidence, Hypothesis Revision, Validation, Diagnosis, Proposal, Approval, Snapshot, and Tool Call identifier used by this Skill must be copied from the current server-owned context or a Tool result. Never synthesize an identifier.
+
+## Output Contract
 
 Return a structured corrective action. When a hypothesis exists, return BeliefDelta records and a next goal. When none exists, return a hypothesis submission or Skill request that resolves the procedural blocker. Do not expose hidden reasoning.
 
-## Output example
+## Output Example
 
 With an admitted hypothesis, commit only the subjective confidence change:
 
@@ -41,7 +45,7 @@ With an admitted hypothesis, commit only the subjective confidence change:
 
 Without an admitted hypothesis, use the `submit_hypotheses` example from `form-hypotheses` or request the missing Skill; do not invent a hypothesis ID.
 
-## Stop and failure conditions
+## Stop & Failure Conditions
 
 Stop when belief changes are committed, the missing Skill or hypothesis is submitted, or the trigger cannot be resolved safely. Never claim success after an empty or unclassified Tool Result.
 

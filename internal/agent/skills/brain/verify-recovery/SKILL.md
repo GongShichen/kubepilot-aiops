@@ -9,7 +9,7 @@ description: Interpret server verification after an approved state change.
 
 A confirmed mutation and server verification record exist.
 
-## Inputs
+## Server-Owned Inputs
 
 Use expected outcome, verification checks, state-change provenance, and current evidence.
 
@@ -21,15 +21,19 @@ Use expected outcome, verification checks, state-change provenance, and current 
 4. Request reflection only for confirmed recoverable failure.
 5. Escalate unknown outcomes.
 
-## Allowed actions
+## Allowed Tools
 
 Use verification and control capabilities only.
 
-## Output contract
+## Required IDs
+
+Every Incident, Resource, Evidence, Hypothesis Revision, Validation, Diagnosis, Proposal, Approval, Snapshot, and Tool Call identifier used by this Skill must be copied from the current server-owned context or a Tool result. Never synthesize an identifier.
+
+## Output Contract
 
 Submit completion, recoverable failure reflection, or escalation.
 
-## Output example
+## Output Example
 
 The Runtime owns success/failure termination. For an unknown outcome, request human escalation:
 
@@ -37,7 +41,7 @@ The Runtime owns success/failure termination. For an unknown outcome, request hu
 {"tool":"finish_investigation","arguments":{"intent":"escalate an unconfirmed execution outcome without another mutation","expected_observation":["audited human escalation"],"reason":"HUMAN_ESCALATION","hypothesis_id":"<selected-hypothesis-revision-id>","unresolved_gaps":["execution outcome is not confirmed by server verification"]}}
 ```
 
-## Stop and failure conditions
+## Stop & Failure Conditions
 
 Stop on verified success, confirmed failure handoff, or unknown outcome escalation.
 

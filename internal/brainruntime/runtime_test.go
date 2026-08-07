@@ -27,6 +27,11 @@ func TestAdmissionChecksScopeAndVerifiabilityButNotMechanismPlausibility(t *test
 	if denied.Decision != "REJECTED" || denied.ResourceScope[0].Reason != "cross_namespace_denied" {
 		t.Fatalf("cross namespace target was not rejected: %+v", denied)
 	}
+	h.TargetRefs = []domain.ResourceRef{{Kind: "ExternalService", Service: "payments-db"}}
+	external := (AdmissionService{}).Admit(h, AdmissionContext{Incident: incident, ExternalInventory: []domain.ResourceRef{{Kind: "ExternalService", Service: "payments-db"}}, AvailableToolCategories: []domain.BrainToolCategory{domain.BrainToolEvidence}})
+	if external.Decision != "ADMITTED" || external.GroundingLevel != domain.AdmissionIndirect || external.ResourceScope[0].Reason != "registered_external_inventory" {
+		t.Fatalf("registered external inventory target was not admitted as indirect scope: %+v", external)
+	}
 }
 
 func TestToolPolicyRejectsMissingBindingRepeatsAndNoInformation(t *testing.T) {

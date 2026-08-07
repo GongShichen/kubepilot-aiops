@@ -93,6 +93,7 @@ type SupervisorDeps struct {
 	CausalPatterns       causalknowledge.Reader
 	DiscoveredPatterns   causaldiscovery.Reader
 	Memory               MemoryService
+	ExternalInventory    []domain.ResourceRef
 	VerificationInterval time.Duration
 	VerificationTimeout  time.Duration
 }
@@ -155,7 +156,7 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	if err != nil {
 		return nil, err
 	}
-	runtimeDeps := constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory, Transition: transition}
+	runtimeDeps := constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory, ExternalInventory: append([]domain.ResourceRef(nil), deps.ExternalInventory...), Transition: transition}
 	brainTools, err := buildBrainCapabilities(runtimeDeps, brainResolver)
 	if err != nil {
 		return nil, err
@@ -295,14 +296,14 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 				}
 			}
 			s.Errors = append(s.Errors, err.Error())
-			appendBrainStateChange(s, "executor", strings.ToUpper(execution.Outcome), "recovery execution did not produce a confirmed mutation", true, brainApprovalID(s))
+			appendBrainStateChange(s, "execute_recovery", strings.ToUpper(execution.Outcome), "recovery execution did not produce a confirmed mutation", true, brainApprovalID(s))
 			_ = transition(ctx, s.Incident, status)
 			return s, nil
 		}
 		execution.ConfirmedMutations++
 		execution.Outcome = "succeeded"
 		execution.CompletedAt = time.Now().UTC()
-		appendBrainStateChange(s, "executor", "MUTATION_CONFIRMED", "registered Kubernetes mutation completed", true, brainApprovalID(s))
+		appendBrainStateChange(s, "execute_recovery", "MUTATION_CONFIRMED", "registered Kubernetes mutation completed", true, brainApprovalID(s))
 		if err := transition(ctx, s.Incident, domain.StatusVerifying); err != nil {
 			return s, err
 		}
@@ -318,7 +319,14 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	}
 	if err := add("incident_finalizer", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
 		s.Incident.UpdatedAt = time.Now().UTC()
-		s.Incident.DiagnosisLedger = &s.DiagnosisLedger
+		if domain.IsKubePilotBrainMethod(s.Incident.DiagnosisMethod) {
+			// The Brain runtime has a dedicated audit projection. Attaching the
+			// deterministic baseline ledger would reintroduce the deleted legacy
+			// diagnosis boundary and make an export appear dual-written.
+			s.Incident.DiagnosisLedger = nil
+		} else {
+			s.Incident.DiagnosisLedger = &s.DiagnosisLedger
+		}
 		if s.WorkflowAttempt != nil {
 			s.WorkflowAttempt.Status = domain.WorkflowAttemptCompleted
 			s.WorkflowAttempt.CompletedAt = time.Now().UTC()
@@ -472,7 +480,7 @@ func runVerificationController(ctx context.Context, state *WorkflowState, deps S
 			if err := transition(ctx, state.Incident, domain.StatusResolved); err != nil {
 				return state, err
 			}
-			appendBrainStateChange(state, "verification", "VERIFICATION_SUCCEEDED", combined.Message, true, brainApprovalID(state))
+			appendBrainStateChange(state, "verify_recovery", "VERIFICATION_SUCCEEDED", combined.Message, true, brainApprovalID(state))
 			setFinalBrainTermination(state, domain.TerminationRecoverySucceeded, nil)
 			return state, nil
 		}
@@ -484,7 +492,7 @@ func runVerificationController(ctx context.Context, state *WorkflowState, deps S
 			if err := transition(ctx, state.Incident, domain.StatusRecoveryFailed); err != nil {
 				return state, err
 			}
-			appendBrainStateChange(state, "verification", "VERIFICATION_FAILED", combined.Message, true, brainApprovalID(state))
+			appendBrainStateChange(state, "verify_recovery", "VERIFICATION_FAILED", combined.Message, true, brainApprovalID(state))
 			if domain.IsKubePilotBrainMethod(state.Incident.DiagnosisMethod) && brainReflectionAvailable(state, domain.ReflectionVerificationFail) {
 				trigger := domain.ReflectionVerificationFail
 				state.PendingReflection = &trigger
@@ -947,7 +955,7 @@ func safeIncident(in *domain.Incident) map[string]any {
 func (s *Supervisor) Run(ctx context.Context, in *domain.Incident) (*WorkflowState, error) {
 	handler := workflowgraph.NewEinoCallback(in.ID, s.eventSink)
 	ctx = withAgentCallbacks(ctx, handler)
-	initial := &WorkflowState{Workflow: WorkflowName, Incident: in, ModelSnapshotHash: in.ModelConfigHash, WorkflowAttempt: in.WorkflowAttempt}
+	initial := &WorkflowState{Workflow: WorkflowName, Incident: in, ModelSnapshotHash: in.ModelConfigHash, BrainState: BrainState{WorkflowAttempt: in.WorkflowAttempt}}
 	if in.ExecutionSnapshot != nil {
 		initial.ExecutionSnapshot = *in.ExecutionSnapshot
 	}

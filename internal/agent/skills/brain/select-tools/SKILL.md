@@ -9,7 +9,7 @@ description: Select a bounded tool category and operation for an explicit inform
 
 The Brain has an investigation goal and an active phase Skill.
 
-## Inputs
+## Server-Owned Inputs
 
 Use the allowed tool catalogue, tool policy, prior fingerprints, and budget.
 
@@ -21,15 +21,19 @@ Use the allowed tool catalogue, tool policy, prior fingerprints, and budget.
 4. Select the smallest compatible tool category.
 5. Avoid exact repeats and no-information streaks.
 
-## Allowed actions
+## Allowed Tools
 
 Request only tools exposed by the Runtime. Do not compose raw PromQL, LogQL, kubectl, shell, or arbitrary filters.
 
-## Output contract
+## Required IDs
+
+Every Incident, Resource, Evidence, Hypothesis Revision, Validation, Diagnosis, Proposal, Approval, Snapshot, and Tool Call identifier used by this Skill must be copied from the current server-owned context or a Tool result. Never synthesize an identifier.
+
+## Output Contract
 
 Emit one or more read-only calls in one category, or one serial reasoning/control call.
 
-## Output example
+## Output Example
 
 Activate the required optional Skill before selecting its category. When every
 accepted Skill narrows to the same non-control category, the Runtime returns
@@ -43,7 +47,7 @@ that category in the activation result and the next turn executes it directly:
 {"tool":"select_tool_category","arguments":{"intent":"route the next turn to bounded evidence collection","expected_observation":["EVIDENCE category activation"],"category":"EVIDENCE"}}
 ```
 
-## Stop and failure conditions
+## Stop & Failure Conditions
 
 Stop when no policy-compliant call can add information.
 

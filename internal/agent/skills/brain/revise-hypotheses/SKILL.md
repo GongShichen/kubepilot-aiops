@@ -9,7 +9,7 @@ description: Revise belief through immutable hypothesis lineage.
 
 A GroundingDelta or Reflection identifies a material change.
 
-## Inputs
+## Server-Owned Inputs
 
 Use parent revisions, BeliefDelta, cited evidence, and validation IDs.
 
@@ -21,21 +21,25 @@ Use parent revisions, BeliefDelta, cited evidence, and validation IDs.
 4. Create a new revision instead of mutating a terminal revision.
 5. Respect revision and branch budgets.
 
-## Allowed actions
+## Allowed Tools
 
 Use revise-hypothesis and belief-commit capabilities only.
 
-## Output contract
+## Required IDs
+
+Every Incident, Resource, Evidence, Hypothesis Revision, Validation, Diagnosis, Proposal, Approval, Snapshot, and Tool Call identifier used by this Skill must be copied from the current server-owned context or a Tool result. Never synthesize an identifier.
+
+## Output Contract
 
 Submit a new immutable revision and any confidence update separately.
 
-## Output example
+## Output Example
 
 ```json
 {"tool":"revise_hypothesis","arguments":{"intent":"replace the contradicted mechanism while preserving lineage","expected_observation":["new revision admission and lineage IDs"],"parent_ids":["<parent-hypothesis-revision-id>"],"relation":"REPLACE","revision_reason":"current validation <grounding-id> contradicts the parent mechanism","hypothesis":{"statement":"The observed degradation is caused by a different verifiable mechanism","category":"application","mechanism":"<revised-mechanism>","targets":[{"namespace":"<incident-namespace>","service":"<server-service>","kind":"Service"}],"evidence_needs":["current evidence for the revised mechanism"],"falsification_conditions":["the revised mechanism is absent in current observations"],"model_confidence":0.45}}}
 ```
 
-## Stop and failure conditions
+## Stop & Failure Conditions
 
 Stop when the new revision is admitted, rejected, or budgets prohibit another branch.
 

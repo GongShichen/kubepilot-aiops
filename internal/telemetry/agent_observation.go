@@ -281,7 +281,8 @@ func observeBrainAudit(observation *AgentObservation, incident *domain.Incident,
 		selected, selectedOK := hypotheses[diagnosis.HypothesisRevisionID]
 		selectedGrounding, groundedOK := groundings[diagnosis.HypothesisRevisionID]
 		observation.HypothesisConverged = selectedOK && groundedOK && selectedGrounding.Level == domain.GroundingSupported
-		observation.UnsupportedDiagnosis = !groundedOK || selectedGrounding.Level == domain.GroundingUnknown || selectedGrounding.Level == domain.GroundingRefuted || len(diagnosis.EvidenceIDs) == 0 || len(diagnosis.ValidationResultIDs) == 0
+		validationOK := validDiagnosisValidation(investigation, diagnosis)
+		observation.UnsupportedDiagnosis = !validationOK || !groundedOK || selectedGrounding.Level == domain.GroundingUnknown || selectedGrounding.Level == domain.GroundingRefuted || len(diagnosis.EvidenceIDs) == 0 || len(diagnosis.ValidationResultIDs) == 0
 		observation.GroundedDecision = groundedDecision(incident, investigation, selected, selectedGrounding, selectedOK && groundedOK)
 		if observation.HypothesisCorrections > 0 && observation.GroundedDecision && hasRefutedAncestor(selected.ID, hypotheses, refuted, map[string]bool{}) {
 			observation.GroundedHypothesisCorrections++
@@ -298,7 +299,7 @@ func observeBrainAudit(observation *AgentObservation, incident *domain.Incident,
 
 func completeToolProvenance(result domain.ToolResultRecord) bool {
 	p := result.Provenance
-	if p.ToolCallID == "" || p.ToolName == "" || p.ToolSchemaHash == "" || p.Collector == "" || p.WindowStart.IsZero() || p.WindowEnd.IsZero() || p.ObservedAt.IsZero() || p.RawArtifactHash == "" || p.ParserVersion == "" {
+	if p.ToolCallID == "" || p.ToolName == "" || p.ToolSchemaHash == "" || p.Collector == "" || len(p.TargetRefs) == 0 || p.WindowStart.IsZero() || p.WindowEnd.IsZero() || p.ObservedAt.IsZero() || p.RawArtifactHash == "" || p.ParserVersion == "" {
 		return false
 	}
 	if result.Class == domain.ToolResultEvidence {
@@ -312,7 +313,7 @@ func completeToolProvenance(result domain.ToolResultRecord) bool {
 
 func groundedDecision(incident *domain.Incident, investigation *domain.Investigation, selected domain.AgentHypothesis, grounding domain.HypothesisGrounding, found bool) bool {
 	diagnosis := investigation.AgentDiagnosis
-	if !found || diagnosis == nil || selected.LineageID == "" || len(diagnosis.EvidenceIDs) == 0 || len(diagnosis.ValidationResultIDs) == 0 {
+	if !found || diagnosis == nil || !validDiagnosisValidation(investigation, diagnosis) || selected.LineageID == "" || len(diagnosis.EvidenceIDs) == 0 || len(diagnosis.ValidationResultIDs) == 0 {
 		return false
 	}
 	if diagnosis.EvidenceSnapshotHash == "" || diagnosis.EvidenceSnapshotHash != selected.LastValidatedSnapshotHash || diagnosis.EvidenceSnapshotHash != grounding.EvidenceSnapshotHash {
@@ -348,6 +349,18 @@ func groundedDecision(incident *domain.Incident, investigation *domain.Investiga
 		}
 	}
 	return true
+}
+
+func validDiagnosisValidation(investigation *domain.Investigation, diagnosis *domain.AgentDiagnosis) bool {
+	if investigation == nil || diagnosis == nil || diagnosis.ID == "" || diagnosis.Provisional {
+		return false
+	}
+	for _, validation := range investigation.DiagnosisValidations {
+		if validation.DiagnosisID == diagnosis.ID && validation.HypothesisRevisionID == diagnosis.HypothesisRevisionID && validation.Valid && !validation.Provisional && validation.GroundingLevel == diagnosis.GroundingLevel && validation.EvidenceSnapshotHash == diagnosis.EvidenceSnapshotHash && validation.ExecutionSnapshot == diagnosis.ExecutionSnapshot {
+			return true
+		}
+	}
+	return false
 }
 
 func completeLineage(id string, hypotheses []domain.AgentHypothesis, visiting map[string]bool) bool {

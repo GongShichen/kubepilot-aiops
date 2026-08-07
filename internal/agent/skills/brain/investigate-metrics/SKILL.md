@@ -9,7 +9,7 @@ description: Investigate metric evidence using bounded server-compiled queries.
 
 A metric evidence need and resolved target exist.
 
-## Inputs
+## Server-Owned Inputs
 
 Use hypotheses, expected observations, time window, and metric signal reference.
 
@@ -20,21 +20,25 @@ Use hypotheses, expected observations, time window, and metric signal reference.
 3. Prefer independent metrics over repeated variants.
 4. Treat empty or stale results as missing observation, not healthy evidence.
 
-## Allowed actions
+## Allowed Tools
 
 Use metric evidence tools only. Read references/metric-signals.md when selecting signal kinds.
 
-## Output contract
+## Required IDs
+
+Every Incident, Resource, Evidence, Hypothesis Revision, Validation, Diagnosis, Proposal, Approval, Snapshot, and Tool Call identifier used by this Skill must be copied from the current server-owned context or a Tool result. Never synthesize an identifier.
+
+## Output Contract
 
 Return an AgentActionIntent with target, hypothesis IDs, evidence need, and expected observation.
 
-## Output example
+## Output Example
 
 ```json
-{"tool":"query_prometheus_evidence","arguments":{"intent":"distinguish the bound resource and dependency hypotheses","expected_observation":["current and baseline server-normalized metric states"],"targets":[{"namespace":"<incident-namespace>","service":"<server-service>","kind":"Service"}],"hypothesis_ids":["<hypothesis-revision-id>"],"evidence_need":["current resource pressure state"],"signal_kinds":["cpu","memory","request_rate"],"window_minutes":5}}
+{"tool":"query_metrics","arguments":{"intent":"distinguish the bound resource and dependency hypotheses","expected_observation":["current and baseline server-normalized metric states"],"targets":[{"namespace":"<incident-namespace>","service":"<server-service>","kind":"Service"}],"hypothesis_ids":["<hypothesis-revision-id>"],"evidence_need":["current resource pressure state"],"signal_kinds":["cpu","memory","request_rate"],"window_minutes":5}}
 ```
 
-## Stop and failure conditions
+## Stop & Failure Conditions
 
 Stop after a decisive observation, two no-information results, or policy rejection.
 

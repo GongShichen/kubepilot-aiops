@@ -322,11 +322,11 @@ func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowSta
 	state.Incident.ExecutionSnapshot = &state.ExecutionSnapshot
 	state.Incident.WorkflowAttempt = state.WorkflowAttempt
 	state.Incident.SkillSnapshotHash = r.resolver.SnapshotHash()
-	payload := map[string]any{"incident": safeIncident(state.Incident), "understanding": state.IncidentUnderstanding, "plan": state.Incident.Investigation.Plan, "phase": state.BrainPhase, "evidence_snapshot_hash": state.EvidenceSnapshotHash, "evidence_view": brainEvidenceViews(state, state.Incident.Evidence, 48<<10, 12), "hypotheses": state.AgentHypotheses, "admissions": state.HypothesisAdmissions, "groundings": state.HypothesisGroundings, "grounding_deltas": tailGroundingDeltas(state.GroundingDeltas, 5), "recent_tool_results": tailBrainToolExecutions(state.ToolExecutions, 5), "memory_reads": state.Incident.Investigation.MemoryReads, "causal_patterns": tailCausalPatterns(state.CausalPatterns, 10), "loaded_skill_references": state.LoadedSkillReferences, "diagnosis": state.AgentDiagnosis, "recovery_plan": state.AgentRecoveryPlan, "budget": state.BrainBudget, "active_tool_category": effectiveToolCategory(state), "execution_snapshot": state.ExecutionSnapshot}
+	payload := map[string]any{"incident": safeIncident(state.Incident), "understanding": state.IncidentUnderstanding, "plan": state.InvestigationPlan, "phase": state.BrainPhase, "evidence_snapshot_hash": state.EvidenceSnapshotHash, "evidence_view": brainEvidenceViews(state, state.Incident.Evidence, 48<<10, 12), "hypotheses": state.AgentHypotheses, "admissions": state.HypothesisAdmissions, "groundings": state.HypothesisGroundings, "grounding_deltas": tailGroundingDeltas(state.GroundingDeltas, 5), "recent_tool_results": tailBrainToolExecutions(state.ToolExecutions, 5), "memory_reads": state.Incident.Investigation.MemoryReads, "causal_patterns": tailCausalPatterns(state.BrainCausalPatterns, 10), "loaded_skill_references": state.LoadedSkillReferences, "diagnosis": state.AgentDiagnosis, "recovery_plan": state.AgentRecoveryPlan, "budget": state.BrainBudget, "active_tool_category": effectiveToolCategory(state), "execution_snapshot": state.ExecutionSnapshot}
 	raw, _ := json.Marshal(payload)
 	system := "You are KubePilot's LLM Brain. You own investigation, open-world hypotheses, subjective belief revision, diagnosis selection, and recovery planning. The Runtime owns facts, grounding, constraints, authorization, execution, and verification. Follow the injected Skills exactly. Use only an exposed structured tool; do not answer in prose or reveal hidden chain-of-thought. Constraint or tool errors are not Incident evidence.\n\n" + resolved.Prompt
 	if state.BrainBudget.ToolCallsExhausted {
-		system += "\n\nThe investigation ToolCall budget is exhausted. Do not request more evidence, retrieval, validation, Skill loading, reflection, or recovery. Use only the existing structured Evidence, Hypotheses, Grounding, and provenance. If no Diagnosis is persisted, call submit_diagnosis with the best supported existing revision or call finish_investigation with HUMAN_ESCALATION when the existing state cannot support one. If a Diagnosis is already persisted, call finish_investigation. These closing actions do not reopen the ToolCall budget."
+		system += "\n\nThe investigation ToolCall budget is exhausted. Do not request more evidence, retrieval, hypothesis validation, Skill loading, reflection, or recovery. Use only the existing structured Evidence, Hypotheses, Grounding, and provenance. If no Diagnosis is persisted, call submit_diagnosis with the best supported existing revision or call finish_investigation with HUMAN_ESCALATION when the existing state cannot support one. A persisted Diagnosis must then be passed through validate_diagnosis before finish_investigation. These closing actions do not reopen the ToolCall budget."
 	}
 	messages := []*schema.Message{schema.SystemMessage(system)}
 	messages = append(messages, boundedBrainMessageHistory(state.BrainMessages, 8, 64<<10)...)
@@ -430,7 +430,7 @@ func enterToolBudgetFinalization(state *WorkflowState) {
 
 func isToolBudgetClosingAction(toolName string) bool {
 	switch toolName {
-	case "submit_diagnosis", "finish_investigation":
+	case "submit_diagnosis", "validate_diagnosis", "finish_investigation":
 		return true
 	default:
 		return false

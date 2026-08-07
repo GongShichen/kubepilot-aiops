@@ -38,6 +38,7 @@ type constrainedToolDeps struct {
 	CausalPatterns     causalknowledge.Reader
 	DiscoveredPatterns causaldiscovery.Reader
 	Memory             MemoryService
+	ExternalInventory  []domain.ResourceRef
 	Transition         func(context.Context, *domain.Incident, domain.IncidentStatus) error
 }
 
