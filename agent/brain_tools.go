@@ -960,6 +960,9 @@ func newBrainEnvelope(state *WorkflowState, toolName string, category domain.Bra
 }
 
 func authorizeBrainTool(state *WorkflowState, envelope domain.AgentActionEnvelope) *brainCapabilityOutput {
+	if state != nil && state.BrainBudget.ToolCallsExhausted && !isToolBudgetClosingAction(envelope.ToolName) {
+		return pointer(constraintBrainOutput(envelope, "tool_call_budget_exhausted", "investigation ToolCall budget is exhausted; only submit_diagnosis or finish_investigation may use the existing state"))
+	}
 	allowed := map[domain.BrainToolCategory]bool{domain.BrainToolControl: true}
 	for _, category := range allowedCategoriesForState(state) {
 		allowed[category] = true

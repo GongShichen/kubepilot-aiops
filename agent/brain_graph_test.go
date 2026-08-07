@@ -334,6 +334,111 @@ func TestBrainCannotForgeRuntimeOwnedTerminationOutcome(t *testing.T) {
 	}
 }
 
+func TestToolCallBudgetExhaustionRoutesToBrainFinalization(t *testing.T) {
+	budget := brainruntime.DefaultBudget()
+	trigger := domain.ReflectionCriticalEvidence
+	state := &WorkflowState{
+		Incident:           &domain.Incident{ID: "tool-budget", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Investigation: &domain.Investigation{}},
+		BrainPhase:         domain.BrainPhaseInvestigation,
+		ActiveToolCategory: domain.BrainToolEvidence,
+		BrainToolPolicy:    brainruntime.DefaultToolCallingPolicy(),
+		BrainBudget: domain.BrainBudgetState{
+			Limits: budget,
+			Usage:  domain.BrainBudgetUsage{Turns: 10, ToolCalls: budget.MaxToolCalls},
+		},
+		PendingReflection: &trigger,
+	}
+	message := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "over-budget", Type: "function", Function: schema.FunctionCall{Name: "query_metrics_evidence", Arguments: `{}`}}}}
+	result, err := (&brainGraphRuntime{}).actionGateway(withBrainWorkflowState(context.Background(), state), message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Termination != nil || !state.BrainBudget.ToolCallsExhausted || len(result.ToolCalls) != 1 {
+		t.Fatalf("ToolCall exhaustion terminated or erased the Brain action: state=%+v message=%+v", state.Termination, result)
+	}
+	decision := authorizeBrainTool(state, domain.AgentActionEnvelope{
+		ActionID: "over-budget", IncidentID: state.Incident.ID, ToolName: "query_metrics_evidence", ToolCategory: domain.BrainToolEvidence,
+		Intent: domain.AgentActionIntent{Intent: "collect more metrics", ExpectedObservation: []string{"metric evidence"}},
+	})
+	if decision == nil || decision.ConstraintCode != "tool_call_budget_exhausted" {
+		t.Fatalf("post-budget investigation call was not explicitly constrained: %+v", decision)
+	}
+	route, err := (&brainGraphRuntime{}).reflectionRoute(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route != "brain_termination_router" || state.Termination != nil || state.PendingReflection != nil || state.BrainPhase != domain.BrainPhaseDiagnosis || state.ActiveToolCategory != domain.BrainToolReasoning {
+		t.Fatalf("ToolCall exhaustion did not route to diagnosis finalization: route=%s state=%+v", route, state)
+	}
+}
+
+func TestToolCallBudgetAllowsAuditedClosingActionsWithoutOverflow(t *testing.T) {
+	budget := brainruntime.DefaultBudget()
+	state := &WorkflowState{
+		Incident:              &domain.Incident{ID: "tool-budget-close", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Investigation: &domain.Investigation{}},
+		BrainPhase:            domain.BrainPhaseDiagnosis,
+		ActiveToolCategory:    domain.BrainToolReasoning,
+		ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
+		BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
+		BrainBudget: domain.BrainBudgetState{
+			Limits:             budget,
+			Usage:              domain.BrainBudgetUsage{Turns: 10, ToolCalls: budget.MaxToolCalls},
+			ToolCallsExhausted: true,
+		},
+		ExecutionSnapshot: domain.ExecutionSnapshot{ToolSchemaHash: "schema-hash"},
+	}
+	envelope := domain.AgentActionEnvelope{
+		ActionID: "close", IncidentID: state.Incident.ID, ToolName: "submit_diagnosis", ToolCategory: domain.BrainToolReasoning,
+		Intent: domain.AgentActionIntent{Intent: "finalize from existing evidence", ExpectedObservation: []string{"persisted diagnosis"}},
+	}
+	if denied := authorizeBrainTool(state, envelope); denied != nil {
+		t.Fatalf("closing diagnosis action was rejected after ToolCall exhaustion: %+v", denied)
+	}
+	output := brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "diagnosis persisted", Provenance: domain.ToolResultProvenance{Collector: "brain-runtime", ObservedAt: time.Now().UTC()}}
+	raw, err := json.Marshal(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := &schema.Message{Role: schema.Tool, ToolCallID: envelope.ActionID, ToolName: envelope.ToolName, Content: string(raw)}
+	if _, err = (&brainGraphRuntime{}).classifyToolResults(withBrainWorkflowState(context.Background(), state), []*schema.Message{message}); err != nil {
+		t.Fatal(err)
+	}
+	if state.BrainBudget.Usage.ToolCalls != budget.MaxToolCalls || len(state.ToolExecutions) != 1 {
+		t.Fatalf("closing action overflowed ToolCall usage or was not audited: budget=%+v executions=%+v", state.BrainBudget, state.ToolExecutions)
+	}
+}
+
+func TestToolCallBudgetFinalizationContextUsesExistingState(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := brainruntime.DefaultBudget()
+	state := &WorkflowState{
+		Incident: &domain.Incident{
+			ID: "tool-budget-context", DiagnosisMethod: domain.DiagnosisMethodKubePilot,
+			Investigation: &domain.Investigation{Architecture: "eino-native-self-reflective-brain"},
+		},
+		BrainPhase:         domain.BrainPhaseInvestigation,
+		ActiveToolCategory: domain.BrainToolEvidence,
+		BrainBudget: domain.BrainBudgetState{
+			Limits: budget,
+			Usage:  domain.BrainBudgetUsage{Turns: 10, ToolCalls: budget.MaxToolCalls},
+		},
+	}
+	runtime := &brainGraphRuntime{resolver: resolver, toolHash: "tool-schema", policyHash: "policy"}
+	messages, err := runtime.contextBuilder(context.Background(), state, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.BrainPhase != domain.BrainPhaseDiagnosis || state.ActiveToolCategory != domain.BrainToolReasoning || !state.BrainBudget.ToolCallsExhausted {
+		t.Fatalf("context did not enter diagnosis finalization: %+v", state)
+	}
+	if len(messages) < 2 || !strings.Contains(messages[0].Content, "ToolCall budget is exhausted") || !strings.Contains(messages[len(messages)-1].Content, `"tool_calls_exhausted":true`) {
+		t.Fatalf("model was not told to conclude from existing state: %+v", messages)
+	}
+}
+
 func TestDiagnosisCannotRewriteCommittedHypothesis(t *testing.T) {
 	now := time.Now().UTC()
 	target := domain.ResourceRef{Namespace: "team-a", Service: "api", Resource: "api", Kind: "Service"}

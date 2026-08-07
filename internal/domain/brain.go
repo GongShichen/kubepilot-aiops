@@ -356,8 +356,9 @@ type BrainBudgetUsage struct {
 }
 
 type BrainBudgetState struct {
-	Limits BrainBudget      `json:"limits"`
-	Usage  BrainBudgetUsage `json:"usage"`
+	Limits             BrainBudget      `json:"limits"`
+	Usage              BrainBudgetUsage `json:"usage"`
+	ToolCallsExhausted bool             `json:"tool_calls_exhausted,omitempty"`
 }
 
 type ToolCallingPolicy struct {

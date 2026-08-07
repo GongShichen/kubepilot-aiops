@@ -41,6 +41,8 @@ Copy immutable semantics and confidence from the selected revision:
 
 Stop with confident diagnosis, provisional diagnosis, continued investigation, or escalation.
 
+When `budget.tool_calls_exhausted` is true, do not request new Evidence, Retrieval, Validation, Reflection, Skills, or Recovery. Use the existing revisions and Grounding to call `submit_diagnosis`, or call `finish_investigation` with `HUMAN_ESCALATION` when the existing state cannot support a diagnosis.
+
 ## Handoff
 
 Hand off to plan-recovery only when Runtime permission can be evaluated.

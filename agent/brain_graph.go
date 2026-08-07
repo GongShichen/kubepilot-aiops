@@ -265,6 +265,10 @@ func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowSta
 	if state.BrainPhase == "" {
 		state.BrainPhase, state.ActiveToolCategory = domain.BrainPhaseIntake, domain.BrainToolControl
 	}
+	if brainToolCallBudgetExhausted(state) {
+		enterToolBudgetFinalization(state)
+		reflection = false
+	}
 	if reflection {
 		if state.BrainPhase != domain.BrainPhaseReflection {
 			state.ResumeBrainPhase = state.BrainPhase
@@ -315,6 +319,9 @@ func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowSta
 	payload := map[string]any{"incident": safeIncident(state.Incident), "understanding": state.IncidentUnderstanding, "plan": state.Incident.Investigation.Plan, "phase": state.BrainPhase, "evidence_snapshot_hash": state.EvidenceSnapshotHash, "evidence": compactToolEvidence(state.Incident.Evidence, 48<<10), "hypotheses": state.AgentHypotheses, "admissions": state.HypothesisAdmissions, "groundings": state.HypothesisGroundings, "grounding_deltas": tailGroundingDeltas(state.GroundingDeltas, 5), "recent_tool_results": tailBrainToolExecutions(state.ToolExecutions, 5), "memory_reads": state.Incident.Investigation.MemoryReads, "causal_patterns": tailCausalPatterns(state.CausalPatterns, 10), "loaded_skill_references": state.LoadedSkillReferences, "diagnosis": state.AgentDiagnosis, "recovery_plan": state.AgentRecoveryPlan, "budget": state.BrainBudget, "active_tool_category": effectiveToolCategory(state), "execution_snapshot": state.ExecutionSnapshot}
 	raw, _ := json.Marshal(payload)
 	system := "You are KubePilot's LLM Brain. You own investigation, open-world hypotheses, subjective belief revision, diagnosis selection, and recovery planning. The Runtime owns facts, grounding, constraints, authorization, execution, and verification. Follow the injected Skills exactly. Use only an exposed structured tool; do not answer in prose or reveal hidden chain-of-thought. Constraint or tool errors are not Incident evidence.\n\n" + resolved.Prompt
+	if state.BrainBudget.ToolCallsExhausted {
+		system += "\n\nThe investigation ToolCall budget is exhausted. Do not request more evidence, retrieval, validation, Skill loading, reflection, or recovery. Use only the existing structured Evidence, Hypotheses, Grounding, and provenance. If no Diagnosis is persisted, call submit_diagnosis with the best supported existing revision or call finish_investigation with HUMAN_ESCALATION when the existing state cannot support one. If a Diagnosis is already persisted, call finish_investigation. These closing actions do not reopen the ToolCall budget."
+	}
 	messages := []*schema.Message{schema.SystemMessage(system)}
 	messages = append(messages, boundedBrainMessageHistory(state.BrainMessages, 8, 64<<10)...)
 	messages = append(messages, schema.UserMessage(string(raw)))
@@ -332,9 +339,18 @@ func (r *brainGraphRuntime) actionGateway(ctx context.Context, message *schema.M
 	if len(message.ToolCalls) > state.BrainBudget.Limits.MaxParallelReadTools && effectiveToolCategory(state) == domain.BrainToolEvidence {
 		message.ToolCalls = message.ToolCalls[:state.BrainBudget.Limits.MaxParallelReadTools]
 	}
-	if state.BrainBudget.Usage.ToolCalls+len(message.ToolCalls) > state.BrainBudget.Limits.MaxToolCalls {
-		termination, _ := brainruntime.NewTermination(domain.TerminationBudgetExhausted, currentBrainTurnID(state), finalHypothesisID(state), state.EvidenceSnapshotHash, &state.ExecutionSnapshot, []string{"tool call budget exhausted"}, state.BrainBudget)
-		state.Termination, message.ToolCalls = &termination, nil
+	remaining := state.BrainBudget.Limits.MaxToolCalls - state.BrainBudget.Usage.ToolCalls
+	if remaining > 0 && len(message.ToolCalls) > remaining {
+		message.ToolCalls = message.ToolCalls[:remaining]
+	}
+	if remaining <= 0 {
+		state.BrainBudget.ToolCallsExhausted = true
+		// Keep one model action so the real Eino ToolsNode can return either the
+		// permitted closing result or an explicit classified budget Constraint.
+		// Never turn exhaustion into an empty Assistant message.
+		if len(message.ToolCalls) > 1 {
+			message.ToolCalls = message.ToolCalls[:1]
+		}
 	}
 	return message, nil
 }
@@ -350,6 +366,13 @@ func (r *brainGraphRuntime) reflectionRoute(_ context.Context, state *WorkflowSt
 		termination, _ := brainruntime.NewTermination(domain.TerminationBudgetExhausted, currentBrainTurnID(state), finalHypothesisID(state), state.EvidenceSnapshotHash, &state.ExecutionSnapshot, unresolvedGaps(state), state.BrainBudget)
 		state.Termination = &termination
 		state.PendingReflection = nil
+		return "brain_termination_router", nil
+	}
+	if state.Termination == nil && brainToolCallBudgetExhausted(state) {
+		// Tool exhaustion closes investigation, not cognition. Skip any pending
+		// reflection and give the Brain a bounded structured finalization turn
+		// over the evidence already collected.
+		enterToolBudgetFinalization(state)
 		return "brain_termination_router", nil
 	}
 	if state.PendingReflection != nil && state.Termination == nil {
@@ -377,6 +400,35 @@ func (r *brainGraphRuntime) reflectionRoute(_ context.Context, state *WorkflowSt
 		state.PendingReflection = nil
 	}
 	return "brain_termination_router", nil
+}
+
+func brainToolCallBudgetExhausted(state *WorkflowState) bool {
+	return state != nil && state.BrainBudget.Limits.MaxToolCalls > 0 && state.BrainBudget.Usage.ToolCalls >= state.BrainBudget.Limits.MaxToolCalls
+}
+
+func enterToolBudgetFinalization(state *WorkflowState) {
+	if state == nil {
+		return
+	}
+	state.BrainBudget.ToolCallsExhausted = true
+	state.PendingReflection = nil
+	state.RequestedSkills = nil
+	if state.AgentDiagnosis == nil {
+		state.BrainPhase = domain.BrainPhaseDiagnosis
+		state.ActiveToolCategory = domain.BrainToolReasoning
+		return
+	}
+	state.BrainPhase = domain.BrainPhaseEscalation
+	state.ActiveToolCategory = domain.BrainToolControl
+}
+
+func isToolBudgetClosingAction(toolName string) bool {
+	switch toolName {
+	case "submit_diagnosis", "finish_investigation":
+		return true
+	default:
+		return false
+	}
 }
 
 func effectiveToolCategory(state *WorkflowState) domain.BrainToolCategory {

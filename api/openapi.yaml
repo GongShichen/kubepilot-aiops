@@ -620,6 +620,7 @@ components:
       properties:
         limits: {$ref: '#/components/schemas/BrainBudget'}
         usage: {$ref: '#/components/schemas/BrainBudgetUsage'}
+        tool_calls_exhausted: {type: boolean, description: "Investigation tools are closed; only diagnosis submission or explicit termination may use the existing state."}
     TerminationEvent:
       type: object
       required: [reason, trigger_turn_id, evidence_snapshot_hash, remaining_budget, occurred_at]

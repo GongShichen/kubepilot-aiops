@@ -42,7 +42,11 @@ func (r *brainGraphRuntime) classifyToolResults(ctx context.Context, messages []
 		}
 		result := domain.ToolResultRecord{Class: output.Class, Provenance: output.Provenance, Status: output.Status, Summary: output.Summary, NewInformation: output.NewInformation, ConstraintCode: output.ConstraintCode, Infrastructure: output.Infrastructure, OccurredAt: time.Now().UTC()}
 		state.ToolExecutions = append(state.ToolExecutions, domain.BrainToolExecution{Envelope: envelope, Result: result})
-		state.BrainBudget.Usage.ToolCalls++
+		// Closing actions and rejected attempts after exhaustion remain fully
+		// audited, but cannot push usage beyond MaxToolCalls.
+		if !state.BrainBudget.ToolCallsExhausted {
+			state.BrainBudget.Usage.ToolCalls++
+		}
 		toolMessage := *message
 		toolMessage.ReasoningContent = ""
 		// Persist the server-classified result, not the raw adapter payload. This
