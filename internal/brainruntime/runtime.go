@@ -13,7 +13,9 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/topology"
 )
 
-const DefaultMaxTurns = 18
+// DefaultMaxTurns is scoped to one LLM Brain Agent Workflow Attempt. It is
+// neither an Incident wall-clock timeout nor a shared limit across agents.
+const DefaultMaxTurns = 30
 
 func DefaultBudget() domain.BrainBudget {
 	return domain.BrainBudget{
