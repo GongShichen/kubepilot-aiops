@@ -63,7 +63,7 @@ type Report struct {
 }
 
 func Build(runID, profile string, summaries map[string]reporter.Summary, cases map[string][]reporter.CaseResult) (Report, error) {
-	strategies := []string{domain.DiagnosisMethodDirect, domain.DiagnosisMethodRAG, domain.DiagnosisMethodReAct, domain.DiagnosisMethodKubePilot}
+	strategies := []string{domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive, domain.DiagnosisMethodReAct}
 	report := Report{RunID: runID, Profile: profile, Valid: true}
 	for _, strategy := range strategies {
 		items, ok := cases[strategy]
@@ -89,11 +89,14 @@ func Build(runID, profile string, summaries map[string]reporter.Summary, cases m
 			Breakdowns:        buildBreakdowns(modelItems),
 		})
 	}
-	target, hasTarget := cases[domain.DiagnosisMethodKubePilot]
+	target, hasTarget := cases[domain.DiagnosisMethodActive]
 	if !hasTarget {
 		return report, nil
 	}
-	for _, baseline := range strategies[:3] {
+	for _, baseline := range strategies {
+		if baseline == domain.DiagnosisMethodActive {
+			continue
+		}
 		if _, ok := cases[baseline]; !ok {
 			continue
 		}
@@ -102,10 +105,10 @@ func Build(runID, profile string, summaries map[string]reporter.Summary, cases m
 			return Report{}, err
 		}
 		report.Comparisons = append(report.Comparisons,
-			binaryComparison(baseline, domain.DiagnosisMethodKubePilot, "strict_diagnosis_accuracy", paired, func(item reporter.CaseResult) bool { return item.Score.StrictRootCause }),
-			binaryComparison(baseline, domain.DiagnosisMethodKubePilot, "recovery_success", paired, func(item reporter.CaseResult) bool { return item.VerificationOK }),
-			continuousComparison(baseline, domain.DiagnosisMethodKubePilot, "model_cost", paired, func(item reporter.CaseResult) float64 { return item.EstimatedModelCost }),
-			continuousComparison(baseline, domain.DiagnosisMethodKubePilot, "latency", paired, func(item reporter.CaseResult) float64 { return item.Duration.Seconds() }),
+			binaryComparison(baseline, domain.DiagnosisMethodActive, "strict_diagnosis_accuracy", paired, func(item reporter.CaseResult) bool { return item.Score.StrictRootCause }),
+			binaryComparison(baseline, domain.DiagnosisMethodActive, "recovery_success", paired, func(item reporter.CaseResult) bool { return item.VerificationOK }),
+			continuousComparison(baseline, domain.DiagnosisMethodActive, "model_cost", paired, func(item reporter.CaseResult) float64 { return item.EstimatedModelCost }),
+			continuousComparison(baseline, domain.DiagnosisMethodActive, "latency", paired, func(item reporter.CaseResult) float64 { return item.Duration.Seconds() }),
 		)
 	}
 	applyHolmCorrection(report.Comparisons)
@@ -224,9 +227,21 @@ func validateStrategyFootprint(strategy string, items []reporter.CaseResult) err
 			if item.Architecture != "single-react" || item.PlannerTasks != 0 || item.WorkerFindings != 0 || item.DebateRounds != 0 || item.MemoryReads != 0 {
 				return fmt.Errorf("react strategy produced an invalid execution footprint for %s", caseKey(item))
 			}
-		case domain.DiagnosisMethodKubePilot:
-			if item.Architecture != "hierarchical-causal-react" || item.PlannerTasks == 0 || item.WorkerFindings == 0 || item.DebateRounds == 0 || item.MemoryReads < 3 {
-				return fmt.Errorf("kubepilot strategy produced an invalid execution footprint for %s", caseKey(item))
+		case domain.DiagnosisMethodRuleOnly:
+			if item.Architecture != "eino-rule-diagnosis-runtime" || item.PlannerTasks == 0 || item.WorkerFindings == 0 || item.DebateRounds != 0 || item.MemoryReads != 0 {
+				return fmt.Errorf("rule-only strategy produced an invalid execution footprint for %s", caseKey(item))
+			}
+		case domain.DiagnosisMethodEvidence:
+			if item.Architecture != "eino-evidence-diagnosis-runtime" || item.PlannerTasks == 0 || item.WorkerFindings == 0 || item.DebateRounds != 0 || item.MemoryReads != 0 {
+				return fmt.Errorf("evidence-only strategy produced an invalid execution footprint for %s", caseKey(item))
+			}
+		case domain.DiagnosisMethodCognitive:
+			if item.Architecture != domain.WorkflowRuntimeName || item.PlannerTasks == 0 || item.WorkerFindings == 0 || item.DebateRounds != 0 || item.MemoryReads != 0 {
+				return fmt.Errorf("cognitive strategy produced an invalid execution footprint for %s", caseKey(item))
+			}
+		case domain.DiagnosisMethodActive, domain.DiagnosisMethodKubePilot:
+			if item.Architecture != domain.WorkflowRuntimeName || item.PlannerTasks == 0 || item.WorkerFindings == 0 || item.DebateRounds != 0 || item.MemoryReads != 0 {
+				return fmt.Errorf("active-diagnosis strategy produced an invalid execution footprint for %s", caseKey(item))
 			}
 		}
 	}

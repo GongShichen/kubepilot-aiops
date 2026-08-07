@@ -107,7 +107,7 @@ func (s *PostgresCausalKnowledgeStore) List(ctx context.Context, status string, 
 	if s == nil || s.owner == nil {
 		return nil, errors.New("causal knowledge store unavailable")
 	}
-	q := `SELECT id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns`
+	q := `SELECT id,category,cause,nodes,edges,required_admission_node_ids,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns`
 	args := []any{}
 	if status != "" {
 		q += ` WHERE status=$1`
@@ -164,7 +164,7 @@ func (s *PostgresCausalKnowledgeStore) Merge(ctx context.Context, p causalknowle
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, p.ID); err != nil {
 		return p, err
 	}
-	existing, findErr := scanPattern(tx.QueryRow(ctx, `SELECT id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns WHERE id=$1 FOR UPDATE`, p.ID))
+	existing, findErr := scanPattern(tx.QueryRow(ctx, `SELECT id,category,cause,nodes,edges,required_admission_node_ids,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns WHERE id=$1 FOR UPDATE`, p.ID))
 	if findErr == nil {
 		p = causalknowledge.Merge(*existing, p)
 	} else if !errors.Is(findErr, pgx.ErrNoRows) {
@@ -192,6 +192,10 @@ func (s *PostgresCausalKnowledgeStore) Merge(ctx context.Context, p causalknowle
 	if err != nil {
 		return p, err
 	}
+	requiredAdmission, err := json.Marshal(p.RequiredAdmissionNodeIDs)
+	if err != nil {
+		return p, err
+	}
 	supporting, err := json.Marshal(p.SupportingEvidence)
 	if err != nil {
 		return p, err
@@ -204,7 +208,7 @@ func (s *PostgresCausalKnowledgeStore) Merge(ctx context.Context, p causalknowle
 	if err != nil {
 		return p, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO causal_patterns(id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT(id) DO UPDATE SET category=EXCLUDED.category,cause=EXCLUDED.cause,nodes=EXCLUDED.nodes,edges=EXCLUDED.edges,supporting_evidence=EXCLUDED.supporting_evidence,contradicting_evidence=EXCLUDED.contradicting_evidence,source_incidents=EXCLUDED.source_incidents,cluster_scope=EXCLUDED.cluster_scope,namespace_scope=EXCLUDED.namespace_scope,source=EXCLUDED.source,confidence=EXCLUDED.confidence,status=EXCLUDED.status,version=EXCLUDED.version,support_count=EXCLUDED.support_count,updated_at=EXCLUDED.updated_at`, p.ID, p.Category, p.Cause, nodes, edges, supporting, contradicting, incidents, p.Cluster, p.Namespace, p.Source, p.Confidence, p.Status, p.Version, p.SupportCount, p.CreatedAt, p.UpdatedAt)
+	_, err = tx.Exec(ctx, `INSERT INTO causal_patterns(id,category,cause,nodes,edges,required_admission_node_ids,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) ON CONFLICT(id) DO UPDATE SET category=EXCLUDED.category,cause=EXCLUDED.cause,nodes=EXCLUDED.nodes,edges=EXCLUDED.edges,required_admission_node_ids=EXCLUDED.required_admission_node_ids,supporting_evidence=EXCLUDED.supporting_evidence,contradicting_evidence=EXCLUDED.contradicting_evidence,source_incidents=EXCLUDED.source_incidents,cluster_scope=EXCLUDED.cluster_scope,namespace_scope=EXCLUDED.namespace_scope,source=EXCLUDED.source,confidence=EXCLUDED.confidence,status=EXCLUDED.status,version=EXCLUDED.version,support_count=EXCLUDED.support_count,updated_at=EXCLUDED.updated_at`, p.ID, p.Category, p.Cause, nodes, edges, requiredAdmission, supporting, contradicting, incidents, p.Cluster, p.Namespace, p.Source, p.Confidence, p.Status, p.Version, p.SupportCount, p.CreatedAt, p.UpdatedAt)
 	if err != nil {
 		return p, err
 	}

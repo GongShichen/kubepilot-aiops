@@ -1,11 +1,13 @@
 package reasoning
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	evidencepolicy "github.com/kubepilot-aiops/kubepilot/internal/reasoning/evidence"
 )
 
 func TestCandidateGenerationUsesSemanticAndLexicalOnly(t *testing.T) {
@@ -34,22 +36,50 @@ func TestCandidateGenerationUsesSemanticAndLexicalOnly(t *testing.T) {
 	}
 }
 
-func TestAnnotateCausalNodesFromActivePatterns(t *testing.T) {
+func TestAnnotateCausalNodesFromStructuredSignals(t *testing.T) {
 	e := New(DefaultConfig())
-	items := e.AnnotateCausalNodes([]domain.Evidence{{ID: "e", Summary: "connection refused from downstream endpoint", AnomalyScore: .9}}, []domain.CausalPattern{{ID: "p", Status: "active", Nodes: []domain.CausalNode{{ID: "connection_failure", Match: []string{"connection refused"}}, {ID: "network_config", Match: []string{"endpoint"}}}}})
+	items := e.AnnotateCausalNodes([]domain.Evidence{{ID: "e", AnomalyScore: .9, Signals: []domain.EvidenceSignal{{Signal: "connection_refused", Direction: "abnormal"}, {Signal: "endpoint_unavailable", Direction: "abnormal"}}}}, []domain.CausalPattern{{ID: "p", Status: "active", Nodes: []domain.CausalNode{{ID: "connection_failure", Signals: []string{"connection_refused"}}, {ID: "network_config", Signals: []string{"endpoint_unavailable"}}}}})
 	if len(items) != 1 || strings.Join(items[0].CausalNodeIDs, ",") != "connection_failure,network_config" {
 		t.Fatalf("causal node annotation=%#v", items)
 	}
 }
 
-func TestAnnotateCausalNodesNormalizesStructuredTelemetryTokens(t *testing.T) {
+func TestAnnotateCausalNodesAdmitsObservedTransitionOnlyAsCause(t *testing.T) {
+	e := New(DefaultConfig())
+	items := e.AnnotateCausalNodes([]domain.Evidence{{
+		ID: "rollout", Source: "kubernetes", Signals: []domain.EvidenceSignal{{Signal: "deployment_change", Direction: "observed"}},
+	}}, []domain.CausalPattern{{
+		ID: "rollout", Status: "active", Nodes: []domain.CausalNode{
+			{ID: "rollout_change", Type: "cause", Signals: []string{"deployment_change"}},
+			{ID: "bad_mechanism", Type: "mechanism", Signals: []string{"deployment_change"}},
+		},
+	}})
+	if len(items) != 1 || strings.Join(items[0].CausalNodeIDs, ",") != "rollout_change" {
+		t.Fatalf("observed transition escaped cause-only boundary: %#v", items)
+	}
+}
+
+func TestAnnotateCausalNodesDoesNotUseEvidenceText(t *testing.T) {
 	e := New(DefaultConfig())
 	items := e.AnnotateCausalNodes([]domain.Evidence{{
 		ID: "policy", Source: "kubernetes", AnomalyScore: 1,
-		Facts: map[string]any{"network_policies": []any{map[string]any{"policy_types": []any{"Egress"}, "egress": nil}}},
-	}}, []domain.CausalPattern{{ID: "network", Status: "active", Nodes: []domain.CausalNode{{ID: "network_config", Match: []string{"networkpolicy"}}}}})
-	if len(items) != 1 || strings.Join(items[0].CausalNodeIDs, ",") != "network_config" {
-		t.Fatalf("structured causal token was not matched: %#v", items)
+		Summary: "network policy blocks endpoint traffic", Facts: map[string]any{"network_policies": []any{map[string]any{"policy_types": []any{"Egress"}, "egress": nil}}},
+	}}, []domain.CausalPattern{{ID: "network", Status: "active", Nodes: []domain.CausalNode{{ID: "network_config", Signals: []string{"network_policy_denial"}}}}})
+	if len(items) != 1 || len(items[0].CausalNodeIDs) != 0 {
+		t.Fatalf("causal annotation used prose or raw facts instead of a server signal: %#v", items)
+	}
+}
+
+func TestMatchCausalPatternsRequiresObservedCanonicalNode(t *testing.T) {
+	e := New(DefaultConfig())
+	pattern := domain.CausalPattern{ID: "network", Status: "active", Nodes: []domain.CausalNode{{ID: "network_config", Type: "cause", Signals: []string{"network_policy_denial"}}}}
+	evidence := []domain.Evidence{{ID: "e", AnomalyScore: 1, Summary: "network policy denial", CausalNodeIDs: []string{"obs:e"}}}
+	if got := e.MatchCausalPatterns(domain.IncidentFeatures{Terms: []string{"networkpolicy"}}, evidence, []domain.CausalPattern{pattern}); len(got) != 0 {
+		t.Fatalf("text-only evidence activated causal pattern: %#v", got)
+	}
+	evidence[0].CausalNodeIDs = append(evidence[0].CausalNodeIDs, "network_config")
+	if got := e.MatchCausalPatterns(domain.IncidentFeatures{}, evidence, []domain.CausalPattern{pattern}); len(got) != 1 || got[0].ID != "network" {
+		t.Fatalf("observed canonical node did not activate pattern: %#v", got)
 	}
 }
 
@@ -70,6 +100,102 @@ func TestEvidenceRankingLimitsAndRequiredSources(t *testing.T) {
 	if !hasSource(got.Evidence, "kubernetes") || !hasAnySource(got.Evidence, "loki", "prometheus") {
 		t.Fatalf("required sources missing: %#v", got.Evidence)
 	}
+}
+
+func TestEvidenceRankingKeepsRequiredSourcesWhenKubernetesFactsAreOversized(t *testing.T) {
+	now := time.Now().UTC()
+	incident := &domain.Incident{ID: "incident", Namespace: "namespace", Service: "service", Resource: "deployment", EvidenceStartAt: now.Add(-time.Minute)}
+	items := []domain.Evidence{
+		{
+			ID: "kubernetes", Source: "kubernetes", Type: "workload_state", Summary: "workload state",
+			Facts: map[string]any{
+				"deployment": map[string]any{"available_replicas": 1, "unavailable_replicas": 1},
+				"events":     strings.Repeat("workload event payload ", 10_000),
+			},
+		},
+	}
+	for index := 0; index < 14; index++ {
+		items = append(items, domain.Evidence{
+			ID: fmt.Sprintf("metric-%02d", index), Source: "prometheus", Type: "latency_metric", Summary: "latency observation",
+			Facts: map[string]any{"result": strings.Repeat("metric sample ", 4_000), "current": float64(index + 1)},
+		})
+	}
+
+	ranked, err := New(Config{ModelEvidenceMaxItems: 12, ModelContextMaxBytes: 32768}).RankEvidence(incident, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasSource(ranked.Evidence, "kubernetes") || !hasAnySource(ranked.Evidence, "prometheus", "metric", "loki", "log", "jaeger", "trace") {
+		t.Fatalf("required independently collected sources were discarded: %#v", ranked.Evidence)
+	}
+	var kube domain.Evidence
+	for _, item := range ranked.Evidence {
+		if item.ID == "kubernetes" {
+			kube = item
+			break
+		}
+	}
+	if len(kube.Facts) == 0 {
+		t.Fatalf("oversized Kubernetes facts were not retained canonically: %#v", kube)
+	}
+	if len(ranked.RuntimeEvidence) != len(items) {
+		t.Fatalf("deterministic runtime lost observations to the model context budget: got=%d want=%d", len(ranked.RuntimeEvidence), len(items))
+	}
+	if ranked.Ledger.EvidenceRetainedBytes > 32768 {
+		t.Fatalf("context limit was exceeded: %#v", ranked.Ledger)
+	}
+}
+
+func TestEvidenceRankingPreservesCanonicalNestedFactsAcrossPasses(t *testing.T) {
+	now := time.Now().UTC()
+	incident := &domain.Incident{ID: "incident", Namespace: "namespace", Service: "service", Resource: "deployment", EvidenceStartAt: now.Add(-time.Minute)}
+	items := []domain.Evidence{
+		{
+			ID: "kube", Source: "kubernetes", Type: "workload_state", Timestamp: now,
+			Facts: map[string]any{
+				"pods": []map[string]any{{
+					"ready": false,
+					"container_statuses": []map[string]any{{
+						"state": map[string]any{"waiting": map[string]any{"reason": "ErrImagePull"}},
+					}},
+				}},
+				"events": []map[string]any{{"reason": "ScalingReplicaSet", "message": "Scaled up replica set"}},
+			},
+		},
+		{ID: "metric", Source: "prometheus", Type: "latency", Timestamp: now, Facts: map[string]any{"current": 2.0, "baseline": 1.0}},
+	}
+	engine := New(Config{ModelEvidenceMaxItems: 12, ModelContextMaxBytes: 512})
+	first, err := engine.RankEvidence(incident, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := engine.RankEvidence(incident, first.RuntimeEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kube domain.Evidence
+	for _, item := range second.Evidence {
+		if item.ID == "kube" {
+			kube = item
+			break
+		}
+	}
+	if kube.Facts == nil {
+		t.Fatalf("canonical Kubernetes facts were discarded on second rank: %#v", second.Evidence)
+	}
+	signals := evidencepolicy.AnalyzeEvidence(kube).Signals
+	if !hasEvidenceSignal(signals, "image_pull_failure") || !hasEvidenceSignal(signals, "deployment_change") {
+		t.Fatalf("second ranking pass lost nested Kubernetes signals: %#v", signals)
+	}
+}
+
+func hasEvidenceSignal(signals []domain.EvidenceSignal, want string) bool {
+	for _, signal := range signals {
+		if signal.Signal == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestEvidenceRankingUsesObservedMetricResultAndCollapsesDynamicTemplates(t *testing.T) {
@@ -162,6 +288,79 @@ func TestHypothesisVerificationCausalPathAndContradiction(t *testing.T) {
 	}
 	if verified[1].ContradictionScore == 0 || len(verified[1].MissingCausalNodes) != 1 {
 		t.Fatalf("missing/conflicting causal evidence was not recorded: %#v", verified[1])
+	}
+}
+
+func TestHypothesisVerificationUsesCausalSignalsAndIndependentSourceAggregation(t *testing.T) {
+	engine := New(DefaultConfig())
+	pattern := domain.CausalPattern{
+		ID: "cpu", Category: "cpu", Status: "active",
+		Nodes: []domain.CausalNode{
+			{ID: "cpu_saturation", Type: "mechanism", Signals: []string{"cpu_pressure"}},
+			{ID: "latency_error", Type: "symptom", Signals: []string{"trace_latency"}},
+		},
+		Edges: []domain.CausalEdge{{From: "cpu_saturation", To: "latency_error"}},
+	}
+	evidence := []domain.Evidence{
+		{
+			ID: "metric", Source: "prometheus", Namespace: "ns", Service: "checkout", Resource: "checkout", QualityScore: .99,
+			Signals: []domain.EvidenceSignal{
+				{ID: "cpu", Signal: "cpu_pressure", Direction: "abnormal", Strength: .8, Reliability: 1, Independence: 1, TemporalAlignment: 1},
+				{ID: "unrelated", Signal: "request_rate", Direction: "abnormal", Strength: 1, Reliability: 1, Independence: 1, TemporalAlignment: 1},
+			},
+		},
+		{ID: "trace", Source: "jaeger", Namespace: "ns", Service: "checkout", Resource: "checkout", QualityScore: .99, Signals: []domain.EvidenceSignal{{ID: "latency", Signal: "trace_latency", Direction: "abnormal", Strength: .4, Reliability: 1, Independence: 1, TemporalAlignment: 1}}},
+		{ID: "kube", Source: "kubernetes", Namespace: "ns", Service: "checkout", Resource: "checkout", QualityScore: .99, Signals: []domain.EvidenceSignal{{ID: "scope", Signal: "workload_health", Direction: "normal"}}},
+	}
+	draft := domain.HypothesisDraft{
+		ID: "cpu", Category: "cpu", Service: "checkout", Resource: "checkout",
+		SupportingEvidenceIDs: []string{"metric", "trace"}, ExpectedCausalNodeIDs: []string{"cpu_saturation", "latency_error"},
+	}
+	verified, err := engine.VerifyHypotheses([]domain.HypothesisDraft{draft}, evidence, nil, []domain.CausalPattern{pattern})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(verified) != 1 || verified[0].SupportingScore < .87 || verified[0].SupportingScore > .89 {
+		t.Fatalf("support must use only causal signal quality and combine independent sources without dilution: %+v", verified)
+	}
+}
+
+func TestDeterministicCandidateRequiresObservedMechanism(t *testing.T) {
+	engine := New(DefaultConfig())
+	pattern := domain.CausalPattern{
+		ID: "resource", Category: "resource", Status: "active",
+		Nodes: []domain.CausalNode{
+			{ID: "demand", Type: "cause", Signals: []string{"request_rate"}},
+			{ID: "saturation", Type: "mechanism", Signals: []string{"cpu_pressure"}},
+			{ID: "failure", Type: "symptom", Signals: []string{"error_rate"}},
+		},
+		Edges: []domain.CausalEdge{{From: "demand", To: "saturation"}, {From: "saturation", To: "failure"}},
+	}
+	draft := domain.HypothesisDraft{
+		ID: "resource", Category: "resource", RequireCausalMechanism: true,
+		SupportingEvidenceIDs: []string{"demand", "symptom"},
+		ExpectedCausalNodeIDs: []string{"demand", "saturation", "failure"},
+	}
+	evidence := []domain.Evidence{
+		{ID: "demand", Source: "prometheus", AnomalyScore: 1, CausalNodeIDs: []string{"demand"}},
+		{ID: "symptom", Source: "loki", AnomalyScore: 1, CausalNodeIDs: []string{"failure"}},
+	}
+	verified, err := engine.VerifyHypotheses([]domain.HypothesisDraft{draft}, evidence, nil, []domain.CausalPattern{pattern})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified[0].CausalPathCoverage != 0 || !containsString(verified[0].MissingCausalNodes, "saturation") {
+		t.Fatalf("candidate without an observed mechanism passed causal coverage: %+v", verified[0])
+	}
+
+	evidence = append(evidence, domain.Evidence{ID: "mechanism", Source: "prometheus", AnomalyScore: 1, CausalNodeIDs: []string{"saturation"}})
+	draft.SupportingEvidenceIDs = append(draft.SupportingEvidenceIDs, "mechanism")
+	verified, err = engine.VerifyHypotheses([]domain.HypothesisDraft{draft}, evidence, nil, []domain.CausalPattern{pattern})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified[0].CausalPathCoverage != 1 || len(verified[0].MissingCausalNodes) != 0 {
+		t.Fatalf("observed mechanism did not restore causal coverage: %+v", verified[0])
 	}
 }
 

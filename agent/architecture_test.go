@@ -67,6 +67,7 @@ func TestSkillsArePinnedAndDoNotEncodeHiddenWorkflow(t *testing.T) {
 		{DiagnosisAgentName, "internal/agent/skills/diagnosis/SKILL.md"},
 		{AlternativeAgentName, "internal/agent/skills/alternative/SKILL.md"},
 		{CriticAgentName, "internal/agent/skills/critic/SKILL.md"},
+		{CognitiveRuntimeName, "internal/agent/skills/cognitive/SKILL.md"},
 		{RecoveryAgentName, "internal/agent/skills/recovery/SKILL.md"},
 	}
 	hashes := map[string]bool{}

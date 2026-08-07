@@ -28,6 +28,17 @@ func defaultEvidenceRequest(incident *domain.Incident, source string) domain.Evi
 	}
 }
 
+// normalizeCollectedEvidence applies the Evidence contract at the collection
+// boundary. Every downstream node receives stable identifiers, attributed
+// scope, and a shared Facts representation before it can rank or reason.
+func normalizeCollectedEvidence(incident *domain.Incident, items []domain.Evidence) []domain.Evidence {
+	out := append([]domain.Evidence(nil), items...)
+	for index := range out {
+		normalizeEvidence(&out[index], incident)
+	}
+	return out
+}
+
 func validateEvidenceRequest(incident *domain.Incident, request domain.EvidenceRequest, source string, allowedTargets map[string]bool) (domain.EvidenceRequest, error) {
 	if incident == nil {
 		return request, fmt.Errorf("incident is required")

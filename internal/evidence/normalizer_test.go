@@ -38,3 +38,28 @@ func TestViewsTruncateFieldsWithoutStarvingLaterEvidence(t *testing.T) {
 		t.Fatalf("bounded views are invalid: bytes=%d err=%v", len(raw), err)
 	}
 }
+
+func TestViewsNeverEraseFactsWhenReducingAggregateContext(t *testing.T) {
+	items := []domain.Evidence{
+		{ID: "large", Source: "loki", Type: "log", Summary: "large", Facts: map[string]any{"message": strings.Repeat("failure", 2_000), "signature": "timeout", "count": 8}},
+		{ID: "later", Source: "prometheus", Type: "cpu", Summary: "later", Facts: map[string]any{"current_value": .95, "baseline_value": .20}},
+	}
+	views := Views(items, 1_500, 1_024, 12)
+	if len(views) != 2 || len(views[0].Facts) == 0 || len(views[1].Facts) == 0 {
+		t.Fatalf("aggregate bounding erased a fact carrier: %+v", views)
+	}
+	if len(views[0].TruncatedFields) == 0 {
+		t.Fatalf("aggregate fact reduction was not audited: %+v", views[0])
+	}
+}
+
+func TestNormalizeProjectsJSONLogSeverityIntoFacts(t *testing.T) {
+	incident := &domain.Incident{Namespace: "team-a", Service: "checkout", Resource: "checkout"}
+	items := Normalize(incident, domain.EvidenceRequest{}, []domain.Evidence{{
+		Source: "loki", Type: "log_entry", Summary: `{"level":"ERROR","error":"memory pressure"}`,
+		Content: map[string]any{"level": "", "pod": "checkout-1"},
+	}})
+	if len(items) != 1 || items[0].Facts["level"] != "ERROR" || items[0].Facts["error"] != "memory pressure" {
+		t.Fatalf("structured log facts were not projected: %+v", items)
+	}
+}

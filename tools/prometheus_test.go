@@ -21,6 +21,24 @@ func TestMetricQueriesCoverRecoverySignals(t *testing.T) {
 			t.Fatalf("query %s is not namespace scoped: %s", name, query)
 		}
 	}
+	for name, resource := range map[string]string{"cpu": "cpu", "cpu_current": "cpu", "memory": "memory"} {
+		if !strings.Contains(queries[name], "kube_pod_container_resource_limits") || !strings.Contains(queries[name], `resource="`+resource+`"`) {
+			t.Fatalf("query %s is not normalised to the declared %s limit: %s", name, resource, queries[name])
+		}
+	}
+}
+
+func TestCurrentMetricQueriesUseMultiScrapeRateWindow(t *testing.T) {
+	queries := MetricQueries("namespace", "service")
+	for _, name := range []string{"cpu_current", "cpu_throttling_current", "qps_current", "error_rate_current", "p95_latency_current"} {
+		query := queries[name]
+		if strings.Contains(query, "irate(") {
+			t.Fatalf("current query %s uses scrape-boundary-sensitive irate: %s", name, query)
+		}
+		if !strings.Contains(query, "rate(") || !strings.Contains(query, "[1m]") {
+			t.Fatalf("current query %s must use a multi-scrape 1m rate window: %s", name, query)
+		}
+	}
 }
 
 func TestPrometheusQueryRange(t *testing.T) {

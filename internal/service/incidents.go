@@ -136,20 +136,16 @@ func (m *IncidentManager) IngestAlert(ctx context.Context, a domain.Alert, servi
 		return existing, nil
 	}
 	if existing, err := m.Store.FindByFingerprint(ctx, a.Fingerprint); err == nil {
-		existing.Alerts = append(existing.Alerts, a)
-		existing.UpdatedAt = time.Now().UTC()
-		_ = m.Store.Update(ctx, existing)
-		return existing, nil
+		return m.appendAlert(ctx, existing, a)
 	}
 	if existing := m.correlate(ctx, a, service, namespace, resource); existing != nil {
-		existing.Alerts = append(existing.Alerts, a)
-		existing.UpdatedAt = time.Now().UTC()
-		if err := m.Store.Update(ctx, existing); err != nil {
+		merged, err := m.appendAlert(ctx, existing, a)
+		if err != nil {
 			return nil, err
 		}
-		m.audit(ctx, existing.ID, "alert_correlated", "alert merged into active incident", map[string]any{"fingerprint": a.Fingerprint})
-		m.publish(existing)
-		return existing, nil
+		m.audit(ctx, merged.ID, "alert_correlated", "alert merged into active incident", map[string]any{"fingerprint": a.Fingerprint})
+		m.publish(merged)
+		return merged, nil
 	}
 	now := time.Now().UTC()
 	evidenceStartAt := a.StartsAt
@@ -165,6 +161,21 @@ func (m *IncidentManager) IngestAlert(ctx context.Context, a domain.Alert, servi
 		go m.diagnose(in.ID)
 	}
 	return in, nil
+}
+
+func (m *IncidentManager) appendAlert(ctx context.Context, existing *domain.Incident, alert domain.Alert) (*domain.Incident, error) {
+	if appender, ok := m.Store.(store.AlertAppendStore); ok {
+		return appender.AppendAlert(ctx, existing.ID, alert, time.Now().UTC())
+	}
+	// Compatibility fallback for external IncidentStore implementations. The
+	// built-in stores provide AlertAppendStore, which is required to preserve
+	// workflow state under concurrent correlation and diagnosis.
+	existing.Alerts = append(existing.Alerts, alert)
+	existing.UpdatedAt = time.Now().UTC()
+	if err := m.Store.Update(ctx, existing); err != nil {
+		return nil, err
+	}
+	return existing, nil
 }
 
 func (m *IncidentManager) correlate(ctx context.Context, alert domain.Alert, service, namespace, resource string) *domain.Incident {
@@ -325,7 +336,12 @@ func (m *IncidentManager) diagnose(id string) {
 		return
 	}
 	state.Incident.DiagnosisError = ""
-	_ = m.Store.Update(persistCtx, state.Incident)
+	if persistErr := m.Store.Update(persistCtx, state.Incident); persistErr != nil {
+		state.Incident.DiagnosisError = "diagnosis result persistence failed"
+		m.audit(persistCtx, id, "diagnosis_persistence_failed", state.Incident.DiagnosisError, map[string]any{"error": workflowgraph.RedactError(persistErr.Error())})
+		m.publish(state.Incident)
+		return
+	}
 	if state.Incident.Status == domain.StatusResolved && m.Learner != nil {
 		if learnErr := m.Learner.Learn(persistCtx, state.Incident); learnErr != nil {
 			m.audit(persistCtx, id, "causal_learning_failed", "resolved incident was not learned", map[string]any{"error": workflowgraph.RedactError(learnErr.Error())})
@@ -424,7 +440,12 @@ func (m *IncidentManager) resumeWorkflow(id string, approved bool, idempotencyKe
 		return
 	}
 	state.Incident.WorkflowInterruptID = ""
-	_ = m.Store.Update(persistCtx, state.Incident)
+	if persistErr := m.Store.Update(persistCtx, state.Incident); persistErr != nil {
+		state.Incident.DiagnosisError = "workflow result persistence failed"
+		m.audit(persistCtx, id, "workflow_persistence_failed", state.Incident.DiagnosisError, map[string]any{"error": workflowgraph.RedactError(persistErr.Error())})
+		m.publish(state.Incident)
+		return
+	}
 	if state.Incident.Status == domain.StatusResolved && m.Learner != nil {
 		if learnErr := m.Learner.Learn(persistCtx, state.Incident); learnErr != nil {
 			m.audit(persistCtx, id, "causal_learning_failed", "resolved incident was not learned", map[string]any{"error": workflowgraph.RedactError(learnErr.Error())})

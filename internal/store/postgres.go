@@ -190,6 +190,46 @@ func (s *PostgresStore) Update(ctx context.Context, in *domain.Incident) error {
 	return tx.Commit(ctx)
 }
 
+// AppendAlert serializes alert correlation with workflow persistence. Alert
+// delivery is asynchronous and can overlap a diagnosis graph finalizing its
+// Investigation; a full Incident update from a stale correlation snapshot
+// would otherwise erase the completed evidence and arbitration audit.
+func (s *PostgresStore) AppendAlert(ctx context.Context, id string, alert domain.Alert, occurredAt time.Time) (*domain.Incident, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var raw []byte
+	if err = tx.QueryRow(ctx, `SELECT payload FROM incidents WHERE id=$1 FOR UPDATE`, id).Scan(&raw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	var incident domain.Incident
+	if err = json.Unmarshal(raw, &incident); err != nil {
+		return nil, err
+	}
+	incident.Alerts = append(incident.Alerts, alert)
+	incident.UpdatedAt = occurredAt
+	payload, err := json.Marshal(&incident)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE incidents SET status=$2,severity=$3,service=$4,namespace=$5,resource=$6,summary=$7,payload=$8,updated_at=$9 WHERE id=$1`, incident.ID, incident.Status, incident.Severity, incident.Service, incident.Namespace, incident.Resource, incident.Summary, payload, incident.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if err = syncIncidentRecords(ctx, tx, &incident); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &incident, nil
+}
+
 func (s *PostgresStore) UpdateWorkflowStatus(ctx context.Context, id string, status domain.IncidentStatus, occurredAt time.Time) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -248,10 +288,13 @@ func syncIncidentRecords(ctx context.Context, tx pgx.Tx, in *domain.Incident) er
 		return err
 	}
 	for index, evidence := range in.Evidence {
-		id := evidence.ID
-		if id == "" {
-			id = fmt.Sprintf("%s-evidence-%d", in.ID, index)
-		}
+		// Evidence IDs are stable content identities used by the diagnosis
+		// runtime, ranking, and audit. The normalized evidence table is keyed
+		// globally, however, so the database row must additionally be scoped to
+		// its Incident. Identical current observations can legitimately occur in
+		// several concurrent Incidents; persisting the bare evidence ID would
+		// abort the entire Incident transaction and lose its investigation audit.
+		id := evidenceRecordID(in.ID, evidence.ID, index)
 		raw, err := json.Marshal(evidence)
 		if err != nil {
 			return err
@@ -371,7 +414,11 @@ func syncIncidentRecords(ctx context.Context, tx pgx.Tx, in *domain.Incident) er
 		if marshalErr != nil {
 			return marshalErr
 		}
-		if _, insertErr := tx.Exec(ctx, `INSERT INTO incident_investigations(incident_id,architecture,plan,findings,debate,arbitration,started_at,completed_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(incident_id) DO UPDATE SET architecture=EXCLUDED.architecture,plan=EXCLUDED.plan,findings=EXCLUDED.findings,debate=EXCLUDED.debate,arbitration=EXCLUDED.arbitration,started_at=EXCLUDED.started_at,completed_at=EXCLUDED.completed_at,updated_at=NOW()`, in.ID, in.Investigation.Architecture, plan, findings, debate, arbitration, in.Investigation.StartedAt, statusTime(!in.Investigation.CompletedAt.IsZero(), in.Investigation.CompletedAt)); insertErr != nil {
+		intelligence, marshalErr := json.Marshal(diagnosticIntelligencePayload(in.Investigation))
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, insertErr := tx.Exec(ctx, `INSERT INTO incident_investigations(incident_id,architecture,plan,findings,debate,arbitration,diagnostic_intelligence,started_at,completed_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) ON CONFLICT(incident_id) DO UPDATE SET architecture=EXCLUDED.architecture,plan=EXCLUDED.plan,findings=EXCLUDED.findings,debate=EXCLUDED.debate,arbitration=EXCLUDED.arbitration,diagnostic_intelligence=EXCLUDED.diagnostic_intelligence,started_at=EXCLUDED.started_at,completed_at=EXCLUDED.completed_at,updated_at=NOW()`, in.ID, in.Investigation.Architecture, plan, findings, debate, arbitration, intelligence, in.Investigation.StartedAt, statusTime(!in.Investigation.CompletedAt.IsZero(), in.Investigation.CompletedAt)); insertErr != nil {
 			return insertErr
 		}
 		for _, usage := range in.Investigation.ModelUsage {
@@ -394,7 +441,37 @@ func syncIncidentRecords(ctx context.Context, tx pgx.Tx, in *domain.Incident) er
 	return nil
 }
 
+// diagnosticIntelligencePayload is the durable, API-facing audit projection
+// for the diagnosis runtime.  The event tables remain the query-efficient
+// source for analytics, but an Investigation export must be self-contained so
+// a trace can be inspected or replayed without joining hidden side tables.
+func diagnosticIntelligencePayload(investigation *domain.Investigation) map[string]any {
+	if investigation == nil {
+		return map[string]any{}
+	}
+	return map[string]any{
+		"candidates":                   investigation.Candidates,
+		"verified_hypotheses":          investigation.Verified,
+		"signals":                      investigation.Signals,
+		"state_assertions":             investigation.Assertions,
+		"cognitive_reasoning":          investigation.CognitiveReasoning,
+		"falsification":                investigation.Falsification,
+		"pairwise_falsification":       investigation.Pairwise,
+		"candidate_expansion_requests": investigation.ExpansionRequests,
+		"recovery_permission":          investigation.RecoveryPermission,
+		"memory_reads":                 investigation.MemoryReads,
+		"model_usage":                  investigation.ModelUsage,
+	}
+}
+
 func hypothesisRecordID(incidentID, localID string) string {
+	return incidentID + "-" + localID
+}
+
+func evidenceRecordID(incidentID, localID string, index int) string {
+	if localID == "" {
+		localID = fmt.Sprintf("evidence-%d", index)
+	}
 	return incidentID + "-" + localID
 }
 

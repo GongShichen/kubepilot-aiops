@@ -87,6 +87,13 @@ func TestArbitrationReturnsAuditableGateFailuresWithoutLoweringThresholds(t *tes
 	}
 }
 
+func TestArbitrationAuditsEmptyCandidateUniverse(t *testing.T) {
+	result := arbitrateHypotheses(nil, nil)
+	if result.Accepted || len(result.GateResults) != 1 || !slices.Contains(result.GateResults[0].FailedGates, "no_candidate") {
+		t.Fatalf("empty candidate universe was not recorded as a safe audit outcome: %+v", result)
+	}
+}
+
 func TestToolEvidenceObservationIsUTF8SafeAndBounded(t *testing.T) {
 	items := make([]domain.Evidence, 20)
 	for index := range items {
@@ -99,5 +106,10 @@ func TestToolEvidenceObservationIsUTF8SafeAndBounded(t *testing.T) {
 	}
 	if len(payload) > 8<<10 || len(bounded) == 0 || !json.Valid(payload) {
 		t.Fatalf("bounded tool observation is invalid: bytes=%d items=%d", len(payload), len(bounded))
+	}
+	for _, item := range bounded {
+		if len(item.Facts) == 0 {
+			t.Fatalf("bounded model evidence lost its canonical facts: %+v", item)
+		}
 	}
 }

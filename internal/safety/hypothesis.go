@@ -114,12 +114,11 @@ func TransitionHypothesis(ledger *domain.DiagnosisLedger, id string, from, to do
 	return nil
 }
 
-// Confidence is the deterministic arbitration score. Model prior is the least
-// influential positive signal; current evidence and causal coverage dominate.
-// Temporal consistency remains in the audit breakdown but is not an extra
-// weight that would silently change the declared policy.
+// Confidence is the objective diagnostic score. It intentionally excludes
+// model, historical and topology priors: those may guide investigation or a
+// human's review, but cannot raise the evidence confidence used by recovery.
 func Confidence(item domain.VerifiedHypothesis, _ float64) float64 {
-	score := .10*item.Draft.PriorProbability + .30*item.SupportingScore + .25*item.CausalPathCoverage + .15*item.HistoricalRelevance + .20*item.TopologyRelevance - .30*item.ContradictionScore
+	score := .50*item.SupportingScore + .30*item.CausalPathCoverage + .20*item.ObservationCoverage - .30*item.ContradictionScore
 	return clamp(score)
 }
 

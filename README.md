@@ -1,10 +1,10 @@
-# KubePilot: A Causal-Aware Autonomous SRE Agent with Constrained ReAct Architecture
+# KubePilot: An Evidence-Grounded Autonomous Diagnosis Runtime with an Eino Cognitive Layer
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-KubePilot is an Eino-based autonomous SRE control plane for evidence-grounded Kubernetes incident diagnosis and safety-governed recovery. Its core loop is:
+KubePilot is an Eino-based autonomous SRE control plane for evidence-grounded Kubernetes incident diagnosis and safety-governed recovery. Its MVP core loop is:
 
-> Observation → Hypothesis → Evidence → Causal Graph → Validated Knowledge → Safe Recovery
+> Observe → Interpret → Request discriminative evidence → Update belief → Safe recovery or human escalation
 
 The project deliberately separates model autonomy from mutation authority. Agents may plan, inspect, challenge hypotheses, and propose recovery; deterministic server code owns evidence identity, budgets, confidence gates, namespace boundaries, dry-run validation, approval, idempotency, execution, and post-action verification.
 
@@ -14,50 +14,48 @@ No checked-in benchmark result claims that KubePilot is better than a baseline. 
 
 ```mermaid
 flowchart TD
-    I["Incident Intake"] --> S["Supervisor / Incident Commander"]
-    S --> P["Planner Agent"]
-    P --> M["Metric Worker"]
-    P --> L["Log Worker"]
-    P --> T["Trace Worker"]
-    P --> K["Topology / Kubernetes Worker"]
-    M --> D["Primary Diagnosis Agent"]
-    L --> D
-    T --> D
-    K --> D
-    M --> A["Blind Alternative Agent"]
-    L --> A
-    T --> A
-    K --> A
-    D --> C["Critic Agent"]
-    A --> C
-    C --> R{"Deterministic Arbiter"}
-    R -->|"accepted"| REC["Recovery Agent"]
-    R -->|"evidence gap; at most one retry"| P
-    R -->|"unresolved"| H["NEEDS_ATTENTION"]
-    REC --> DR["Kubernetes DryRunAll"]
+    I["incident_intake"] --> CI["cognitive_intent"]
+    CI --> QC["query_compiler"]
+    QC --> EC["evidence_collection"]
+    EC --> SA["signal_assertion_builder"]
+    SA --> CG["candidate_generation"]
+    CG --> CR["cognitive_reasoning"]
+    CR --> CF["causal_falsification"]
+    CF --> OA{"objective_arbitration"}
+    OA -->|"valuable, bounded request"| QC
+    OA -->|"objective gate passed"| RP["recovery_permission"]
+    OA -->|"unresolved"| H["NEEDS_ATTENTION"]
+    RP --> DR["Kubernetes DryRunAll"]
     DR --> AP["Human Approval Interrupt"]
     AP --> EX["Idempotent Executor"]
     EX --> V["Post-action Verification"]
 ```
 
-The Supervisor changes phases and enforces global state; it does not invent a root cause. The Planner emits a bounded `InvestigationPlan`. Four read-only workers run concurrently and return findings containing server-issued Evidence IDs. Primary Diagnosis and the first-round Alternative independently produce up to three falsifiable hypotheses. The Critic identifies contradictions and evidence gaps. A deterministic arbiter accepts only an evidence-grounded candidate with score at least `0.80` and a margin of at least `0.15`; debate stops after two rounds.
+Each named stage is an Eino graph node with the shared `WorkflowState`, callbacks, checkpoints, and resume semantics. Eino owns model and tool lifecycles; the invoked Go services own facts, signals, state assertions, candidate validation, causal coverage, falsification, scoring, and safety gates. The Causal Engine accepts only server-issued signal, state-assertion, graph-node, and topology-edge IDs—never free-form model reasoning.
+
+The Cognitive Runtime is one bounded Eino component with four operations: Planner, Interpreter, Comparator, and Investigator. It can interpret grounded observations, compare candidate pairs, and propose discriminative evidence requests. It cannot add facts, create an executable cause, alter the objective score, or authorize recovery. Server code stops the active loop when a request is repeated, unavailable, yields no new evidence, has no unobserved assertion, or has `DiagnosticValue = ExpectedEntropyReduction × DecisionImpact < 0.05`.
+
+The Objective Arbiter computes `0.50 × Evidence + 0.30 × Causal + 0.20 × ObservationCoverage − 0.30 × Contradiction`. Evidence is independent, source-weighted support; observation coverage measures distinct abnormal states, phases, and mechanism nodes, so a signal is not counted twice. Objective score, margin, and gates alone determine recovery eligibility. A grounded cognitive preference is ordinal-only: within a near tie it affects presentation, the next candidate pair, and human-review priority, never confidence or automation.
 
 Only structured `HypothesisArgument`, `Critique`, Evidence IDs, score changes, and `ArbitrationResult` are stored. Chain-of-Thought is never requested or persisted.
 
-## Four real diagnosis strategies
+## Diagnosis strategies and MVP baselines
 
 `diagnosis_method` selects a production execution path, not a report label:
 
 | Strategy | Production behavior |
 |---|---|
-| `direct` | One structured model call over a fixed, server-owned initial evidence packet; no retrieval, memory, or tool loop. |
-| `rag` | Direct plus the top five Episodic Memory records; one model call and no live tool loop. |
+| `rule-only` | Deterministic Signal → State Assertion → Candidate → Objective Arbitration; no cognitive model call and no causal/falsification stage. |
+| `evidence-only` | Deterministic Evidence → Signal → State Assertion → Candidate → Causal/Falsification → Objective Arbitration; no cognitive model call. |
+| `cognitive` | Evidence-only plus the bounded Cognitive Interpreter and Comparator; cognitive output cannot affect objective gates. |
+| `active-diagnosis` | Cognitive Runtime plus the two-round, server-valued Planner/Investigator loop. |
 | `react` | One bounded Diagnosis ReAct agent with Metric, Log, Trace, and Kubernetes tools; no Planner, debate, long-term memory, or causal enhancement. |
-| `kubepilot` | Planner, concurrent workers, Primary, blind Alternative, Critic, deterministic arbitration, scoped memory, and causal-aware reasoning. |
+| `direct`, `rag` | Compatibility baselines: one structured model call without, or with, scoped Episodic Memory. |
+| `kubepilot` | Compatibility alias for the full active-diagnosis runtime. |
 
-Legacy request values are accepted for one compatibility window: `llm-only → direct` and `vector-rag → rag`. Incidents and artifacts persist only canonical IDs. All strategies use the same model settings, deterministic evidence collectors, per-Agent token budget, recovery path, approval policy, executor, and verification controller.
+Legacy request values are accepted for one compatibility window: `llm-only → direct` and `vector-rag → rag`. Incidents and artifacts persist only canonical IDs. Formal MVP comparisons use `rule-only`, `evidence-only`, `cognitive`, `active-diagnosis`, and `react` with the same model profile, collectors, per-Agent output cap, recovery path, approval policy, executor, and verification controller.
 
-The comparison writer rejects a run when strategy footprints do not differ as specified. This prevents four labels from accidentally measuring the same Agent.
+The comparison writer rejects a run when strategy footprints do not differ as specified. This prevents labels from accidentally measuring the same runtime.
 
 ## Memory architecture
 

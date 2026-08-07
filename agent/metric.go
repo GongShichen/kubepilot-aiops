@@ -65,7 +65,7 @@ func (a MetricCollector) Collect(ctx context.Context, in *domain.Incident, reque
 		out = append(out, domain.Evidence{
 			Source: "prometheus", Kind: baseName + "_change",
 			Summary:    "Prometheus " + baseName + " current-to-window change",
-			Data:       map[string]any{"baseline": baseline, "current": current, "change_rate": (current - baseline) / denominator},
+			Data:       map[string]any{"baseline": baseline, "current": current, "change_rate": (current - baseline) / denominator, "normalization": metricNormalization(baseName)},
 			ObservedAt: time.Now().UTC(),
 		})
 	}
@@ -85,6 +85,16 @@ func (a MetricCollector) Collect(ctx context.Context, in *domain.Incident, reque
 	_ = json.Unmarshal(rangeResult.Result, &trend)
 	out = append(out, domain.Evidence{Source: "prometheus", Kind: "memory_trend", Summary: "Prometheus memory working-set trend over the incident observation window", Data: map[string]any{"query": rangeResult.Query, "start": start, "end": end, "step_seconds": 15, "result": trend}, ObservedAt: end})
 	return evidencenorm.Normalize(in, request, out), nil
+}
+
+// metricNormalization documents the server query contract for derived change
+// evidence. Parsers use it to distinguish a CPU-limit utilization ratio from
+// a raw core-seconds rate, which cannot establish pressure on its own.
+func metricNormalization(name string) string {
+	if strings.EqualFold(name, "cpu") {
+		return "ratio_to_cpu_limit"
+	}
+	return "window_relative_change"
 }
 
 func representativePrometheusValue(result any) (float64, bool) {

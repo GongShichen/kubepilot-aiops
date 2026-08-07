@@ -126,13 +126,15 @@ func (r *AgentRegistry) runHierarchicalDiagnosis(ctx context.Context, incident *
 			return DiagnosisResult{}, rankErr
 		}
 		allEvidence = ranked.Evidence
-		features := deps.Reasoning.BuildFeatures(incident, allEvidence)
 		if round == 1 {
+			features := deps.Reasoning.BuildFeatures(incident, allEvidence)
 			candidates, investigation.MemoryReads = r.readIncidentMemory(ctx, incident, features, deps)
 			if deps.Knowledge != nil {
 				known, loadErr := deps.Knowledge.ListCausalPatterns(ctx, "active")
 				if loadErr == nil {
 					known = causalPatternsForMode(causalPatternsForScope(known, incident.Cluster, incident.Namespace, 0), causalMode)
+					allEvidence = deps.Reasoning.AnnotateCausalNodes(allEvidence, known)
+					features = deps.Reasoning.BuildFeatures(incident, allEvidence)
 					activePatterns = deps.Reasoning.MatchCausalPatterns(features, allEvidence, known)
 				}
 			}
@@ -639,6 +641,13 @@ func arbitrateHypotheses(verified []domain.VerifiedHypothesis, evidence []domain
 		result.RankedHypothesisIDs = append(result.RankedHypothesisIDs, item.Draft.ID)
 	}
 	if len(ordered) == 0 {
+		// An empty deterministic candidate universe is an auditable abstention,
+		// not an absent arbitration record.  Downstream monitoring uses gate
+		// results to distinguish evidence collection failures from a safe
+		// "unresolved mechanism" outcome and to apply the consecutive-gate pause
+		// rule consistently.
+		arbitrationGateFailure.WithLabelValues("no_candidate").Inc()
+		result.GateResults = []domain.HypothesisGateResult{{FailedGates: []string{"no_candidate"}}}
 		return result
 	}
 	result.SelectedHypothesisID = ordered[0].Draft.ID
@@ -657,7 +666,7 @@ func arbitrateHypotheses(verified []domain.VerifiedHypothesis, evidence []domain
 			arbitrationGateFailure.WithLabelValues(gate).Inc()
 		}
 		breakdown := domain.HypothesisConfidenceRecord{
-			HypothesisID: item.Draft.ID, Score: item.FinalScore,
+			HypothesisID: item.Draft.ID, Score: item.FinalScore, ObjectiveScore: item.ObjectiveScore, ObservationCoverage: item.ObservationCoverage,
 			ModelPrior:      item.Draft.PriorProbability,
 			SupportingScore: item.SupportingScore, ContradictionScore: item.ContradictionScore,
 			CausalPathCoverage: item.CausalPathCoverage, HistoricalRelevance: item.HistoricalRelevance,

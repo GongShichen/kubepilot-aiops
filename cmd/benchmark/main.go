@@ -164,11 +164,11 @@ func run(args []string) {
 	caseID := fs.String("case-id", "", "run exactly one scenario ID (diagnostic use)")
 	runID := fs.String("run-id", "", "stable run ID used for resume/API orchestration")
 	resumeRun := fs.Bool("resume", false, "continue after the last checkpoint")
-	diagnosisMethod := fs.String("diagnosis-method", domain.DiagnosisMethodKubePilot, "direct, rag, react, or kubepilot")
+	diagnosisMethod := fs.String("diagnosis-method", domain.DiagnosisMethodKubePilot, "direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, or kubepilot")
 	causalMode := fs.String("causal-mode", domain.CausalModeFull, "no-causal, static-causal, learned-causal, or full")
 	modelProfile := fs.String("model-profile", os.Getenv("MODEL_PROFILE"), "stable label for the active model configuration")
 	compareMethods := fs.Bool("compare-methods", false, "run all diagnosis baselines sequentially")
-	strategyList := fs.String("strategies", "direct,rag,react,kubepilot", "comma-separated strategies used by comparison runs")
+	strategyList := fs.String("strategies", "rule-only,evidence-only,cognitive,active-diagnosis,react", "comma-separated strategies used by comparison runs")
 	datasetSplit := fs.String("dataset-split", "test", "dev, validation, test, or all")
 	seedList := fs.String("seeds", "20260803,20260804,20260805", "comma-separated paired load and fault seeds")
 	repetitions := fs.Int("repetitions", 1, "repetitions per scenario and seed")
@@ -662,7 +662,7 @@ func caseCheckpointKey(caseID string, seed int64, repetition int) string {
 }
 
 func comparisonStrategyOrder(runID string) []string {
-	return randomizedStrategyOrder([]string{domain.DiagnosisMethodDirect, domain.DiagnosisMethodRAG, domain.DiagnosisMethodReAct, domain.DiagnosisMethodKubePilot}, runID)
+	return randomizedStrategyOrder([]string{domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive, domain.DiagnosisMethodReAct}, runID)
 }
 
 func randomizedStrategyOrder(strategies []string, runID string) []string {
@@ -700,8 +700,14 @@ func strategyArchitecture(strategy string) string {
 		return "single-pass-episodic"
 	case domain.DiagnosisMethodReAct:
 		return "single-react"
+	case domain.DiagnosisMethodRuleOnly:
+		return "eino-rule-diagnosis-runtime"
+	case domain.DiagnosisMethodEvidence:
+		return "eino-evidence-diagnosis-runtime"
+	case domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive, domain.DiagnosisMethodKubePilot:
+		return domain.WorkflowRuntimeName
 	default:
-		return "hierarchical-causal-react"
+		return "unknown"
 	}
 }
 

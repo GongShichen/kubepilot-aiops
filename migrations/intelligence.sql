@@ -5,10 +5,12 @@ CREATE TABLE IF NOT EXISTS incident_investigations (
     findings JSONB NOT NULL DEFAULT '[]'::jsonb,
     debate JSONB NOT NULL DEFAULT '[]'::jsonb,
     arbitration JSONB,
+    diagnostic_intelligence JSONB NOT NULL DEFAULT '{}'::jsonb,
     started_at TIMESTAMPTZ NOT NULL,
     completed_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE incident_investigations ADD COLUMN IF NOT EXISTS diagnostic_intelligence JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS memory_access_events (
     id BIGSERIAL PRIMARY KEY,
@@ -53,6 +55,9 @@ ALTER TABLE causal_patterns DROP CONSTRAINT IF EXISTS causal_patterns_status_che
 ALTER TABLE causal_patterns ADD CONSTRAINT causal_patterns_status_check CHECK(status IN ('candidate','validating','active','rejected','disabled'));
 ALTER TABLE causal_patterns ADD COLUMN IF NOT EXISTS supporting_evidence JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE causal_patterns ADD COLUMN IF NOT EXISTS contradicting_evidence JSONB NOT NULL DEFAULT '[]'::jsonb;
+-- Preserve conjunction-based causal admission requirements as structured graph
+-- node IDs. They must survive the database round trip intact.
+ALTER TABLE causal_patterns ADD COLUMN IF NOT EXISTS required_admission_node_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE causal_patterns ADD COLUMN IF NOT EXISTS source_incidents JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE causal_patterns ADD COLUMN IF NOT EXISTS cluster_scope TEXT NOT NULL DEFAULT '';
 ALTER TABLE causal_patterns ADD COLUMN IF NOT EXISTS namespace_scope TEXT NOT NULL DEFAULT '';
@@ -70,12 +75,13 @@ DO $$
 BEGIN
     IF to_regclass('public.evolving_causal_patterns') IS NOT NULL THEN
         EXECUTE $migration$
-            INSERT INTO causal_patterns(id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at)
+            INSERT INTO causal_patterns(id,category,cause,nodes,edges,required_admission_node_ids,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at)
             SELECT pattern_id,
                    COALESCE(pattern->>'category',''),
                    COALESCE(pattern->>'cause',''),
                    COALESCE(pattern->'causal_graph'->'nodes','[]'::jsonb),
                    COALESCE(pattern->'causal_graph'->'edges','[]'::jsonb),
+                   COALESCE(pattern->'required_admission_node_ids','[]'::jsonb),
                    COALESCE(pattern->'supporting_evidence','[]'::jsonb),
                    COALESCE(pattern->'contradicting_evidence','[]'::jsonb),
                    source_incidents,
@@ -106,6 +112,7 @@ SELECT id,
            'cause', cause,
            'nodes', nodes,
            'edges', edges,
+           'required_admission_node_ids', required_admission_node_ids,
            'supporting_evidence', supporting_evidence,
            'contradicting_evidence', contradicting_evidence,
            'source_incidents', source_incidents,
@@ -128,7 +135,7 @@ UPDATE agent_workflows
 SET status='NEEDS_ATTENTION',
     last_error='workflow architecture changed; explicit retry is required',
     completed_at=NOW()
-WHERE graph_version <> 'eino-hierarchical-causal-react'
+WHERE graph_version <> 'eino-cognitive-diagnosis-runtime'
   AND status NOT IN ('RESOLVED','REJECTED','RECOVERY_FAILED','CANCELLED','NEEDS_ATTENTION');
 
 ALTER TABLE benchmark_case_results ADD COLUMN IF NOT EXISTS strategy_id TEXT NOT NULL DEFAULT 'kubepilot';

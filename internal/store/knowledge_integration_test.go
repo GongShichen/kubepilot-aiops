@@ -55,3 +55,43 @@ func TestPostgresLexicalAndCrossServiceTopologyRetrieval(t *testing.T) {
 		t.Fatalf("deleted incident remained visible: %v", err)
 	}
 }
+
+func TestPostgresCausalPatternPreservesRequiredAdmissionNodes(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	database, err := NewPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	pattern := domain.CausalPattern{
+		ID:                       "admission-contract-" + ulid.Make().String(),
+		Category:                 "deployment",
+		Cause:                    "a lifecycle transition paired with a verified workload failure",
+		Nodes:                    []domain.CausalNode{{ID: "transition", Type: "cause", Signals: []string{"deployment_change"}}, {ID: "failure", Type: "mechanism", Signals: []string{"probe_failure"}}},
+		Edges:                    []domain.CausalEdge{{From: "transition", To: "failure", Relation: "causes"}},
+		RequiredAdmissionNodeIDs: []string{"transition", "failure"},
+		Source:                   "integration-test",
+		Confidence:               .9,
+		Status:                   "active",
+		Version:                  1,
+	}
+	if err = database.SeedCausalPatterns(ctx, []domain.CausalPattern{pattern}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = database.pool.Exec(context.Background(), `DELETE FROM causal_patterns WHERE id=$1`, pattern.ID)
+	}()
+	stored, err := database.GetCausalPattern(ctx, pattern.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.RequiredAdmissionNodeIDs) != 2 || stored.RequiredAdmissionNodeIDs[0] != "transition" || stored.RequiredAdmissionNodeIDs[1] != "failure" {
+		t.Fatalf("required causal admission contract was lost: %#v", stored)
+	}
+}

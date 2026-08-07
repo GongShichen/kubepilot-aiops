@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -107,6 +108,9 @@ func Rank(policy Policy, incident *domain.Incident, items []domain.Evidence) []d
 	out := append([]domain.Evidence(nil), items...)
 	for index := range out {
 		out[index] = AnalyzeEvidence(out[index])
+	}
+	applySignalQuality(incident, out)
+	for index := range out {
 		attribution := Attribute(incident, out[index], causalValue(out[index]), anomalyValue(out[index]))
 		out[index].Attribution = &attribution
 		values := map[string]float64{
@@ -139,6 +143,10 @@ func Rank(policy Policy, incident *domain.Incident, items []domain.Evidence) []d
 			NeuralWeight:        .30,
 			FinalScore:          final,
 			NeuralUsed:          out[index].NeuralRanked,
+			SignalStrength:      maxSignalStrength(out[index].Signals),
+			SourceReliability:   maxSignalReliability(out[index].Signals),
+			TemporalAlignment:   maxSignalTemporalAlignment(out[index].Signals),
+			EvidenceQuality:     out[index].QualityScore,
 			Factors:             factors,
 		}
 		out[index].RelevanceScore = final
@@ -152,6 +160,73 @@ func Rank(policy Policy, incident *domain.Incident, items []domain.Evidence) []d
 		return out[i].RelevanceScore > out[j].RelevanceScore
 	})
 	return out
+}
+
+// applySignalQuality adds an independence penalty before ranking. Evidence
+// emitted from the same source/template/scope is one observation family, not
+// multiple independent confirmations of a root cause.
+func applySignalQuality(incident *domain.Incident, items []domain.Evidence) {
+	counts := map[string]int{}
+	for _, item := range items {
+		for _, signal := range item.Signals {
+			counts[signalFamily(item, signal)]++
+		}
+	}
+	for index := range items {
+		best := 0.0
+		for signalIndex := range items[index].Signals {
+			signal := &items[index].Signals[signalIndex]
+			count := counts[signalFamily(items[index], *signal)]
+			if count < 1 {
+				count = 1
+			}
+			signal.Independence = math.Max(.10, 1/math.Sqrt(float64(count)))
+			signal.TemporalAlignment = temporalAlignment(incident, items[index])
+			quality := clamp(signal.Strength * signal.Reliability * signal.TemporalAlignment * signal.Independence)
+			if quality > best {
+				best = quality
+			}
+		}
+		items[index].QualityScore = best
+	}
+}
+
+func signalFamily(item domain.Evidence, signal domain.EvidenceSignal) string {
+	template := item.TemplateID
+	if template == "" {
+		template = strings.ToLower(strings.TrimSpace(item.Summary))
+	}
+	return strings.Join([]string{strings.ToLower(signal.Source), signal.Category, signal.Signal, item.Namespace, item.Service, item.Resource, template}, "|")
+}
+
+func maxSignalStrength(signals []domain.EvidenceSignal) float64 {
+	value := 0.0
+	for _, signal := range signals {
+		if signal.Strength > value {
+			value = signal.Strength
+		}
+	}
+	return value
+}
+
+func maxSignalReliability(signals []domain.EvidenceSignal) float64 {
+	value := 0.0
+	for _, signal := range signals {
+		if signal.Reliability > value {
+			value = signal.Reliability
+		}
+	}
+	return value
+}
+
+func maxSignalTemporalAlignment(signals []domain.EvidenceSignal) float64 {
+	value := 0.0
+	for _, signal := range signals {
+		if signal.TemporalAlignment > value {
+			value = signal.TemporalAlignment
+		}
+	}
+	return value
 }
 
 func RankCandidates(policy Policy, items []domain.RetrievalCandidate) []domain.RetrievalCandidate {

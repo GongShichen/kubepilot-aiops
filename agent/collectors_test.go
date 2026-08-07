@@ -172,7 +172,7 @@ func TestKubernetesCollectorBuildsSanitizedWorkloadAndDependencyEvidence(t *test
 		},
 	}
 	mysqlDeployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "mysql", Namespace: "kubepilot-demo"}, Spec: appsv1.DeploymentSpec{Replicas: &replicas}, Status: appsv1.DeploymentStatus{AvailableReplicas: 1, ReadyReplicas: 1}}
-	paymentPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "payment-1", Namespace: "kubepilot-demo", Labels: map[string]string{"app": "payment-service"}, UID: "pod-uid", ResourceVersion: "5"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2", ContainerStatuses: []corev1.ContainerStatus{{Name: "payment", Ready: true, RestartCount: 1}}}}
+	paymentPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "payment-1", Namespace: "kubepilot-demo", Labels: map[string]string{"app": "payment-service"}, UID: "pod-uid", ResourceVersion: "5"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2", ContainerStatuses: []corev1.ContainerStatus{{Name: "payment", Ready: true, RestartCount: 1, LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled", ExitCode: 137}}}}}}
 	mysqlPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mysql-1", Namespace: "kubepilot-demo", Labels: map[string]string{"app": "mysql"}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
 	recentEvent := &corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: "recent", Namespace: "kubepilot-demo", CreationTimestamp: metav1.NewTime(now)}, Type: "Warning", Reason: "BackOff", Message: "container restarting", InvolvedObject: corev1.ObjectReference{Name: "payment-1"}}
 	unrelatedEvent := &corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: "kubepilot-demo", CreationTimestamp: metav1.NewTime(now)}, Type: "Warning", Reason: "BackOff", Message: "unrelated job failed", InvolvedObject: corev1.ObjectReference{Name: "load-generator-7"}}
@@ -199,6 +199,11 @@ func TestKubernetesCollectorBuildsSanitizedWorkloadAndDependencyEvidence(t *test
 	for _, expected := range []string{"discovered_dependencies", "allow-payment", "network_policy_effects", "deny_all", "payment-config", "[REDACTED]"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("missing %q in workload evidence: %s", expected, text)
+		}
+	}
+	for _, expected := range []string{`"labels":{"app":"payment-service"}`, "last_termination_state", "OOMKilled"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("missing diagnostic pod fact %q in workload evidence: %s", expected, text)
 		}
 	}
 	if strings.Contains(text, "must-not-leak") {

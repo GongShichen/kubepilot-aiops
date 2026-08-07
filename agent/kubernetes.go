@@ -3,7 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,9 +43,17 @@ func (a KubernetesEvidenceCollector) Collect(ctx context.Context, in *domain.Inc
 	for _, pod := range pods.Items {
 		containers := []map[string]any{}
 		for _, status := range pod.Status.ContainerStatuses {
-			containers = append(containers, map[string]any{"name": status.Name, "ready": status.Ready, "restart_count": status.RestartCount, "state": status.State})
+			containers = append(containers, containerStatusFacts(status))
 		}
-		podSummaries = append(podSummaries, map[string]any{"name": pod.Name, "uid": pod.UID, "resource_version": pod.ResourceVersion, "phase": pod.Status.Phase, "pod_ip": pod.Status.PodIP, "containers": containers})
+		podSummaries = append(podSummaries, map[string]any{
+			"name": pod.Name, "uid": pod.UID, "resource_version": pod.ResourceVersion,
+			"phase": pod.Status.Phase, "pod_ip": pod.Status.PodIP,
+			// Service selectors apply to Pod labels, not the Deployment name. Keep
+			// the server-observed labels so the deterministic signal layer can
+			// distinguish an empty Endpoint set caused by a selector mismatch from
+			// one caused by an actually unavailable workload.
+			"labels": copyStringMap(pod.Labels), "containers": containers,
+		})
 	}
 	data["pods"] = podSummaries
 	if depErr == nil {
@@ -100,6 +111,12 @@ func (a KubernetesEvidenceCollector) Collect(ctx context.Context, in *domain.Inc
 	}
 	if depErr == nil && servicesErr == nil {
 		data["discovered_dependencies"] = discoverDeploymentDependencies(deployment.Spec.Template.Spec.Containers, services.Items, in.Service)
+		// This is a bounded Kubernetes resolution check, not a free-text
+		// configuration heuristic. It retains only endpoint-shaped, non-secret
+		// environment values that name a cluster-local Service which does not
+		// exist in the current namespace. A later causal pattern still requires
+		// a matching request failure before it can become a diagnosis.
+		data["configured_endpoint_resolution"] = unresolvedConfiguredEndpoints(deployment.Spec.Template.Spec.Containers, services.Items)
 	}
 	summary := fmt.Sprintf("Kubernetes state for %s", in.Service)
 	if effects, _ := data["network_policy_effects"].([]map[string]any); len(effects) > 0 {
@@ -107,6 +124,132 @@ func (a KubernetesEvidenceCollector) Collect(ctx context.Context, in *domain.Inc
 	}
 	items := []domain.Evidence{{Source: "kubernetes", Kind: "workload_state", Summary: summary, Data: data, ObservedAt: time.Now().UTC()}}
 	return evidencenorm.Normalize(in, request, items), nil
+}
+
+// containerStatusFacts preserves the small portion of Pod status that has
+// diagnostic meaning across collection rounds. In particular, Kubernetes puts
+// an OOM termination in LastTerminationState after the container has restarted
+// and returned to Running. Dropping it turns a concrete lifecycle cause into a
+// generic restart symptom.
+func containerStatusFacts(status corev1.ContainerStatus) map[string]any {
+	item := map[string]any{
+		"name": status.Name, "ready": status.Ready, "restart_count": status.RestartCount,
+		"state": containerStateFacts(status.State),
+	}
+	if last := containerStateFacts(status.LastTerminationState); len(last) > 0 {
+		item["last_termination_state"] = last
+	}
+	return item
+}
+
+func containerStateFacts(state corev1.ContainerState) map[string]any {
+	if state.Waiting != nil {
+		return map[string]any{"waiting": map[string]any{"reason": state.Waiting.Reason}}
+	}
+	if state.Terminated != nil {
+		return map[string]any{"terminated": map[string]any{
+			"reason": state.Terminated.Reason, "exit_code": state.Terminated.ExitCode,
+		}}
+	}
+	if state.Running != nil {
+		return map[string]any{"running": true}
+	}
+	return nil
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+// unresolvedConfiguredEndpoints reports workload configuration that points to
+// a missing cluster-local Service. It deliberately ignores external hosts,
+// IP addresses, secrets, and arbitrary environment values: Kubernetes cannot
+// authoritatively resolve those. The output is structured and auditable; the
+// evidence parser never relies on a variable name or raw text by itself.
+func unresolvedConfiguredEndpoints(containers []corev1.Container, services []corev1.Service) []map[string]any {
+	known := make(map[string]bool, len(services))
+	for _, service := range services {
+		if service.Name != "" {
+			known[strings.ToLower(service.Name)] = true
+		}
+	}
+	seen := map[string]bool{}
+	out := make([]map[string]any, 0)
+	for _, container := range containers {
+		for _, variable := range container.Env {
+			if variable.ValueFrom != nil || sensitiveEnvironmentName(strings.ToUpper(variable.Name)) || !endpointEnvironmentName(variable.Name) {
+				continue
+			}
+			host, port, ok := clusterLocalEndpoint(variable.Value)
+			if !ok || known[host] {
+				continue
+			}
+			key := strings.ToLower(container.Name + "\x00" + variable.Name + "\x00" + host + "\x00" + port)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, map[string]any{"container": container.Name, "environment": variable.Name, "host": host, "port": port, "status": "service_not_found"})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return fmt.Sprint(out[i]["container"], "\x00", out[i]["environment"], "\x00", out[i]["host"]) < fmt.Sprint(out[j]["container"], "\x00", out[j]["environment"], "\x00", out[j]["host"])
+	})
+	return out
+}
+
+func endpointEnvironmentName(name string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	for _, marker := range []string{"ADDR", "ADDRESS", "ENDPOINT", "HOST", "URL", "URI", "DSN"} {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func clusterLocalEndpoint(value string) (host, port string, ok bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", "", false
+	}
+	if strings.Contains(value, "://") {
+		parsed, err := url.Parse(value)
+		if err != nil {
+			return "", "", false
+		}
+		host, port = parsed.Hostname(), parsed.Port()
+	} else {
+		var err error
+		host, port, err = net.SplitHostPort(value)
+		if err != nil {
+			return "", "", false
+		}
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return "", "", false
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" || host == "localhost" || net.ParseIP(host) != nil {
+		return "", "", false
+	}
+	// A short DNS label resolves inside the Pod search path. For fully
+	// qualified names, only the Kubernetes Service DNS forms are authoritative
+	// to this collector; public and private external names remain neutral.
+	if strings.Contains(host, ".") {
+		if !strings.Contains(host, ".svc") {
+			return "", "", false
+		}
+		host = strings.Split(host, ".")[0]
+	}
+	return host, port, host != ""
 }
 
 // relevantNetworkPolicyFacts keeps only policies that select a pod in the

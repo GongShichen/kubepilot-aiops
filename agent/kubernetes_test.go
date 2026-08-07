@@ -33,3 +33,24 @@ func TestSanitizeContainersRedactsSecretsWithoutEvaluationSpecialCases(t *testin
 		t.Fatalf("safe value missing: %#v", environment[3])
 	}
 }
+
+func TestKubernetesStatusAndEndpointResolutionProjection(t *testing.T) {
+	status := containerStatusFacts(corev1.ContainerStatus{
+		Name: "checkout", Ready: true, RestartCount: 2,
+		State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled", ExitCode: 137}},
+	})
+	last, ok := status["last_termination_state"].(map[string]any)
+	if !ok || last["terminated"].(map[string]any)["reason"] != "OOMKilled" {
+		t.Fatalf("diagnostic last termination state was dropped: %#v", status)
+	}
+	containers := []corev1.Container{{Name: "checkout", Env: []corev1.EnvVar{
+		{Name: "CACHE_ADDR", Value: "missing-cache:6379"},
+		{Name: "EXTERNAL_URL", Value: "https://example.com:443"},
+		{Name: "DB_PASSWORD", Value: "cache:6379"},
+	}}}
+	resolved := unresolvedConfiguredEndpoints(containers, []corev1.Service{{}})
+	if len(resolved) != 1 || resolved[0]["host"] != "missing-cache" || resolved[0]["status"] != "service_not_found" {
+		t.Fatalf("cluster-local endpoint projection=%#v", resolved)
+	}
+}

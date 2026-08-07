@@ -85,6 +85,41 @@ func TestCorrelationDoesNotMergeNamespaces(t *testing.T) {
 	}
 }
 
+func TestAppendAlertRetainsConcurrentDiagnosisState(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	now := time.Now().UTC()
+	persisted := &domain.Incident{
+		ID: "incident-append-alert", Status: domain.StatusDiagnosing, Namespace: "production", Service: "gateway-service",
+		CreatedAt: now, UpdatedAt: now,
+		Investigation: &domain.Investigation{
+			Architecture: "eino-evidence-diagnosis-runtime",
+		},
+	}
+	if err := st.Create(ctx, persisted); err != nil {
+		t.Fatal(err)
+	}
+	// Correlation can retain a snapshot read before the graph persisted its
+	// investigation. AppendAlert must merge only the alert into the current
+	// stored record rather than write this stale snapshot back wholesale.
+	stale := *persisted
+	stale.Investigation = nil
+	manager := &IncidentManager{Store: st, Hub: NewHub()}
+	if _, err := manager.appendAlert(ctx, &stale, domain.Alert{Fingerprint: "fp-alert", Status: "firing"}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := st.Get(ctx, persisted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Investigation == nil || current.Investigation.Architecture != "eino-evidence-diagnosis-runtime" {
+		t.Fatalf("diagnosis state was overwritten: %#v", current.Investigation)
+	}
+	if len(current.Alerts) != 1 || current.Alerts[0].Fingerprint != "fp-alert" {
+		t.Fatalf("alerts=%#v", current.Alerts)
+	}
+}
+
 func TestWorkflowStatusEventIsImmediatelyVisible(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()

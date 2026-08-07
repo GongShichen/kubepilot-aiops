@@ -54,7 +54,7 @@ ranking_weights:
     deterministic: 0.45
     neural: 0.55
 evaluation:
-  strategies: [direct, rag, react, kubepilot]
+  strategies: [rule-only, evidence-only, cognitive, active-diagnosis, react]
   causal_modes: [no-causal, static-causal, learned-causal, full]
   split: test
   seeds: [20260803, 20260804, 20260805]

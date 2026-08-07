@@ -298,6 +298,13 @@ func populateAgentMetrics(result *reporter.CaseResult, incident *domain.Incident
 	result.HypothesisCount = observation.HypothesisCount
 	result.HypothesisConverged = observation.HypothesisConverged
 	result.EvidenceQueries = observation.EvidenceQueries
+	result.IndependentEvidenceRequests = observation.IndependentEvidenceRequests
+	result.NewEvidenceIDs = observation.NewEvidenceIDs
+	result.ConvergenceRounds = observation.ConvergenceRounds
+	result.CognitiveProposals = observation.CognitiveProposals
+	result.CognitiveAcceptedProposals = observation.CognitiveAcceptedProposals
+	result.CognitiveUsefulProposals = observation.CognitiveUsefulProposals
+	result.CognitiveRejectedProposals = observation.CognitiveRejectedProposals
 	result.ConfidenceUpdates = observation.ConfidenceUpdates
 	result.AttributedEvidence = observation.AttributedEvidence
 	result.TopologyCandidates = observation.TopologyCandidates
@@ -351,7 +358,17 @@ func (r *Runner) waitDiagnosis(ctx context.Context, id string) (*domain.Incident
 		}
 		switch in.Status {
 		case domain.StatusAwaitingApproval, domain.StatusNeedsAttention, domain.StatusRejected, domain.StatusRecoveryFailed, domain.StatusResolved:
-			return in, nil
+			// Workflow status events are deliberately persisted as soon as a
+			// state transition occurs so operators can observe progress. The
+			// final Incident payload, including the Investigation ledger, is
+			// persisted only when the Eino graph returns. Returning on the
+			// status event alone therefore races the final write and can turn a
+			// fully diagnosed incident into an empty benchmark result. An
+			// explicit diagnosis error is final by definition; otherwise wait
+			// for the completed, self-contained investigation audit.
+			if diagnosisReadyForEvaluation(in) {
+				return in, nil
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -360,6 +377,18 @@ func (r *Runner) waitDiagnosis(ctx context.Context, id string) (*domain.Incident
 		}
 	}
 }
+
+func diagnosisReadyForEvaluation(in *domain.Incident) bool {
+	if in == nil {
+		return false
+	}
+	if in.DiagnosisError != "" {
+		return true
+	}
+	integration := in.Investigation
+	return integration != nil && integration.Architecture != "" && !integration.CompletedAt.IsZero()
+}
+
 func (r *Runner) waitFinal(ctx context.Context, id string) (*domain.Incident, error) {
 	for {
 		in, err := r.Client.Get(ctx, id)

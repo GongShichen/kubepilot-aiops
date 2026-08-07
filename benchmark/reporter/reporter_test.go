@@ -68,14 +68,14 @@ func TestCalibrationBins(t *testing.T) {
 
 func TestAgentMetricsAreAggregated(t *testing.T) {
 	items := []CaseResult{
-		{CaseID: "a", Status: "passed", AgentIterations: 4, AgentToolUses: 4, AgentCorrections: 1, SafetyRejections: 2, SelfCorrectionAttempts: 1, SelfCorrectionSucceeded: true, HypothesisCount: 2, HypothesisConverged: true, EvidenceQueries: 2, EvidenceEfficiency: .5},
-		{CaseID: "b", Status: "failed", AgentIterations: 2, AgentToolUses: 2, HypothesisCount: 1, EvidenceQueries: 1},
+		{CaseID: "a", Status: "passed", AgentIterations: 4, AgentToolUses: 4, AgentCorrections: 1, SafetyRejections: 2, SelfCorrectionAttempts: 1, SelfCorrectionSucceeded: true, HypothesisCount: 2, HypothesisConverged: true, EvidenceQueries: 2, EvidenceEfficiency: .5, IndependentEvidenceRequests: 2, NewEvidenceIDs: 3, ConvergenceRounds: 1, CognitiveProposals: 2, CognitiveAcceptedProposals: 2, CognitiveUsefulProposals: 1, Score: scorer.Score{StrictRootCause: true}},
+		{CaseID: "b", Status: "failed", AgentIterations: 2, AgentToolUses: 2, HypothesisCount: 1, EvidenceQueries: 1, IndependentEvidenceRequests: 4, NewEvidenceIDs: 1, ConvergenceRounds: 2, CognitiveProposals: 2, CognitiveAcceptedProposals: 1},
 	}
 	summary, err := Write(t.TempDir(), Manifest{RunID: "metrics"}, items)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.MeanAgentIterations != 3 || summary.TotalSafetyRejections != 2 || summary.SelfCorrectionSuccessRate != 1 || summary.HypothesisConvergenceRate != .5 || summary.MeanHypothesisCount != 1.5 || summary.MeanEvidenceEfficiency != .25 {
+	if summary.MeanAgentIterations != 3 || summary.TotalSafetyRejections != 2 || summary.SelfCorrectionSuccessRate != 1 || summary.HypothesisConvergenceRate != .5 || summary.MeanHypothesisCount != 1.5 || summary.MeanEvidenceEfficiency != .25 || summary.MeanIndependentEvidenceRequests != 3 || summary.MeanNewEvidenceIDs != 2 || summary.MeanConvergenceRounds != 1.5 || summary.CorrectRCAperEvidenceRequest != 1.0/6.0 || summary.MedianEvidenceRequestsCorrect != 2 || summary.CognitiveProposalPrecision != .25 || summary.CognitiveProposalAcceptance != .75 {
 		t.Fatalf("unexpected metrics: %+v", summary)
 	}
 }

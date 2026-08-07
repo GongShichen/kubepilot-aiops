@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -393,7 +392,14 @@ func buildConstrainedDiagnosisCapabilities(deps constrainedToolDeps) ([]captools
 		runtime.mu.Lock()
 		defer runtime.mu.Unlock()
 		patterns = causalPatternsForScope(patterns, runtime.state.Incident.Cluster, runtime.state.Incident.Namespace, 0)
-		runtime.state.CausalPatterns = deps.Reasoning.MatchCausalPatterns(runtime.state.Features, runtime.state.RankedEvidence, patterns)
+		evidence := runtime.state.RankedEvidence
+		if len(evidence) == 0 {
+			evidence = runtime.state.Incident.Evidence
+		}
+		evidence = deps.Reasoning.AnnotateCausalNodes(evidence, patterns)
+		runtime.state.RankedEvidence = evidence
+		runtime.state.Features = deps.Reasoning.BuildFeatures(runtime.state.Incident, evidence)
+		runtime.state.CausalPatterns = deps.Reasoning.MatchCausalPatterns(runtime.state.Features, evidence, patterns)
 		runtime.state.DiagnosisLedger.CausalPatterns = runtime.state.CausalPatterns
 		return constrainedToolOutput{OK: true, Patterns: runtime.state.CausalPatterns}, nil
 	}); err != nil {
@@ -791,7 +797,7 @@ func effectiveRankingPolicy(policy *rankpolicy.Policy) rankpolicy.Policy {
 }
 
 func compactToolEvidence(items []domain.Evidence, maximumBytes int) []domain.Evidence {
-	views := evidencenorm.Views(items, 0, 2048, 12)
+	views := evidencenorm.Views(items, maximumBytes, 2048, 12)
 	out := make([]domain.Evidence, 0, len(views))
 	for _, view := range views {
 		candidate := domain.Evidence{
@@ -801,17 +807,6 @@ func compactToolEvidence(items []domain.Evidence, maximumBytes int) []domain.Evi
 			Facts: view.Facts, TruncatedFields: view.TruncatedFields,
 			CausalNodeIDs: view.CausalNodeIDs, RelevanceScore: view.ContextRelevance,
 			AnomalyScore: view.AnomalyScore,
-		}
-		trial := append(append([]domain.Evidence(nil), out...), candidate)
-		raw, _ := json.Marshal(trial)
-		if maximumBytes > 0 && len(raw) > maximumBytes {
-			candidate.Facts = nil
-			candidate.TruncatedFields = append(candidate.TruncatedFields, "facts")
-			trial = append(append([]domain.Evidence(nil), out...), candidate)
-			raw, _ = json.Marshal(trial)
-			if len(raw) > maximumBytes {
-				continue
-			}
 		}
 		out = append(out, candidate)
 	}
@@ -1069,6 +1064,9 @@ func submitConstrainedDiagnosis(ctx context.Context, in hypothesisSelection) (co
 	if selected == nil {
 		missing = append(missing, "the selected hypothesis must exist in the verified ledger")
 	} else {
+		if selected.Draft.ID == "unresolved-mechanism" || selected.Draft.Category == "unknown" {
+			missing = append(missing, "an unresolved mechanism candidate requires human review and cannot authorize recovery")
+		}
 		sources := map[string]bool{}
 		allowed := map[string]domain.Evidence{}
 		for _, item := range runtime.state.Incident.Evidence {

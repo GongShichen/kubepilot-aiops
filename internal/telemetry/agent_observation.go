@@ -11,31 +11,38 @@ import (
 // Incident's Agent runtime behavior. Benchmark code consumes this projection;
 // it does not reconstruct Agent semantics from persistence internals.
 type AgentObservation struct {
-	Architecture            string
-	Iterations              int
-	ToolUses                int
-	ToolCost                int
-	Tokens                  int
-	Corrections             int
-	SafetyRejections        int
-	SelfCorrectionAttempts  int
-	SelfCorrectionSucceeded bool
-	HypothesisCount         int
-	HypothesisConverged     bool
-	EvidenceQueries         int
-	EvidenceEfficiency      float64
-	ConfidenceUpdates       int
-	AttributedEvidence      int
-	TopologyCandidates      int
-	PlannerTasks            int
-	WorkerFindings          int
-	DebateRounds            int
-	MemoryReads             int
-	InputTokens             int
-	OutputTokens            int
-	ReasoningTokens         int
-	EstimatedModelCost      float64
-	ArbitrationGateFailures []string
+	Architecture                string
+	Iterations                  int
+	ToolUses                    int
+	ToolCost                    int
+	Tokens                      int
+	Corrections                 int
+	SafetyRejections            int
+	SelfCorrectionAttempts      int
+	SelfCorrectionSucceeded     bool
+	HypothesisCount             int
+	HypothesisConverged         bool
+	EvidenceQueries             int
+	EvidenceEfficiency          float64
+	IndependentEvidenceRequests int
+	NewEvidenceIDs              int
+	ConvergenceRounds           int
+	CognitiveProposals          int
+	CognitiveAcceptedProposals  int
+	CognitiveUsefulProposals    int
+	CognitiveRejectedProposals  int
+	ConfidenceUpdates           int
+	AttributedEvidence          int
+	TopologyCandidates          int
+	PlannerTasks                int
+	WorkerFindings              int
+	DebateRounds                int
+	MemoryReads                 int
+	InputTokens                 int
+	OutputTokens                int
+	ReasoningTokens             int
+	EstimatedModelCost          float64
+	ArbitrationGateFailures     []string
 }
 
 // ObserveAgent projects auditable runtime state without reading evaluator
@@ -65,6 +72,40 @@ func ObserveAgent(incident *domain.Incident) AgentObservation {
 		// completed worker query so evidence-efficiency ablations do not collapse
 		// to zero for the hierarchical strategy.
 		observation.EvidenceQueries += len(incident.Investigation.Findings)
+		observation.IndependentEvidenceRequests += len(incident.Investigation.Findings)
+		seenEvidence := map[string]bool{}
+		for _, finding := range incident.Investigation.Findings {
+			for _, evidenceID := range finding.EvidenceIDs {
+				seenEvidence[evidenceID] = true
+			}
+		}
+		observation.NewEvidenceIDs = len(seenEvidence)
+		observation.ConvergenceRounds = incident.Investigation.DiagnosisRounds
+		if observation.ConvergenceRounds == 0 && len(incident.Investigation.Plan.Tasks) > 0 {
+			observation.ConvergenceRounds = 1
+		}
+		for _, reasoning := range incident.Investigation.CognitiveReasoning {
+			for _, policy := range reasoning.InvestigationPolicies {
+				observation.CognitiveProposals++
+				switch policy.Status {
+				case "useful":
+					observation.CognitiveAcceptedProposals++
+					observation.CognitiveUsefulProposals++
+				case "accepted", "ineffective_no_new_evidence", "ineffective_no_decision_change":
+					observation.CognitiveAcceptedProposals++
+				default:
+					observation.CognitiveRejectedProposals++
+				}
+			}
+		}
+		for _, expansion := range incident.Investigation.ExpansionRequests {
+			observation.CognitiveProposals++
+			if expansion.Status == "activated_non_actionable" {
+				observation.CognitiveAcceptedProposals++
+			} else {
+				observation.CognitiveRejectedProposals++
+			}
+		}
 		for _, usage := range incident.Investigation.ModelUsage {
 			observation.InputTokens += usage.InputTokens
 			observation.OutputTokens += usage.OutputTokens

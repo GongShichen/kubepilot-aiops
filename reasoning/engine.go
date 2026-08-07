@@ -74,8 +74,16 @@ func New(config Config) *Engine {
 }
 
 type RankedEvidence struct {
-	Evidence []domain.Evidence      `json:"evidence"`
-	Ledger   domain.DiagnosisLedger `json:"ledger"`
+	// Evidence is the bounded, relevance-ranked model context. It preserves the
+	// historical RankEvidence contract for callers that render or send evidence
+	// to an LLM.
+	Evidence []domain.Evidence `json:"evidence"`
+	// RuntimeEvidence retains the complete normalized, ranked observation set
+	// for deterministic signal, assertion, causal, and arbitration services.
+	// Diagnosis must not lose a low-relevance-but-decisive observation merely
+	// because the model context has a finite item or byte budget.
+	RuntimeEvidence []domain.Evidence      `json:"runtime_evidence,omitempty"`
+	Ledger          domain.DiagnosisLedger `json:"ledger"`
 }
 
 func (e *Engine) RankEvidence(incident *domain.Incident, input []domain.Evidence) (RankedEvidence, error) {
@@ -125,21 +133,28 @@ func (e *Engine) RankEvidence(incident *domain.Incident, input []domain.Evidence
 	selected := preserveRequiredSources(items, e.config.ModelEvidenceMaxItems)
 	for index := range selected {
 		selected[index].RankingReasons = append(selected[index].RankingReasons, "retained_for_model_context")
+		// Keep the canonical facts in the runtime. The model receives a bounded
+		// EvidenceView at its call boundary; replacing Facts here made a second
+		// ranking pass re-parse a lossy preview and silently lose nested
+		// Kubernetes states (for example ImagePullBackOff) and structured log
+		// fields. Facts are the server-owned source of diagnostic truth, not a
+		// model-context cache.
 		selected[index] = evidenceForModelContext(selected[index])
 	}
-	selected = fitEvidenceBytes(selected, e.config.ModelContextMaxBytes)
 	if !hasSource(selected, "kubernetes") {
 		return RankedEvidence{}, fmt.Errorf("ranked evidence is missing Kubernetes evidence")
 	}
 	if !hasAnySource(selected, "metric", "prometheus", "log", "loki", "trace", "jaeger") {
 		return RankedEvidence{}, fmt.Errorf("ranked evidence is missing metric, log, or trace evidence")
 	}
-	retained, _ := json.Marshal(selected)
+	// Account for the bounded model projection without mutating the runtime
+	// Evidence. Every LLM-facing path uses the same view contract.
+	retained, _ := json.Marshal(evidencenorm.Views(selected, e.config.ModelContextMaxBytes, 2048, e.config.ModelEvidenceMaxItems))
 	ledger.EvidenceRetainedCount = len(selected)
 	ledger.EvidenceRetainedBytes = len(retained)
 	evidenceContextItems.WithLabelValues("after").Observe(float64(ledger.EvidenceRetainedCount))
 	evidenceContextBytes.WithLabelValues("after").Observe(float64(ledger.EvidenceRetainedBytes))
-	return RankedEvidence{Evidence: selected, Ledger: ledger}, nil
+	return RankedEvidence{Evidence: selected, RuntimeEvidence: items, Ledger: ledger}, nil
 }
 
 func evidenceForModelContext(item domain.Evidence) domain.Evidence {
@@ -474,7 +489,24 @@ func removeDynamicFields(value any) any {
 	}
 }
 
-func fitEvidenceBytes(items []domain.Evidence, maxBytes int) []domain.Evidence {
+func requiredContextEvidenceIDs(items []domain.Evidence) map[string]bool {
+	protected := map[string]bool{}
+	for _, item := range items {
+		if strings.EqualFold(item.Source, "kubernetes") {
+			protected[item.ID] = true
+			break
+		}
+	}
+	for _, item := range items {
+		if hasAnySource([]domain.Evidence{item}, "metric", "prometheus", "log", "loki", "trace", "jaeger") {
+			protected[item.ID] = true
+			break
+		}
+	}
+	return protected
+}
+
+func fitEvidenceBytes(items []domain.Evidence, maxBytes int, protectedIDs map[string]bool) []domain.Evidence {
 	if maxBytes <= 0 {
 		return nil
 	}
@@ -506,11 +538,36 @@ func fitEvidenceBytes(items []domain.Evidence, maxBytes int) []domain.Evidence {
 			result[largest].RankingReasons = append(result[largest].RankingReasons, "payload_truncated")
 		}
 		updated, _ := json.Marshal(result[largest])
-		if len(updated) >= largestBytes && len(result) > 2 {
-			result = append(result[:largest], result[largest+1:]...)
+		if len(updated) >= largestBytes && len(result) > len(protectedIDs) {
+			removable := largestRemovableEvidence(result, protectedIDs)
+			if removable >= 0 {
+				result = append(result[:removable], result[removable+1:]...)
+				continue
+			}
+		}
+		// All remaining records are mandatory source representatives. Returning
+		// their already field-bounded form is safer than looping forever or
+		// discarding the Kubernetes/telemetry evidence required by arbitration.
+		if len(updated) >= largestBytes {
+			return result
 		}
 	}
 	return result
+}
+
+func largestRemovableEvidence(items []domain.Evidence, protectedIDs map[string]bool) int {
+	largest := -1
+	largestBytes := 0
+	for index := range items {
+		if protectedIDs[items[index].ID] {
+			continue
+		}
+		bytes, _ := json.Marshal(items[index])
+		if len(bytes) > largestBytes {
+			largest, largestBytes = index, len(bytes)
+		}
+	}
+	return largest
 }
 
 func hasReasonPrefix(reasons []string, prefix string) bool {
@@ -712,70 +769,47 @@ func InferTopologyServices(values ...string) []string {
 
 func (e *Engine) AnnotateCausalNodes(evidence []domain.Evidence, patterns []domain.CausalPattern) []domain.Evidence {
 	out := append([]domain.Evidence(nil), evidence...)
+	nodesBySignal := map[string][]domain.CausalNode{}
+	for _, pattern := range patterns {
+		if pattern.Status != "active" {
+			continue
+		}
+		for _, node := range pattern.Nodes {
+			for _, signal := range node.Signals {
+				signal = strings.ToLower(strings.TrimSpace(signal))
+				if signal != "" {
+					nodesBySignal[signal] = append(nodesBySignal[signal], node)
+				}
+			}
+		}
+	}
 	for index := range out {
 		matched := map[string]bool{}
 		for _, id := range out[index].CausalNodeIDs {
 			matched[id] = true
 		}
-		// A healthy configuration still identifies workload scope, but it is
-		// not evidence that a causal mechanism was observed. Pattern nodes are
-		// therefore attached only to an observation with deterministic anomaly
-		// support; the observation node itself remains available for audit.
-		if out[index].AnomalyScore <= 0 {
-			out[index].CausalNodeIDs = keys(matched)
-			continue
-		}
-		text := strings.ToLower(out[index].Summary + " " + stringify(evidenceFacts(out[index])))
-		for _, pattern := range patterns {
-			if pattern.Status != "active" {
-				continue
-			}
-			for _, node := range pattern.Nodes {
-				for _, token := range node.Match {
-					if causalTokenMatches(text, token) {
-						matched[node.ID] = true
-						break
-					}
+		// Causal nodes are attached only from anomalous server signals, except
+		// that a server-observed lifecycle/configuration transition can establish
+		// a declared cause node. Such a transition remains neutral for evidence
+		// support and must be paired with a failed mechanism by the pattern's
+		// admission contract.
+		// Evidence summaries, facts blobs and model prose are intentionally not
+		// consulted here: text similarity can turn a shared symptom or service
+		// name into a fabricated causal mechanism.
+		for _, signal := range out[index].Signals {
+			for _, node := range nodesBySignal[strings.ToLower(strings.TrimSpace(signal.Signal))] {
+				if signal.Direction != "abnormal" && !(signal.Direction == "observed" && strings.EqualFold(strings.TrimSpace(node.Type), "cause")) {
+					continue
 				}
+				if node.Source != "" && !strings.EqualFold(node.Source, out[index].Source) {
+					continue
+				}
+				matched[node.ID] = true
 			}
 		}
 		out[index].CausalNodeIDs = keys(matched)
 	}
 	return out
-}
-
-// causalTokenMatches accepts the structured spellings emitted by telemetry
-// (for example `network_policies`) as well as prose (`network policy`). This
-// is only a representation normalization; nodes are still attached solely to
-// anomalous observations and active server-owned patterns.
-func causalTokenMatches(text, token string) bool {
-	needle := strings.ToLower(strings.TrimSpace(token))
-	if needle == "" {
-		return false
-	}
-	if strings.Contains(text, needle) {
-		return true
-	}
-	compactText := compactCausalToken(text)
-	compactNeedle := compactCausalToken(needle)
-	if len(compactNeedle) < 4 {
-		return false
-	}
-	if strings.Contains(compactText, compactNeedle) {
-		return true
-	}
-	// Structured field names often use plural nouns (`network_policies`).
-	// Normalize the ordinary plural spelling before comparing the compact form.
-	return strings.Contains(strings.ReplaceAll(compactText, "ies", "y"), compactNeedle)
-}
-
-func compactCausalToken(value string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return unicode.ToLower(r)
-		}
-		return -1
-	}, value)
 }
 
 type CandidateLists struct {
@@ -1017,10 +1051,15 @@ func hasTopologyGraph(graph domain.IncidentDependencyGraph) bool {
 	return len(graph.Edges) > 0 || len(graph.ErrorPropagationPaths) > 0 || len(graph.SuspectedFailureNodes) > 0
 }
 
-func (e *Engine) MatchCausalPatterns(features domain.IncidentFeatures, evidence []domain.Evidence, patterns []domain.CausalPattern) []domain.CausalPattern {
-	text := strings.Join(features.Terms, " ")
+func (e *Engine) MatchCausalPatterns(_ domain.IncidentFeatures, evidence []domain.Evidence, patterns []domain.CausalPattern) []domain.CausalPattern {
+	observed := map[string]bool{}
 	for _, item := range evidence {
-		text += " " + strings.ToLower(item.Summary+" "+stringify(evidenceFacts(item)))
+		if item.AnomalyScore <= 0 {
+			continue
+		}
+		for _, nodeID := range item.CausalNodeIDs {
+			observed[nodeID] = true
+		}
 	}
 	type scored struct {
 		pattern  domain.CausalPattern
@@ -1033,11 +1072,8 @@ func (e *Engine) MatchCausalPatterns(features domain.IncidentFeatures, evidence 
 		}
 		hit := 0
 		for _, node := range pattern.Nodes {
-			for _, token := range node.Match {
-				if strings.Contains(text, strings.ToLower(token)) {
-					hit++
-					break
-				}
+			if observed[node.ID] {
+				hit++
 			}
 		}
 		coverage := 0.0
@@ -1063,13 +1099,17 @@ func (e *Engine) MatchCausalPatterns(features domain.IncidentFeatures, evidence 
 	return out
 }
 
-func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []domain.Evidence, candidates []domain.RetrievalCandidate, patterns []domain.CausalPattern) ([]domain.VerifiedHypothesis, error) {
+func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []domain.Evidence, candidates []domain.RetrievalCandidate, patterns []domain.CausalPattern, assertionSets ...[]domain.StateAssertion) ([]domain.VerifiedHypothesis, error) {
 	evidence = e.AnnotateCausalNodes(evidence, patterns)
 	allowed := map[string]domain.Evidence{}
 	for _, item := range evidence {
 		allowed[item.ID] = item
 	}
 	out := make([]domain.VerifiedHypothesis, 0, len(drafts))
+	var assertions []domain.StateAssertion
+	if len(assertionSets) > 0 {
+		assertions = assertionSets[0]
+	}
 	for _, draft := range drafts {
 		if len(draft.SupportingEvidenceIDs) == 0 {
 			return nil, fmt.Errorf("hypothesis %s has no supporting evidence", draft.ID)
@@ -1106,7 +1146,15 @@ func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []do
 			verified.VerifiedEvidenceIDs = append(verified.VerifiedEvidenceIDs, id)
 			seenSource[item.Source] = true
 			if evidenceSupportsExpectedNode(item, expectedNodeIDs) {
-				sourceSupport[item.Source] = math.Max(sourceSupport[item.Source], item.AnomalyScore)
+				// Supporting confidence is derived from the strongest *causally
+				// relevant signal* for each source, rather than the aggregate
+				// quality of an evidence envelope. A collector may put unrelated
+				// normal and abnormal observations into the same envelope; using
+				// its maximum quality either dilutes a decisive signal or lets an
+				// unrelated signal support a hypothesis. Legacy evidence without
+				// structured signals keeps the envelope-level fallback below.
+				support := causalSignalSupport(item, expectedNodeIDs, patterns)
+				sourceSupport[item.Source] = math.Max(sourceSupport[item.Source], support)
 			}
 			if strings.EqualFold(item.Source, "kubernetes") {
 				// Topology confidence is primarily a property of the current
@@ -1123,15 +1171,16 @@ func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []do
 				verified.TopologyRelevance = math.Max(verified.TopologyRelevance, clamp(topologyScore))
 			}
 		}
-		contributors := 0
+		// A source contributes at most its strongest causally relevant signal.
+		// Combine distinct sources as independent confirmations rather than
+		// averaging them: weak but relevant corroboration must not reduce the
+		// confidence supplied by a strong independent observation. This is the
+		// bounded noisy-OR of source-level evidence, so repeated signals from a
+		// single source cannot inflate confidence.
 		for _, score := range sourceSupport {
 			if score > 0 {
-				verified.SupportingScore += score
-				contributors++
+				verified.SupportingScore = 1 - (1-verified.SupportingScore)*(1-clamp(score))
 			}
-		}
-		if contributors > 0 {
-			verified.SupportingScore = clamp(verified.SupportingScore / float64(contributors))
 		}
 		for _, id := range draft.ContradictingEvidenceIDs {
 			if _, ok := allowed[id]; !ok {
@@ -1143,6 +1192,21 @@ func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []do
 		coverage, missing, coverageErr := canonicalCausalCoverage(expectedNodeIDs, evidence, patterns)
 		if coverageErr != nil {
 			return nil, fmt.Errorf("hypothesis %s causal nodes: %w", draft.ID, coverageErr)
+		}
+		if draft.RequireCausalMechanism {
+			// A deterministic root-cause candidate must observe the decisive part
+			// of its causal pattern.  Previously this checked only that the
+			// candidate *named* a cause/mechanism node in its expected path.  That
+			// let correlated symptoms (for example request errors plus short CFS
+			// throttling bursts) satisfy a CPU-saturation path without an observed
+			// saturation mechanism.  Pattern membership is not evidence: require
+			// a server-annotated mechanism node when the pattern defines one, or a
+			// server-annotated cause node for a deliberately mechanism-free
+			// pattern.
+			if requiredNodes := missingObservedDecisiveCausalNodes(expectedNodeIDs, evidence, patterns); len(requiredNodes) > 0 {
+				coverage = 0
+				missing = uniqueStrings(append(missing, requiredNodes...))
+			}
 		}
 		verified.CausalPathCoverage = coverage
 		verified.MissingCausalNodes = missing
@@ -1157,8 +1221,16 @@ func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []do
 		if len(seenSource) < 2 {
 			verified.SupportingScore *= .75
 		}
+		if len(assertions) > 0 {
+			verified.ObservationCoverage = observationCoverage(draft, assertions)
+		} else {
+			// Compatibility for callers that predate StateAssertion. New
+			// KubePilot flows always pass assertions.
+			verified.ObservationCoverage = verified.CausalPathCoverage
+		}
 		temporal := hypothesisTemporalConsistency(verified.VerifiedEvidenceIDs, allowed)
-		verified.FinalScore = safety.Confidence(verified, temporal)
+		verified.ObjectiveScore = safety.Confidence(verified, temporal)
+		verified.FinalScore = verified.ObjectiveScore
 		if verified.ContradictionScore >= .50 {
 			verified.Status = domain.HypothesisRefuted
 		} else if verified.SupportingScore >= .65 && verified.ContradictionScore <= .20 {
@@ -1170,6 +1242,8 @@ func (e *Engine) VerifyHypotheses(drafts []domain.HypothesisDraft, evidence []do
 			HypothesisID:        draft.ID,
 			Sequence:            1,
 			Score:               verified.FinalScore,
+			ObjectiveScore:      verified.ObjectiveScore,
+			ObservationCoverage: verified.ObservationCoverage,
 			ModelPrior:          draft.PriorProbability,
 			SupportingScore:     verified.SupportingScore,
 			ContradictionScore:  verified.ContradictionScore,
@@ -1295,6 +1369,95 @@ func evidenceSupportsExpectedNode(item domain.Evidence, expected []string) bool 
 	return false
 }
 
+// causalSignalSupport returns the quality of the strongest abnormal signal in
+// an evidence item that maps to a node on the candidate's server-owned causal
+// path. It deliberately does not use evidence summary text, Facts, or model
+// prose. When a legacy pattern/evidence record has no typed node-signal mapping
+// it falls back to the existing envelope quality so older callers retain their
+// bounded behaviour.
+func causalSignalSupport(item domain.Evidence, expected []string, patterns []domain.CausalPattern) float64 {
+	expectedNodes := map[string]bool{}
+	for _, nodeID := range expected {
+		expectedNodes[nodeID] = true
+	}
+	nodeSignals := map[string]map[string]bool{}
+	for _, pattern := range patterns {
+		if pattern.Status != "active" {
+			continue
+		}
+		for _, node := range pattern.Nodes {
+			if !expectedNodes[node.ID] {
+				continue
+			}
+			if node.Source != "" && !strings.EqualFold(node.Source, item.Source) {
+				continue
+			}
+			for _, value := range node.Signals {
+				value = strings.ToLower(strings.TrimSpace(value))
+				if value == "" {
+					continue
+				}
+				if nodeSignals[node.ID] == nil {
+					nodeSignals[node.ID] = map[string]bool{}
+				}
+				nodeSignals[node.ID][value] = true
+			}
+		}
+	}
+
+	// An obs:<evidence-id> path is the pre-signal compatibility contract. It
+	// represents this whole observation, but only an abnormal typed signal may
+	// contribute support.
+	legacyObservation := expectedNodes["obs:"+item.ID]
+	if len(nodeSignals) == 0 && !legacyObservation {
+		if item.QualityScore > 0 {
+			return clamp(item.QualityScore)
+		}
+		return clamp(item.AnomalyScore)
+	}
+
+	best := 0.0
+	for _, signal := range item.Signals {
+		if signal.Direction != "abnormal" {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(signal.Signal))
+		matches := legacyObservation
+		if !matches {
+			for _, values := range nodeSignals {
+				if values[name] {
+					matches = true
+					break
+				}
+			}
+		}
+		if !matches {
+			continue
+		}
+		reliability := signal.Reliability
+		if reliability <= 0 {
+			reliability = 1
+		}
+		independence := signal.Independence
+		if independence <= 0 {
+			independence = 1
+		}
+		temporal := signal.TemporalAlignment
+		if temporal <= 0 {
+			temporal = 1
+		}
+		quality := clamp(signal.Strength * reliability * independence * temporal)
+		best = math.Max(best, quality)
+	}
+	if best == 0 && legacyObservation {
+		if item.QualityScore > 0 {
+			return clamp(item.QualityScore)
+		}
+		return clamp(item.AnomalyScore)
+	}
+	return best
+}
+
 // canonicalCausalCoverage accepts only IDs supplied by the server. Coverage
 // requires an evidence support relation; pattern membership or textual
 // similarity alone never marks a node as observed.
@@ -1368,6 +1531,52 @@ func canonicalCausalCoverage(expected []string, evidence []domain.Evidence, patt
 	}
 	pathCoverage := float64(validEdges) / float64(len(expected)-1)
 	return clamp(nodeCoverage * pathCoverage), missing, nil
+}
+
+// missingObservedDecisiveCausalNodes returns the causal admission nodes a
+// deterministic candidate has not actually observed. A downstream mechanism
+// can be a shared consequence of unrelated patterns, so only a root cause or
+// a mechanism directly caused by a root cause may establish a candidate.
+// This check consumes typed server signals rather than prose or static graph
+// membership.
+func missingObservedDecisiveCausalNodes(expected []string, evidence []domain.Evidence, patterns []domain.CausalPattern) []string {
+	expectedSet := map[string]bool{}
+	for _, nodeID := range expected {
+		expectedSet[nodeID] = true
+	}
+	observed := map[string]bool{}
+	directMechanisms := map[string]bool{}
+	directCauses := map[string]bool{}
+	for _, pattern := range patterns {
+		if pattern.Status != "active" {
+			continue
+		}
+		for _, node := range pattern.Nodes {
+			if !expectedSet[node.ID] || !candidateAdmissionNodes(pattern)[node.ID] {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(node.Type), "mechanism") {
+				directMechanisms[node.ID] = true
+			} else if strings.EqualFold(strings.TrimSpace(node.Type), "cause") {
+				directCauses[node.ID] = true
+			}
+			for _, item := range evidence {
+				if evidenceMatchesCausalNode(item, node) {
+					observed[node.ID] = true
+				}
+			}
+		}
+	}
+	required := directCauses
+	if len(directMechanisms) > 0 {
+		required = directMechanisms
+	}
+	for nodeID := range required {
+		if observed[nodeID] {
+			return nil
+		}
+	}
+	return keys(required)
 }
 
 func expectedNodeObserved(expected, category string, observed map[string]bool, patterns []domain.CausalPattern) bool {

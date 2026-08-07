@@ -11,21 +11,21 @@ import (
 )
 
 func TestBuildProducesPairedStatistics(t *testing.T) {
-	strategies := []string{domain.DiagnosisMethodDirect, domain.DiagnosisMethodRAG, domain.DiagnosisMethodReAct, domain.DiagnosisMethodKubePilot}
+	strategies := []string{domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive, domain.DiagnosisMethodReAct}
 	cases := map[string][]reporter.CaseResult{}
 	summaries := map[string]reporter.Summary{}
 	for _, strategy := range strategies {
-		correct := strategy == domain.DiagnosisMethodKubePilot
+		correct := strategy == domain.DiagnosisMethodActive
 		item := reporter.CaseResult{CaseID: "memory-leak", IncidentID: "incident", Seed: 7, Repetition: 1, Category: "memory", RootCauseVariant: "container-leak", Service: "payment", Resource: "payment-pod", Score: scorer.Score{StrictRootCause: correct}, VerificationOK: correct, Duration: time.Second, EstimatedModelCost: .01}
 		switch strategy {
-		case domain.DiagnosisMethodDirect:
-			item.Architecture = "single-pass"
-		case domain.DiagnosisMethodRAG:
-			item.Architecture, item.MemoryReads = "single-pass-episodic", 1
 		case domain.DiagnosisMethodReAct:
 			item.Architecture = "single-react"
-		case domain.DiagnosisMethodKubePilot:
-			item.Architecture, item.PlannerTasks, item.WorkerFindings, item.DebateRounds, item.MemoryReads = "hierarchical-causal-react", 4, 4, 1, 3
+		case domain.DiagnosisMethodRuleOnly:
+			item.Architecture, item.PlannerTasks, item.WorkerFindings = "eino-rule-diagnosis-runtime", 4, 4
+		case domain.DiagnosisMethodEvidence:
+			item.Architecture, item.PlannerTasks, item.WorkerFindings = "eino-evidence-diagnosis-runtime", 4, 4
+		case domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive:
+			item.Architecture, item.PlannerTasks, item.WorkerFindings = domain.WorkflowRuntimeName, 4, 4
 		}
 		cases[strategy] = []reporter.CaseResult{item}
 		summaries[strategy] = reporter.Summary{Total: 1, Valid: true}
@@ -34,7 +34,7 @@ func TestBuildProducesPairedStatistics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Systems) != 4 || len(report.Comparisons) != 12 {
+	if len(report.Systems) != 5 || len(report.Comparisons) != 16 {
 		t.Fatalf("unexpected report sizes: %+v", report)
 	}
 	if report.Comparisons[0].Difference.Estimate != 1 || report.Comparisons[0].Pairs != 1 {

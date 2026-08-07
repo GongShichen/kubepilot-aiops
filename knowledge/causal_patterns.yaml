@@ -1,4 +1,4 @@
-version: 1
+version: 7
 patterns:
   - id: cpu-saturation
     category: cpu
@@ -8,9 +8,13 @@ patterns:
     status: active
     version: 1
     nodes:
-      - {id: cpu_demand, type: cause, match: [cpu, busy, concurrency, overload]}
-      - {id: cpu_saturation, type: mechanism, match: [throttl, saturation, limit]}
-      - {id: latency_error, type: symptom, match: [latency, timeout, 5xx]}
+      - {id: cpu_demand, type: cause, signals: [request_rate]}
+      # Saturation is established by either sustained limit-normalised CPU
+      # pressure or dominant CFS throttling. The signal extractor keeps normal
+      # and short-lived throttling neutral, so this node cannot be activated by
+      # incidental quota bursts.
+      - {id: cpu_saturation, type: mechanism, signals: [cpu_pressure, cpu_throttling]}
+      - {id: latency_error, type: symptom, signals: [request_latency, error_rate, trace_latency, trace_error, log_error]}
     edges: [{from: cpu_demand, to: cpu_saturation, relation: causes}, {from: cpu_saturation, to: latency_error, relation: manifests_as}]
   - id: memory-oom
     category: memory
@@ -20,11 +24,23 @@ patterns:
     status: active
     version: 1
     nodes:
-      - {id: memory_growth, type: cause, match: [memory, leak, cache, allocation]}
-      - {id: oom_kill, type: mechanism, match: [oomkilled, oom, memory limit]}
-      - {id: restart_unavailable, type: mechanism, match: [restart, crashloop, unavailable]}
-      - {id: request_failure, type: symptom, match: [5xx, error, timeout]}
+      - {id: memory_growth, type: cause, signals: [memory_growth]}
+      - {id: oom_kill, type: mechanism, signals: [oom_killed]}
+      - {id: restart_unavailable, type: mechanism, signals: [pod_restarts, workload_unavailable]}
+      - {id: request_failure, type: symptom, signals: [request_latency, error_rate, trace_error, log_error]}
     edges: [{from: memory_growth, to: oom_kill, relation: causes}, {from: oom_kill, to: restart_unavailable, relation: causes}, {from: restart_unavailable, to: request_failure, relation: manifests_as}]
+  - id: memory-pressure
+    category: memory
+    cause: memory growth approaches the configured workload limit
+    source: builtin
+    confidence: 0.85
+    status: active
+    version: 1
+    nodes:
+      - {id: memory_growth, type: cause, signals: [memory_growth]}
+      - {id: memory_pressure, type: mechanism, signals: [memory_pressure]}
+      - {id: request_failure, type: symptom, signals: [request_latency, error_rate, trace_error, log_error]}
+    edges: [{from: memory_growth, to: memory_pressure, relation: causes}, {from: memory_pressure, to: request_failure, relation: manifests_as}]
   - id: database-dependency
     category: database
     cause: database connectivity or contention disrupts dependent services
@@ -33,11 +49,35 @@ patterns:
     status: active
     version: 1
     nodes:
-      - {id: database_fault, type: cause, match: [mysql, database, credential, connection, lock, slow query]}
-      - {id: db_span_error, type: mechanism, match: [db span, sql, connection pool]}
-      - {id: dependency_propagation, type: mechanism, match: [payment, order, downstream]}
-      - {id: request_failure, type: symptom, match: [5xx, timeout, latency]}
+      - {id: database_fault, type: cause, signals: [connection_pressure, database_error]}
+      - {id: db_span_error, type: mechanism, signals: [trace_error, database_error]}
+      - {id: dependency_propagation, type: mechanism, signals: [dependency_unavailable, endpoint_unavailable]}
+      - {id: request_failure, type: symptom, signals: [request_latency, error_rate, trace_error, log_error]}
     edges: [{from: database_fault, to: db_span_error, relation: causes}, {from: db_span_error, to: dependency_propagation, relation: causes}, {from: dependency_propagation, to: request_failure, relation: manifests_as}]
+  - id: database-endpoint-unavailability
+    category: database
+    cause: a server-classified database endpoint has no ready backends
+    source: builtin
+    confidence: 0.9
+    status: active
+    version: 1
+    required_admission_node_ids: [database_endpoint, database_connection_failure]
+    nodes:
+      - {id: database_endpoint, type: cause, source: kubernetes, signals: [database_endpoint_unavailable]}
+      - {id: database_connection_failure, type: mechanism, signals: [connection_refused, connection_timeout, trace_error, database_error, log_error]}
+      - {id: request_failure, type: symptom, signals: [request_latency, error_rate, trace_latency]}
+    edges: [{from: database_endpoint, to: database_connection_failure, relation: causes}, {from: database_connection_failure, to: request_failure, relation: manifests_as}]
+  - id: connection-pool-exhaustion
+    category: database
+    cause: local connection pool pressure exhausts available request capacity
+    source: builtin
+    confidence: 0.9
+    status: active
+    version: 1
+    nodes:
+      - {id: connection_pool_pressure, type: mechanism, signals: [connection_pressure]}
+      - {id: request_failure, type: symptom, signals: [request_latency, error_rate, trace_error, log_error]}
+    edges: [{from: connection_pool_pressure, to: request_failure, relation: manifests_as}]
   - id: network-routing
     category: network
     cause: service discovery or network policy interrupts a dependency path
@@ -46,11 +86,10 @@ patterns:
     status: active
     version: 1
     nodes:
-      - {id: network_config, type: cause, match: [networkpolicy, selector, service port, endpoint]}
-      - {id: connection_failure, type: mechanism, match: [connection refused, timeout, no route]}
-      - {id: trace_gap, type: observation, match: [missing span, downstream timeout]}
-      - {id: upstream_error, type: symptom, match: [5xx, gateway, error propagation]}
-    edges: [{from: network_config, to: connection_failure, relation: causes}, {from: connection_failure, to: trace_gap, relation: manifests_as}, {from: trace_gap, to: upstream_error, relation: correlates}]
+      - {id: network_config, type: cause, signals: [network_policy_configured, endpoint_unavailable, service_selector_mismatch]}
+      - {id: connection_failure, type: mechanism, signals: [network_policy_denial, connection_refused, connection_timeout, network_unreachable]}
+      - {id: upstream_error, type: symptom, signals: [request_latency, error_rate, trace_error, log_error]}
+    edges: [{from: network_config, to: connection_failure, relation: causes}, {from: connection_failure, to: upstream_error, relation: manifests_as}]
   - id: deployment-regression
     category: deployment
     cause: a deployment revision or configuration prevents healthy rollout
@@ -58,9 +97,48 @@ patterns:
     confidence: 0.9
     status: active
     version: 1
+    required_admission_node_ids: [rollout_change, pod_failure]
     nodes:
-      - {id: rollout_change, type: cause, match: [revision, image, configmap, environment, probe]}
-      - {id: pod_failure, type: mechanism, match: [imagepullbackoff, crashloopbackoff, probe failed]}
-      - {id: unavailable, type: mechanism, match: [unavailable replicas, not ready]}
-      - {id: request_failure, type: symptom, match: [5xx, timeout, unavailable]}
+      - {id: rollout_change, type: cause, signals: [deployment_change]}
+      - {id: pod_failure, type: mechanism, signals: [image_pull_failure, image_reference_unresolvable, crash_loop, probe_failure]}
+      - {id: unavailable, type: mechanism, signals: [workload_unavailable, pod_restarts]}
+      - {id: request_failure, type: symptom, signals: [request_latency, error_rate, trace_error, log_error]}
     edges: [{from: rollout_change, to: pod_failure, relation: causes}, {from: pod_failure, to: unavailable, relation: causes}, {from: unavailable, to: request_failure, relation: manifests_as}]
+  - id: deployment-application-regression
+    category: deployment
+    cause: a recent rollout is paired with a server-observed application regression
+    source: builtin
+    confidence: 0.85
+    status: active
+    version: 1
+    required_admission_node_ids: [rollout_change, application_failure]
+    nodes:
+      - {id: rollout_change, type: cause, source: kubernetes, signals: [deployment_change]}
+      - {id: application_failure, type: mechanism, signals: [error_rate, trace_error, log_error]}
+      - {id: request_failure, type: symptom, signals: [request_latency, trace_latency]}
+    edges: [{from: rollout_change, to: application_failure, relation: causes}, {from: application_failure, to: request_failure, relation: manifests_as}]
+  - id: dependency-unavailability
+    category: dependency
+    cause: a discovered upstream service dependency has no ready endpoints
+    source: builtin
+    confidence: 0.9
+    status: active
+    version: 1
+    nodes:
+      - {id: dependency_target, type: cause, signals: [dependency_unavailable, endpoint_unavailable]}
+      - {id: dependency_endpoint_failure, type: mechanism, signals: [dependency_unavailable, endpoint_unavailable, connection_refused, connection_timeout]}
+      - {id: request_failure, type: symptom, signals: [request_latency, error_rate, trace_error, log_error]}
+    edges: [{from: dependency_target, to: dependency_endpoint_failure, relation: causes}, {from: dependency_endpoint_failure, to: request_failure, relation: manifests_as}]
+  - id: dependency-configuration-endpoint
+    category: dependency
+    cause: workload configuration references a missing cluster-local Service endpoint
+    source: builtin
+    confidence: 0.9
+    status: active
+    version: 1
+    required_admission_node_ids: [configured_endpoint, dependency_connection_failure]
+    nodes:
+      - {id: configured_endpoint, type: cause, source: kubernetes, signals: [configured_endpoint_unresolvable]}
+      - {id: dependency_connection_failure, type: mechanism, signals: [connection_refused, connection_timeout, network_unreachable, trace_error, log_error]}
+      - {id: request_failure, type: symptom, signals: [request_latency, error_rate, trace_latency]}
+    edges: [{from: configured_endpoint, to: dependency_connection_failure, relation: causes}, {from: dependency_connection_failure, to: request_failure, relation: manifests_as}]

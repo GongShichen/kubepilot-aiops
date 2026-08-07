@@ -1,10 +1,10 @@
-# KubePilot：采用 Constrained ReAct 架构的因果感知自治 SRE Agent
+# KubePilot：带 Eino 认知层的证据锚定自治诊断 Runtime
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-KubePilot 是一个基于 Eino 的 Kubernetes 自治 SRE 控制平面，核心链路为：
+KubePilot 是一个基于 Eino 的 Kubernetes 自治 SRE 控制平面。MVP 核心链路为：
 
-> Observation → Hypothesis → Evidence → Causal Graph → Validated Knowledge → Safe Recovery
+> Observe → Interpret → Request discriminative evidence → Update belief → Safe recovery or human escalation
 
 模型负责规划、只读调查、提出和挑战假设、生成恢复建议；确定性的服务端代码负责 Evidence 身份、预算、置信门禁、租户边界、Dry-run、人工审批、幂等执行和恢复后验证。
 
@@ -13,56 +13,48 @@ KubePilot 是一个基于 Eino 的 Kubernetes 自治 SRE 控制平面，核心�
 
 ```mermaid
 flowchart TD
-    I["Incident Intake"] --> S["Supervisor / Incident Commander"]
-    S --> P["Planner Agent"]
-    P --> M["Metric Worker"]
-    P --> L["Log Worker"]
-    P --> T["Trace Worker"]
-    P --> K["Topology / Kubernetes Worker"]
-    M --> D["Primary Diagnosis Agent"]
-    L --> D
-    T --> D
-    K --> D
-    M --> A["首轮盲化 Alternative Agent"]
-    L --> A
-    T --> A
-    K --> A
-    D --> C["Critic Agent"]
-    A --> C
-    C --> R{"Deterministic Arbiter"}
-    R -->|"通过"| REC["Recovery Agent"]
-    R -->|"补证据；最多一次"| P
-    R -->|"未收敛"| H["NEEDS_ATTENTION"]
-    REC --> DR["Kubernetes DryRunAll"]
+    I["incident_intake"] --> CI["cognitive_intent"]
+    CI --> QC["query_compiler"]
+    QC --> EC["evidence_collection"]
+    EC --> SA["signal_assertion_builder"]
+    SA --> CG["candidate_generation"]
+    CG --> CR["cognitive_reasoning"]
+    CR --> CF["causal_falsification"]
+    CF --> OA{"objective_arbitration"}
+    OA -->|"有价值的有界请求"| QC
+    OA -->|"客观门禁通过"| RP["recovery_permission"]
+    OA -->|"未收敛"| H["NEEDS_ATTENTION"]
+    RP --> DR["Kubernetes DryRunAll"]
     DR --> AP["人工审批 Interrupt"]
     AP --> EX["幂等 Executor"]
     EX --> V["恢复后验证"]
 ```
 
-- Supervisor 只管理状态机、全局预算和阶段切换，不直接诊断。
-- Planner 生成最多四项、最多两轮的结构化 `InvestigationPlan`。
-- Metric、Log、Trace、Topology Worker 并发执行，只能调用对应只读能力，并返回服务器签发的 Evidence ID。
-- Primary 最多提出三个可证伪假设；Alternative 首轮看不到 Primary 结论，降低锚定偏差。
-- Critic 输出结构化反证、缺失证据和建议数据源。
-- Arbiter 只使用服务器证据和确定性评分。第一名至少 `0.80` 且领先至少 `0.15` 才能进入 Recovery。
-- Debate 最多两轮；仍未收敛时进入 `NEEDS_ATTENTION`，不会强行恢复。
+每一个命名阶段都是共享 `WorkflowState`、callback、checkpoint 和 resume 语义的 Eino Graph Node。Eino 管理模型和工具生命周期；纯 Go 服务负责事实、Signal、State Assertion、Candidate 校验、因果覆盖、证伪、评分和安全门禁。Causal Engine 只能接收服务器签发的 Signal、State Assertion、Graph Node 和拓扑边 ID，不能用自然语言作因果推断。
+
+Cognitive Runtime 是包含 Planner、Interpreter、Comparator 与 Investigator 四种受限操作的单一 Eino 组件。它可以解释已锚定 Observation、比较候选并提出区分性证据请求，但不能新增事实、创建可执行根因、修改 Objective Score 或授权恢复。当请求重复、不可用、没有新 Evidence、缺少未观测 Assertion，或 `DiagnosticValue = ExpectedEntropyReduction × DecisionImpact < 0.05` 时，服务端停止主动诊断循环。
+
+Objective Arbiter 使用 `0.50 × Evidence + 0.30 × Causal + 0.20 × ObservationCoverage − 0.30 × Contradiction`。Evidence 是独立且按来源加权的支持；Observation Coverage 衡量不同异常状态、时间阶段与机制节点，禁止对同一 Signal 二次计分。只有 Objective Score、Margin 和 Gate 决定恢复资格。满足近似同分条件的 Cognitive Preference 只是序数偏好：只影响展示、下一轮候选对和人工审阅优先级，绝不影响置信度或自动化。
 
 系统不请求、不保存 Chain-of-Thought，只持久化 `HypothesisArgument`、`Critique`、Evidence ID、评分变化和 `ArbitrationResult`。
 
-## 四条真实 Diagnosis Strategy
+## Diagnosis Strategy 与 MVP Baseline
 
 `diagnosis_method` 会改变生产执行路径，而不只是写入一个标签：
 
 | Strategy | 生产行为 |
 |---|---|
-| `direct` | 固定服务端初始证据包，一次结构化模型调用；无 Retrieval、Memory 和工具循环。 |
-| `rag` | Direct 加 Top-5 Episodic Memory；一次模型调用，无实时工具循环。 |
+| `rule-only` | 确定性的 Signal → State Assertion → Candidate → Objective Arbitration；无认知模型调用，也不运行 Causal/Falsification。 |
+| `evidence-only` | 确定性的 Evidence → Signal → State Assertion → Candidate → Causal/Falsification → Objective Arbitration；无认知模型调用。 |
+| `cognitive` | Evidence-only 加受限的 Cognitive Interpreter 与 Comparator；认知输出不能影响 Objective Gate。 |
+| `active-diagnosis` | Cognitive Runtime 加最多两轮、由服务端计算价值的 Planner/Investigator 主动诊断。 |
 | `react` | 单个受预算约束的 Diagnosis ReAct Agent，可使用 Metric/Log/Trace/Kubernetes 工具；无 Planner、Debate、长期 Memory 和 Causal 增强。 |
-| `kubepilot` | Planner、并行 Worker、Primary、盲化 Alternative、Critic、Arbiter、Memory 和 Causal-aware reasoning 完整链路。 |
+| `direct`、`rag` | 兼容 Baseline：一次结构化模型调用，分别不带、或带有 scoped Episodic Memory。 |
+| `kubepilot` | 完整 active-diagnosis runtime 的兼容别名。 |
 
-兼容输入 `llm-only → direct`、`vector-rag → rag`；持久化和评测 artifact 只写规范 ID。四种 Strategy 共用同一模型配置、温度、请求上限、Diagnosis 总预算、Recovery Agent、审批、安全检查、执行器和验证器。
+兼容输入 `llm-only → direct`、`vector-rag → rag`；持久化和评测 artifact 只写规范 ID。正式 MVP 对比固定使用 `rule-only`、`evidence-only`、`cognitive`、`active-diagnosis` 和 `react`，并共享模型 profile、Collector、单 Agent 输出上限、Recovery path、审批、执行器与验证控制器。
 
-比较器会检查执行足迹：如果四条 Strategy 实际产生相同 Plan、Worker、Debate 或 Memory 轨迹，整次比较直接失败。
+比较器会检查执行足迹：若标签实际产生相同 Runtime 轨迹，整次比较直接失败。
 
 ## Memory Architecture
 

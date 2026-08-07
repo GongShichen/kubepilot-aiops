@@ -26,6 +26,7 @@ const (
 	DiagnosisAgentName   = "diagnosis_agent"
 	AlternativeAgentName = "alternative_agent"
 	CriticAgentName      = "critic_agent"
+	CognitiveRuntimeName = "cognitive_runtime"
 	RecoveryAgentName    = "recovery_agent"
 )
 
@@ -43,7 +44,7 @@ type AgentRegistry struct {
 }
 
 func (r *AgentRegistry) Names() []string {
-	return []string{SupervisorAgentName, PlannerAgentName, MetricWorkerName, LogWorkerName, TraceWorkerName, TopologyWorkerName, DiagnosisAgentName, AlternativeAgentName, CriticAgentName, RecoveryAgentName}
+	return []string{SupervisorAgentName, PlannerAgentName, MetricWorkerName, LogWorkerName, TraceWorkerName, TopologyWorkerName, DiagnosisAgentName, AlternativeAgentName, CriticAgentName, CognitiveRuntimeName, RecoveryAgentName}
 }
 
 func (r *AgentRegistry) ProceduralMemories() []domain.MemoryResult {

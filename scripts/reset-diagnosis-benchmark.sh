@@ -36,6 +36,14 @@ for volume in kubepilot_prometheus-data kubepilot_alertmanager-data kubepilot_lo
   fi
 done
 
+# Loki keeps its WAL on a workspace bind mount so its write availability is
+# independent of Docker Desktop's VM disk. Clear only that dedicated runtime
+# directory when establishing a fresh telemetry baseline.
+loki_runtime_dir="$repo_dir/deploy/docker/loki/runtime"
+if [[ -d "$loki_runtime_dir" ]]; then
+  find "$loki_runtime_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+fi
+
 # Redis is short-term Agent state by design. PostgreSQL deletion is scoped to
 # benchmark incidents; completed benchmark run metadata, reports, non-benchmark
 # incidents, and the history corpus are intentionally preserved.
@@ -43,6 +51,12 @@ done
 "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U kubepilot -d kubepilot <<'SQL' >/dev/null
 DELETE FROM incidents WHERE namespace = 'kubepilot-benchmark' OR namespace LIKE 'kubepilot-benchmark-worker-%';
 SQL
+
+# PostgreSQL executes /docker-entrypoint-initdb.d only when its data volume is
+# first created. Apply the idempotent intelligence migration explicitly so an
+# existing development volume receives schema additions before the rebuilt
+# runtime reads or seeds causal patterns.
+"${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U kubepilot -d kubepilot -f /docker-entrypoint-initdb.d/intelligence.sql >/dev/null
 
 # Rebuild the Agent image before every fresh benchmark baseline. Restarting an
 # old image after source changes silently runs stale budget/model/runtime code.

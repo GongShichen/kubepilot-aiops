@@ -179,11 +179,12 @@ func (s *PostgresStore) SeedCausalPatterns(ctx context.Context, patterns []domai
 	for _, pattern := range patterns {
 		nodes, _ := json.Marshal(pattern.Nodes)
 		edges, _ := json.Marshal(pattern.Edges)
+		requiredAdmission, _ := json.Marshal(pattern.RequiredAdmissionNodeIDs)
 		supporting, _ := json.Marshal(pattern.SupportingEvidence)
 		contradicting, _ := json.Marshal(pattern.ContradictingEvidence)
 		incidents, _ := json.Marshal(pattern.SourceIncidents)
-		_, err = tx.Exec(ctx, `INSERT INTO causal_patterns(id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(id) DO UPDATE SET category=EXCLUDED.category,cause=EXCLUDED.cause,nodes=EXCLUDED.nodes,edges=EXCLUDED.edges,supporting_evidence=EXCLUDED.supporting_evidence,contradicting_evidence=EXCLUDED.contradicting_evidence,source_incidents=EXCLUDED.source_incidents,cluster_scope=EXCLUDED.cluster_scope,namespace_scope=EXCLUDED.namespace_scope,source=EXCLUDED.source,confidence=EXCLUDED.confidence,status=EXCLUDED.status,version=GREATEST(causal_patterns.version,EXCLUDED.version),support_count=EXCLUDED.support_count,updated_at=NOW()`, pattern.ID, pattern.Category, pattern.Cause, nodes, edges, supporting, contradicting, incidents, pattern.Cluster, pattern.Namespace, pattern.Source, pattern.Confidence, pattern.Status, pattern.Version, pattern.SupportCount)
+		_, err = tx.Exec(ctx, `INSERT INTO causal_patterns(id,category,cause,nodes,edges,required_admission_node_ids,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT(id) DO UPDATE SET category=EXCLUDED.category,cause=EXCLUDED.cause,nodes=EXCLUDED.nodes,edges=EXCLUDED.edges,required_admission_node_ids=EXCLUDED.required_admission_node_ids,supporting_evidence=EXCLUDED.supporting_evidence,contradicting_evidence=EXCLUDED.contradicting_evidence,source_incidents=EXCLUDED.source_incidents,cluster_scope=EXCLUDED.cluster_scope,namespace_scope=EXCLUDED.namespace_scope,source=EXCLUDED.source,confidence=EXCLUDED.confidence,status=EXCLUDED.status,version=GREATEST(causal_patterns.version,EXCLUDED.version),support_count=EXCLUDED.support_count,updated_at=NOW()`, pattern.ID, pattern.Category, pattern.Cause, nodes, edges, requiredAdmission, supporting, contradicting, incidents, pattern.Cluster, pattern.Namespace, pattern.Source, pattern.Confidence, pattern.Status, pattern.Version, pattern.SupportCount)
 		if err != nil {
 			return err
 		}
@@ -199,7 +200,7 @@ func (s *PostgresStore) SeedCausalPatterns(ctx context.Context, patterns []domai
 }
 
 func (s *PostgresStore) ListCausalPatterns(ctx context.Context, status string) ([]domain.CausalPattern, error) {
-	query := `SELECT id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns`
+	query := `SELECT id,category,cause,nodes,edges,required_admission_node_ids,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns`
 	args := []any{}
 	if status != "" {
 		query += ` WHERE status=$1`
@@ -223,7 +224,7 @@ func (s *PostgresStore) ListCausalPatterns(ctx context.Context, status string) (
 }
 
 func (s *PostgresStore) GetCausalPattern(ctx context.Context, id string) (*domain.CausalPattern, error) {
-	row := s.pool.QueryRow(ctx, `SELECT id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns WHERE id=$1`, id)
+	row := s.pool.QueryRow(ctx, `SELECT id,category,cause,nodes,edges,required_admission_node_ids,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns WHERE id=$1`, id)
 	pattern, err := scanPattern(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -235,14 +236,17 @@ type patternRow interface{ Scan(...any) error }
 
 func scanPattern(row patternRow) (*domain.CausalPattern, error) {
 	var p domain.CausalPattern
-	var nodes, edges, supporting, contradicting, incidents []byte
-	if err := row.Scan(&p.ID, &p.Category, &p.Cause, &nodes, &edges, &supporting, &contradicting, &incidents, &p.Cluster, &p.Namespace, &p.Source, &p.Confidence, &p.Status, &p.Version, &p.SupportCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	var nodes, edges, requiredAdmission, supporting, contradicting, incidents []byte
+	if err := row.Scan(&p.ID, &p.Category, &p.Cause, &nodes, &edges, &requiredAdmission, &supporting, &contradicting, &incidents, &p.Cluster, &p.Namespace, &p.Source, &p.Confidence, &p.Status, &p.Version, &p.SupportCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(nodes, &p.Nodes); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(edges, &p.Edges); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(requiredAdmission, &p.RequiredAdmissionNodeIDs); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(supporting, &p.SupportingEvidence); err != nil {
@@ -276,7 +280,7 @@ func (s *PostgresStore) SetCausalPatternStatus(ctx context.Context, id, status, 
 	if tag.RowsAffected() == 0 {
 		return nil, ErrNotFound
 	}
-	pattern, err := scanPattern(tx.QueryRow(ctx, `SELECT id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns WHERE id=$1`, id))
+	pattern, err := scanPattern(tx.QueryRow(ctx, `SELECT id,category,cause,nodes,edges,required_admission_node_ids,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns WHERE id=$1`, id))
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +322,7 @@ func (s *PostgresStore) RollbackCausalPattern(ctx context.Context, id string, re
 	if err := json.Unmarshal(raw, &restored); err != nil {
 		return nil, err
 	}
-	current, err := scanPattern(tx.QueryRow(ctx, `SELECT id,category,cause,nodes,edges,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns WHERE id=$1 FOR UPDATE`, id))
+	current, err := scanPattern(tx.QueryRow(ctx, `SELECT id,category,cause,nodes,edges,required_admission_node_ids,supporting_evidence,contradicting_evidence,source_incidents,cluster_scope,namespace_scope,source,confidence,status,version,support_count,created_at,updated_at FROM causal_patterns WHERE id=$1 FOR UPDATE`, id))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -336,6 +340,10 @@ func (s *PostgresStore) RollbackCausalPattern(ctx context.Context, id string, re
 	if err != nil {
 		return nil, err
 	}
+	requiredAdmission, err := json.Marshal(restored.RequiredAdmissionNodeIDs)
+	if err != nil {
+		return nil, err
+	}
 	supporting, err := json.Marshal(restored.SupportingEvidence)
 	if err != nil {
 		return nil, err
@@ -348,7 +356,7 @@ func (s *PostgresStore) RollbackCausalPattern(ctx context.Context, id string, re
 	if err != nil {
 		return nil, err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE causal_patterns SET category=$2,cause=$3,nodes=$4,edges=$5,supporting_evidence=$6,contradicting_evidence=$7,source_incidents=$8,cluster_scope=$9,namespace_scope=$10,source=$11,confidence=$12,status=$13,version=$14,support_count=$15,updated_at=$16 WHERE id=$1`, id, restored.Category, restored.Cause, nodes, edges, supporting, contradicting, incidents, restored.Cluster, restored.Namespace, restored.Source, restored.Confidence, restored.Status, restored.Version, restored.SupportCount, restored.UpdatedAt); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE causal_patterns SET category=$2,cause=$3,nodes=$4,edges=$5,required_admission_node_ids=$6,supporting_evidence=$7,contradicting_evidence=$8,source_incidents=$9,cluster_scope=$10,namespace_scope=$11,source=$12,confidence=$13,status=$14,version=$15,support_count=$16,updated_at=$17 WHERE id=$1`, id, restored.Category, restored.Cause, nodes, edges, requiredAdmission, supporting, contradicting, incidents, restored.Cluster, restored.Namespace, restored.Source, restored.Confidence, restored.Status, restored.Version, restored.SupportCount, restored.UpdatedAt); err != nil {
 		return nil, err
 	}
 	revisionPayload, err := json.Marshal(restored)

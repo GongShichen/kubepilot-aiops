@@ -35,6 +35,7 @@ func Normalize(incident *domain.Incident, request domain.EvidenceRequest, items 
 	out := make([]domain.Evidence, 0, len(items))
 	for _, item := range items {
 		facts := mergeFacts(item.Content, item.Data, item.Facts)
+		facts = enrichStructuredLogFacts(item, facts)
 		if len(facts) == 0 && (len(item.Content) > 0 || len(item.Data) > 0 || len(item.Facts) > 0) {
 			projectionEmpty.Inc()
 		}
@@ -60,11 +61,49 @@ func Normalize(incident *domain.Incident, request domain.EvidenceRequest, items 
 		applyScope(incident, request, &item)
 		if strings.TrimSpace(item.ID) == "" {
 			missingID.Inc()
-			item.ID = stableID(item)
+			item.ID = StableID(item)
 		}
 		out = append(out, item)
 	}
 	return out
+}
+
+// enrichStructuredLogFacts preserves fields emitted by JSON loggers. Loki
+// labels are frequently incomplete (for example, level is not promoted to a
+// label), while the line itself contains the authoritative severity and error
+// signature.  Projection is source-gated and only fills absent or empty
+// fields, so collector-provided structured facts remain authoritative.
+func enrichStructuredLogFacts(item domain.Evidence, facts map[string]any) map[string]any {
+	source := strings.ToLower(strings.TrimSpace(string(item.Source)))
+	if source != "loki" && source != "log" {
+		return facts
+	}
+	line := strings.TrimSpace(item.Summary)
+	if !strings.HasPrefix(line, "{") {
+		return facts
+	}
+	var structured map[string]any
+	if err := json.Unmarshal([]byte(line), &structured); err != nil || len(structured) == 0 {
+		return facts
+	}
+	if facts == nil {
+		facts = map[string]any{}
+	}
+	for key, value := range structured {
+		current, exists := facts[key]
+		if !exists || isEmptyFact(current) {
+			facts[key] = value
+		}
+	}
+	return facts
+}
+
+func isEmptyFact(value any) bool {
+	if value == nil {
+		return true
+	}
+	text, ok := value.(string)
+	return ok && strings.TrimSpace(text) == ""
 }
 
 func applyScope(incident *domain.Incident, request domain.EvidenceRequest, item *domain.Evidence) {
@@ -92,7 +131,10 @@ func applyScope(incident *domain.Incident, request domain.EvidenceRequest, item 
 	}
 }
 
-func stableID(item domain.Evidence) string {
+// StableID derives the only logical Evidence identifier used across the
+// runtime. It intentionally excludes collection timestamps so a repeated
+// observation is deduplicated instead of becoming a fresh fact on each pass.
+func StableID(item domain.Evidence) string {
 	payload := struct {
 		Source, Kind, Namespace, Service, Resource, TraceID, TemplateID, Summary string
 		Facts                                                                    map[string]any
@@ -125,13 +167,26 @@ func Views(items []domain.Evidence, maximumBytes, perFieldBytes, maximumItems in
 		trial := append(append([]domain.EvidenceView(nil), out...), view)
 		raw, _ := json.Marshal(trial)
 		if maximumBytes > 0 && len(raw) > maximumBytes {
-			// Preserve identity and summary even when no fact payload fits.
-			view.Facts = nil
-			view.TruncatedFields = appendUnique(view.TruncatedFields, "facts")
+			// Never discard the sole fact carrier. Reduce facts deterministically
+			// by field and record every omitted field instead; a large record must
+			// not starve later observations or turn a worker view into prose only.
+			var truncated []string
+			view.Facts, truncated = boundedFacts(view.Facts, minPositive(perFieldBytes, 256), 3)
+			for _, field := range truncated {
+				view.TruncatedFields = appendUnique(view.TruncatedFields, field)
+			}
 			trial = append(append([]domain.EvidenceView(nil), out...), view)
 			raw, _ = json.Marshal(trial)
 			if len(raw) > maximumBytes {
-				continue
+				view.Facts, truncated = boundedFacts(view.Facts, minPositive(perFieldBytes, 64), 1)
+				for _, field := range truncated {
+					view.TruncatedFields = appendUnique(view.TruncatedFields, field)
+				}
+				trial = append(append([]domain.EvidenceView(nil), out...), view)
+				raw, _ = json.Marshal(trial)
+				if len(raw) > maximumBytes {
+					continue
+				}
 			}
 		}
 		out = append(out, view)
@@ -141,26 +196,10 @@ func Views(items []domain.Evidence, maximumBytes, perFieldBytes, maximumItems in
 
 func View(item domain.Evidence, perFieldBytes int) domain.EvidenceView {
 	facts := mergeFacts(item.Content, item.Data, item.Facts)
-	bounded := make(map[string]any, len(facts))
+	bounded, truncatedFields := boundedFacts(facts, perFieldBytes, 0)
 	truncated := append([]string(nil), item.TruncatedFields...)
-	keys := make([]string, 0, len(facts))
-	for key := range facts {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		value := facts[key]
-		raw, err := json.Marshal(value)
-		if err != nil {
-			bounded[key] = fmt.Sprint(value)
-			continue
-		}
-		if perFieldBytes > 0 && len(raw) > perFieldBytes {
-			bounded[key] = map[string]any{"bounded_preview": truncateUTF8(string(raw), perFieldBytes), "original_bytes": len(raw)}
-			truncated = appendUnique(truncated, key)
-			continue
-		}
-		bounded[key] = value
+	for _, field := range truncatedFields {
+		truncated = appendUnique(truncated, field)
 	}
 	observed := item.ObservedAt
 	if observed.IsZero() {
@@ -173,6 +212,47 @@ func View(item domain.Evidence, perFieldBytes int) domain.EvidenceView {
 		TruncatedFields: truncated, CausalNodeIDs: append([]string(nil), item.CausalNodeIDs...),
 		ContextRelevance: item.RelevanceScore, AnomalyScore: item.AnomalyScore,
 	}
+}
+
+// boundedFacts truncates individual values first, then deterministically
+// retains at most maxFields fields. maxFields <= 0 keeps every field.
+func boundedFacts(facts map[string]any, perFieldBytes, maxFields int) (map[string]any, []string) {
+	if len(facts) == 0 {
+		return nil, nil
+	}
+	bounded := make(map[string]any, len(facts))
+	keys := make([]string, 0, len(facts))
+	for key := range facts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var truncated []string
+	for index, key := range keys {
+		if maxFields > 0 && index >= maxFields {
+			truncated = append(truncated, key)
+			continue
+		}
+		value := facts[key]
+		raw, err := json.Marshal(value)
+		if err != nil {
+			bounded[key] = fmt.Sprint(value)
+			continue
+		}
+		if perFieldBytes > 0 && len(raw) > perFieldBytes {
+			bounded[key] = map[string]any{"bounded_preview": truncateUTF8(string(raw), perFieldBytes), "original_bytes": len(raw)}
+			truncated = append(truncated, key)
+			continue
+		}
+		bounded[key] = value
+	}
+	return bounded, truncated
+}
+
+func minPositive(first, fallback int) int {
+	if first > 0 && first < fallback {
+		return first
+	}
+	return fallback
 }
 
 func mergeFacts(maps ...map[string]any) map[string]any {

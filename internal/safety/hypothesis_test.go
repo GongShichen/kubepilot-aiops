@@ -11,7 +11,7 @@ func TestHypothesisLifecycleAndConfidence(t *testing.T) {
 	if !CanTransitionHypothesis("", domain.HypothesisCreated) || !CanTransitionHypothesis(domain.HypothesisSupported, domain.HypothesisEvidenceSearching) || CanTransitionHypothesis(domain.HypothesisRefuted, domain.HypothesisSupported) {
 		t.Fatal("hypothesis lifecycle does not enforce immutable refutation")
 	}
-	item := domain.VerifiedHypothesis{Draft: domain.HypothesisDraft{PriorProbability: 1}, SupportingScore: 1, CausalPathCoverage: 1, HistoricalRelevance: 1, TopologyRelevance: 1, ContradictionScore: .2}
+	item := domain.VerifiedHypothesis{Draft: domain.HypothesisDraft{PriorProbability: 1}, SupportingScore: 1, CausalPathCoverage: 1, ObservationCoverage: 1, HistoricalRelevance: 1, TopologyRelevance: 1, ContradictionScore: .2}
 	if score := Confidence(item, 1); math.Abs(score-.94) > 1e-9 {
 		t.Fatalf("confidence formula mismatch: got %.6f want .94", score)
 	}

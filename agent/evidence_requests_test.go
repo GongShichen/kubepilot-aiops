@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -38,5 +39,46 @@ func TestEvidenceRequestValidationNormalizesScopeWindowAndBoundaries(t *testing.
 	}
 	if got := stringSlice(time.Now()); got != nil {
 		t.Fatalf("unsupported dependency value was projected: %v", got)
+	}
+}
+
+func TestDependencyInvestigationTargetsDiscoveredOneHopServices(t *testing.T) {
+	incident := &domain.Incident{Namespace: "team-a", Service: "checkout", Resource: "checkout", CreatedAt: time.Now().Add(-time.Minute)}
+	evidence := []domain.Evidence{{
+		Source: "kubernetes", Facts: map[string]any{"discovered_dependencies": []any{"redis", "payment"}},
+	}}
+	policies := []domain.InvestigationPolicy{{ObservationKind: "dependency_availability"}}
+	requests := evidenceRequestsForPolicies(incident, policies, evidence)
+	if len(requests) != 4 { // metric + topology for each discovered dependency
+		t.Fatalf("dependency policy did not compile one-hop requests: %+v", requests)
+	}
+	for _, request := range requests {
+		if len(request.Targets) != 1 || request.Targets[0].Service == "checkout" || request.Targets[0].Namespace != "team-a" {
+			t.Fatalf("dependency request escaped one-hop scope: %+v", request)
+		}
+		if err := func() error {
+			_, err := validateEvidenceRequest(incident, request, request.Source, allowedEvidenceTargets(incident, evidence))
+			return err
+		}(); err != nil {
+			t.Fatalf("server-compiled one-hop request was rejected: %v", err)
+		}
+	}
+}
+
+func TestServerDependencyExplorationIsBoundedToObservedOneHopNeed(t *testing.T) {
+	incident := &domain.Incident{Namespace: "team-a", Service: "checkout", Resource: "checkout", CreatedAt: time.Now().Add(-time.Minute)}
+	evidence := []domain.Evidence{{Source: "kubernetes", Facts: map[string]any{"discovered_dependencies": []string{"redis", "payment"}}}}
+	assertions := []domain.StateAssertion{{Property: "application_errors", State: "abnormal", Status: domain.StateAssertionActive}}
+	requests := serverDependencyExplorationRequests(incident, evidence, assertions)
+	if len(requests) != 2 {
+		t.Fatalf("bounded dependency fallback did not create topology requests: %+v", requests)
+	}
+	for _, request := range requests {
+		if request.Source != "topology" || len(request.Targets) != 1 || request.Targets[0].Service == "checkout" || !reflect.DeepEqual(request.SignalKinds, []string{"dependency_availability"}) {
+			t.Fatalf("dependency fallback escaped its server boundary: %+v", request)
+		}
+	}
+	if got := serverDependencyExplorationRequests(incident, evidence, []domain.StateAssertion{{Property: "request_latency", State: "normal", Status: domain.StateAssertionActive}}); len(got) != 0 {
+		t.Fatalf("healthy observations triggered dependency exploration: %+v", got)
 	}
 }

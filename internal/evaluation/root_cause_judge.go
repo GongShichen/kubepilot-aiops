@@ -49,7 +49,7 @@ func (j ChatRootCauseJudge) Judge(ctx context.Context, expected, actual RootCaus
 		return RootCauseVerdict{}, fmt.Errorf("marshal root-cause judge input: %w", err)
 	}
 	message, err := j.Chat.Generate(ctx, []*schema.Message{
-		schema.SystemMessage("You evaluate whether two Kubernetes root-cause labels name the same concrete mechanism. Return JSON only: {\"equivalent\":true|false,\"confidence\":0.0,\"reason\":\"short observable rationale\"}. Require the same service and resource and the same causal mechanism; a shared broad category alone is insufficient. Treat ordinary wording or identifier synonyms as equivalent only when they preserve that mechanism. Do not infer facts not present in the two labels."),
+		schema.SystemMessage(rootCauseJudgePrompt()),
 		schema.UserMessage(string(payload)),
 	}, model.WithTemperature(0))
 	if err != nil {
@@ -60,6 +60,10 @@ func (j ChatRootCauseJudge) Judge(ctx context.Context, expected, actual RootCaus
 		return RootCauseVerdict{}, fmt.Errorf("decode semantic root-cause verdict: %w", err)
 	}
 	return validateVerdict(verdict, expected, actual)
+}
+
+func rootCauseJudgePrompt() string {
+	return "You evaluate whether two Kubernetes root-cause labels name the same concrete mechanism. Return JSON only: {\"equivalent\":true|false,\"confidence\":0.0,\"reason\":\"short observable rationale\"}. Require the same service and resource and the same causal mechanism; a shared broad category alone is insufficient. Treat ordinary wording or identifier synonyms as equivalent only when they preserve that mechanism. A concrete diagnosis may be equivalent when it is a strictly more-specific operational subtype of a broader reference label and its mechanism necessarily belongs to that reference class; do not accept a broader diagnosis for a specific reference or sibling mechanisms. Do not infer facts beyond the two labels."
 }
 
 func validateVerdict(verdict RootCauseVerdict, expected, actual RootCause) (RootCauseVerdict, error) {

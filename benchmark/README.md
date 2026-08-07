@@ -4,14 +4,15 @@
 
 ## Diagnosis comparison
 
-The formal comparison uses four production strategies:
+The formal comparison uses five production strategies:
 
 | Strategy | Required execution footprint |
 |---|---|
-| `direct` | `single-pass`; no Planner, Worker, debate, or Memory events. |
-| `rag` | `single-pass-episodic`; exactly one Episodic Memory read and no live tool loop. |
+| `rule-only` | `eino-rule-diagnosis-runtime`; deterministic signal/assertion candidate baseline with no cognitive model call. |
+| `evidence-only` | `eino-evidence-diagnosis-runtime`; deterministic Evidence → Signal → State Assertion → Candidate → Causal/Falsification → Arbitration flow. |
+| `cognitive` | `eino-cognitive-diagnosis-runtime`; Evidence-only plus bounded Interpreter and Comparator proposals. |
+| `active-diagnosis` | `eino-cognitive-diagnosis-runtime`; Cognitive Runtime plus the two-round, server-valued Investigator loop. |
 | `react` | `single-react`; one Diagnosis ReAct agent with live evidence tools and no hierarchy or long-term memory. |
-| `kubepilot` | `hierarchical-causal-react`; Plan, Worker findings, debate, arbitration, and Episodic/Semantic/Procedural reads. |
 
 The comparison fails if these footprints collapse into the same trace. All methods share one model profile, temperature, request cap, diagnosis budget, fault/load seeds, recovery controller, approval policy, mutation executor, and verifier.
 

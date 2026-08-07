@@ -9,7 +9,7 @@ import (
 type IncidentStatus string
 type DiagnosisMethod = string
 
-const WorkflowRuntimeName = "eino-hierarchical-causal-react"
+const WorkflowRuntimeName = "eino-cognitive-diagnosis-runtime"
 
 const (
 	StatusReceived         IncidentStatus = "RECEIVED"
@@ -75,6 +75,10 @@ const (
 	DiagnosisMethodDirect    = "direct"
 	DiagnosisMethodRAG       = "rag"
 	DiagnosisMethodReAct     = "react"
+	DiagnosisMethodRuleOnly  = "rule-only"
+	DiagnosisMethodEvidence  = "evidence-only"
+	DiagnosisMethodCognitive = "cognitive"
+	DiagnosisMethodActive    = "active-diagnosis"
 	DiagnosisMethodKubePilot = "kubepilot"
 	// Deprecated request aliases are accepted at the API boundary only. All
 	// persisted state and benchmark artifacts use the canonical identifiers.
@@ -113,7 +117,7 @@ func NormalizeDiagnosisMethod(value string) (string, bool) {
 		return DiagnosisMethodDirect, true
 	case DiagnosisMethodVectorRAG:
 		return DiagnosisMethodRAG, true
-	case DiagnosisMethodDirect, DiagnosisMethodRAG, DiagnosisMethodReAct, DiagnosisMethodKubePilot:
+	case DiagnosisMethodDirect, DiagnosisMethodRAG, DiagnosisMethodReAct, DiagnosisMethodRuleOnly, DiagnosisMethodEvidence, DiagnosisMethodCognitive, DiagnosisMethodActive, DiagnosisMethodKubePilot:
 		return value, true
 	default:
 		return "", false
@@ -121,15 +125,139 @@ func NormalizeDiagnosisMethod(value string) (string, bool) {
 }
 
 type Investigation struct {
-	Architecture string              `json:"architecture"`
-	Plan         InvestigationPlan   `json:"plan"`
-	Findings     []WorkerFinding     `json:"findings,omitempty"`
-	Debate       []DebateRound       `json:"debate,omitempty"`
-	Arbitration  *ArbitrationResult  `json:"arbitration,omitempty"`
-	MemoryReads  []MemoryAccessEvent `json:"memory_reads,omitempty"`
-	ModelUsage   []ModelUsageEvent   `json:"model_usage,omitempty"`
-	StartedAt    time.Time           `json:"started_at"`
-	CompletedAt  time.Time           `json:"completed_at,omitempty"`
+	Architecture       string                      `json:"architecture"`
+	Plan               InvestigationPlan           `json:"plan"`
+	Findings           []WorkerFinding             `json:"findings,omitempty"`
+	Debate             []DebateRound               `json:"debate,omitempty"`
+	Candidates         []HypothesisDraft           `json:"candidates,omitempty"`
+	Verified           []VerifiedHypothesis        `json:"verified_hypotheses,omitempty"`
+	Signals            []EvidenceSignal            `json:"signals,omitempty"`
+	Assertions         []StateAssertion            `json:"state_assertions,omitempty"`
+	CognitiveReasoning []CognitiveReasoning        `json:"cognitive_reasoning,omitempty"`
+	Falsification      []FalsificationResult       `json:"falsification,omitempty"`
+	Pairwise           []PairwiseFalsification     `json:"pairwise_falsification,omitempty"`
+	ExpansionRequests  []CandidateExpansionRequest `json:"candidate_expansion_requests,omitempty"`
+	Arbitration        *ArbitrationResult          `json:"arbitration,omitempty"`
+	RecoveryPermission *RecoveryPermission         `json:"recovery_permission,omitempty"`
+	MemoryReads        []MemoryAccessEvent         `json:"memory_reads,omitempty"`
+	ModelUsage         []ModelUsageEvent           `json:"model_usage,omitempty"`
+	DiagnosisRounds    int                         `json:"diagnosis_rounds,omitempty"`
+	StartedAt          time.Time                   `json:"started_at"`
+	CompletedAt        time.Time                   `json:"completed_at,omitempty"`
+}
+
+// StateAssertion is a server-owned statement about the live incident state.
+// Signals are raw, typed measurements; assertions are the stable diagnostic
+// facts that candidates, causal reasoning and arbitration consume.
+type StateAssertion struct {
+	ID                     string               `json:"id"`
+	Subject                string               `json:"subject"`
+	Property               string               `json:"property"`
+	State                  string               `json:"state"`
+	Confidence             float64              `json:"confidence"`
+	SupportingSignalIDs    []string             `json:"supporting_signal_ids,omitempty"`
+	ContradictingSignalIDs []string             `json:"contradicting_signal_ids,omitempty"`
+	FirstSeen              time.Time            `json:"first_seen"`
+	LastSeen               time.Time            `json:"last_seen"`
+	Status                 StateAssertionStatus `json:"status"`
+}
+
+type StateAssertionStatus string
+
+const (
+	StateAssertionActive       StateAssertionStatus = "ACTIVE"
+	StateAssertionResolved     StateAssertionStatus = "RESOLVED"
+	StateAssertionStale        StateAssertionStatus = "STALE"
+	StateAssertionContradicted StateAssertionStatus = "CONTRADICTED"
+)
+
+// CognitiveReasoning is an auditable, structured LLM proposal. It cannot
+// modify evidence, objective scores, gates, or recovery permissions.
+type CognitiveReasoning struct {
+	Round                  int                        `json:"round"`
+	Intent                 *InvestigationIntent       `json:"intent,omitempty"`
+	Interpretations        []CognitiveInterpretation  `json:"interpretations,omitempty"`
+	TieBreakingPreferences []TieBreakingPreference    `json:"tie_breaking_preferences,omitempty"`
+	InvestigationPolicies  []InvestigationPolicy      `json:"investigation_policies,omitempty"`
+	Counterarguments       []CognitiveCounterargument `json:"counterarguments,omitempty"`
+	Accepted               bool                       `json:"accepted"`
+	RejectedReasons        []string                   `json:"rejected_reasons,omitempty"`
+	OccurredAt             time.Time                  `json:"occurred_at"`
+}
+
+type InvestigationIntent struct {
+	Focus      []string `json:"focus,omitempty"`
+	Priorities []string `json:"priorities,omitempty"`
+}
+
+type CognitiveInterpretation struct {
+	CandidateIDs           []string `json:"candidate_ids,omitempty"`
+	MechanismLabels        []string `json:"mechanism_labels,omitempty"`
+	SupportingAssertionIDs []string `json:"supporting_assertion_ids,omitempty"`
+	ReasoningPredicates    []string `json:"reasoning_predicates,omitempty"`
+	RequiredObservations   []string `json:"required_observations,omitempty"`
+}
+
+// TieBreakingPreference is deliberately ordinal: it never mutates an
+// objective score and is only usable among server-defined near ties.
+type TieBreakingPreference struct {
+	PreferredCandidateID string   `json:"preferred_candidate_id"`
+	OtherCandidateID     string   `json:"other_candidate_id"`
+	AssertionIDs         []string `json:"assertion_ids,omitempty"`
+	Predicates           []string `json:"predicates,omitempty"`
+}
+
+type CognitiveCounterargument struct {
+	CandidateID      string   `json:"candidate_id"`
+	AssertionIDs     []string `json:"assertion_ids,omitempty"`
+	ObservationKinds []string `json:"observation_kinds,omitempty"`
+}
+
+// InvestigationPolicy declares a requested discriminating observation. The
+// server independently computes its value and compiles the actual query.
+type InvestigationPolicy struct {
+	CandidateIDs             []string `json:"candidate_ids"`
+	ObservationKind          string   `json:"observation_kind"`
+	RationalePredicates      []string `json:"rationale_predicates,omitempty"`
+	ExpectedEntropyReduction float64  `json:"expected_entropy_reduction,omitempty"`
+	DecisionImpact           float64  `json:"decision_impact,omitempty"`
+	DiagnosticValue          float64  `json:"diagnostic_value,omitempty"`
+	Status                   string   `json:"status,omitempty"`
+}
+
+// CandidateExpansionRequest represents an unresolved mechanism, not a new
+// root cause. It can only lead to a non-actionable candidate and extra facts.
+type CandidateExpansionRequest struct {
+	AssertionIDs         []string `json:"assertion_ids"`
+	RequiredObservations []string `json:"required_observations"`
+	Status               string   `json:"status"`
+	Reason               string   `json:"reason,omitempty"`
+}
+
+type FalsificationResult struct {
+	CandidateID                    string   `json:"candidate_id"`
+	SupportingAssertionIDs         []string `json:"supporting_assertion_ids,omitempty"`
+	ContradictingAssertionIDs      []string `json:"contradicting_assertion_ids,omitempty"`
+	MissingObservationKinds        []string `json:"missing_observation_kinds,omitempty"`
+	CounterfactualObservationKinds []string `json:"counterfactual_observation_kinds,omitempty"`
+}
+
+type PairwiseFalsification struct {
+	PreferredCandidateID       string   `json:"preferred_candidate_id"`
+	OtherCandidateID           string   `json:"other_candidate_id"`
+	DiscriminatingAssertionIDs []string `json:"discriminating_assertion_ids,omitempty"`
+	Result                     string   `json:"result"`
+}
+
+type RecoveryPermission struct {
+	ObjectiveDiagnosisConfidence float64 `json:"objective_diagnosis_confidence"`
+	ActionSafety                 float64 `json:"action_safety"`
+	VerificationConfidence       float64 `json:"verification_confidence"`
+	DiagnosisStability           float64 `json:"diagnosis_stability"`
+	AutonomyScore                float64 `json:"autonomy_score"`
+	Level                        string  `json:"level"`
+	Allowed                      bool    `json:"allowed"`
+	Reason                       string  `json:"reason"`
 }
 
 type InvestigationPlan struct {
@@ -204,6 +332,7 @@ type DebateRound struct {
 
 type ArbitrationResult struct {
 	SelectedHypothesisID string                 `json:"selected_hypothesis_id,omitempty"`
+	DisplayHypothesisID  string                 `json:"display_hypothesis_id,omitempty"`
 	RankedHypothesisIDs  []string               `json:"ranked_hypothesis_ids,omitempty"`
 	SelectedScore        float64                `json:"selected_score"`
 	ScoreMargin          float64                `json:"score_margin"`
@@ -331,24 +460,53 @@ type Evidence struct {
 	RankingReasons  []string               `json:"ranking_reasons,omitempty"`
 	CausalNodeIDs   []string               `json:"causal_node_ids,omitempty"`
 	AnomalyScore    float64                `json:"anomaly_score,omitempty"`
+	Signals         []EvidenceSignal       `json:"signals,omitempty"`
+	QualityScore    float64                `json:"quality_score,omitempty"`
+}
+
+// EvidenceSignal is a server-derived operational observation. It preserves
+// the source fact while giving diagnosis and arbitration a common, typed
+// vocabulary instead of relying on free-form evidence summaries.
+type EvidenceSignal struct {
+	ID                string    `json:"id"`
+	EvidenceID        string    `json:"evidence_id"`
+	Source            string    `json:"source"`
+	Category          string    `json:"category"`
+	Signal            string    `json:"signal"`
+	Value             float64   `json:"value"`
+	Strength          float64   `json:"strength"`
+	Direction         string    `json:"direction"`
+	Reliability       float64   `json:"reliability"`
+	Independence      float64   `json:"independence"`
+	TemporalAlignment float64   `json:"temporal_alignment"`
+	DiagnosticWeight  float64   `json:"diagnostic_weight"`
+	Extraction        string    `json:"extraction"`
+	WindowStart       time.Time `json:"window_start,omitempty"`
+	WindowEnd         time.Time `json:"window_end,omitempty"`
+	ObservedAt        time.Time `json:"observed_at,omitempty"`
+	Namespace         string    `json:"namespace,omitempty"`
+	Service           string    `json:"service,omitempty"`
+	Resource          string    `json:"resource,omitempty"`
 }
 
 // EvidenceView is the bounded model-facing representation shared by workers,
 // diagnosis and critic roles. It never has a separate Data/Content alias.
 type EvidenceView struct {
-	ID               string         `json:"id"`
-	Source           string         `json:"source"`
-	Kind             string         `json:"kind"`
-	Namespace        string         `json:"namespace,omitempty"`
-	Service          string         `json:"service,omitempty"`
-	Resource         string         `json:"resource,omitempty"`
-	ObservedAt       time.Time      `json:"observed_at,omitempty"`
-	Summary          string         `json:"summary"`
-	Facts            map[string]any `json:"facts,omitempty"`
-	TruncatedFields  []string       `json:"truncated_fields,omitempty"`
-	CausalNodeIDs    []string       `json:"causal_node_ids,omitempty"`
-	ContextRelevance float64        `json:"context_relevance,omitempty"`
-	AnomalyScore     float64        `json:"anomaly_score,omitempty"`
+	ID               string           `json:"id"`
+	Source           string           `json:"source"`
+	Kind             string           `json:"kind"`
+	Namespace        string           `json:"namespace,omitempty"`
+	Service          string           `json:"service,omitempty"`
+	Resource         string           `json:"resource,omitempty"`
+	ObservedAt       time.Time        `json:"observed_at,omitempty"`
+	Summary          string           `json:"summary"`
+	Facts            map[string]any   `json:"facts,omitempty"`
+	TruncatedFields  []string         `json:"truncated_fields,omitempty"`
+	CausalNodeIDs    []string         `json:"causal_node_ids,omitempty"`
+	ContextRelevance float64          `json:"context_relevance,omitempty"`
+	AnomalyScore     float64          `json:"anomaly_score,omitempty"`
+	Signals          []EvidenceSignal `json:"signals,omitempty"`
+	QualityScore     float64          `json:"quality_score,omitempty"`
 }
 
 type EvidenceRankBreakdown struct {
@@ -359,6 +517,10 @@ type EvidenceRankBreakdown struct {
 	NeuralWeight        float64            `json:"neural_weight"`
 	FinalScore          float64            `json:"final_score"`
 	NeuralUsed          bool               `json:"neural_used"`
+	SignalStrength      float64            `json:"signal_strength,omitempty"`
+	SourceReliability   float64            `json:"source_reliability,omitempty"`
+	TemporalAlignment   float64            `json:"temporal_alignment,omitempty"`
+	EvidenceQuality     float64            `json:"evidence_quality,omitempty"`
 	Factors             map[string]float64 `json:"factors,omitempty"`
 }
 
@@ -444,10 +606,17 @@ type RetrievalCandidate struct {
 }
 
 type CausalNode struct {
-	ID                string   `json:"id" yaml:"id"`
-	Type              string   `json:"type" yaml:"type"`
-	Name              string   `json:"name,omitempty" yaml:"name,omitempty"`
-	Source            string   `json:"source,omitempty" yaml:"source,omitempty"`
+	ID     string `json:"id" yaml:"id"`
+	Type   string `json:"type" yaml:"type"`
+	Name   string `json:"name,omitempty" yaml:"name,omitempty"`
+	Source string `json:"source,omitempty" yaml:"source,omitempty"`
+	// Signals is the server-owned, canonical signal vocabulary that can
+	// establish this node. Causal evaluation must use this field (and observed
+	// EvidenceSignal records), never prose in an evidence summary, facts blob,
+	// or an LLM response.
+	Signals []string `json:"signals,omitempty" yaml:"signals,omitempty"`
+	// Match is retained for backwards-compatible display and migration of older
+	// pattern records. It is not an executable causal matching contract.
 	Match             []string `json:"match,omitempty" yaml:"match,omitempty"`
 	Confidence        float64  `json:"confidence,omitempty" yaml:"confidence,omitempty"`
 	SourceEvidenceIDs []string `json:"source_evidence_ids,omitempty" yaml:"source_evidence_ids,omitempty"`
@@ -496,23 +665,29 @@ type CausalEvidencePattern struct {
 }
 
 type CausalPattern struct {
-	ID                    string                  `json:"id" yaml:"id"`
-	Category              string                  `json:"category" yaml:"category"`
-	Cause                 string                  `json:"cause" yaml:"cause"`
-	Nodes                 []CausalNode            `json:"nodes" yaml:"nodes"`
-	Edges                 []CausalEdge            `json:"edges" yaml:"edges"`
-	SupportingEvidence    []CausalEvidencePattern `json:"supporting_evidence,omitempty" yaml:"supporting_evidence,omitempty"`
-	ContradictingEvidence []CausalEvidencePattern `json:"contradicting_evidence,omitempty" yaml:"contradicting_evidence,omitempty"`
-	SourceIncidents       []string                `json:"source_incidents,omitempty" yaml:"source_incidents,omitempty"`
-	Cluster               string                  `json:"cluster,omitempty" yaml:"cluster,omitempty"`
-	Namespace             string                  `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	Source                string                  `json:"source" yaml:"source"`
-	Confidence            float64                 `json:"confidence" yaml:"confidence"`
-	Status                string                  `json:"status" yaml:"status"`
-	Version               int                     `json:"version" yaml:"version"`
-	SupportCount          int                     `json:"support_count,omitempty" yaml:"support_count,omitempty"`
-	CreatedAt             time.Time               `json:"created_at,omitempty" yaml:"-"`
-	UpdatedAt             time.Time               `json:"updated_at,omitempty" yaml:"-"`
+	ID       string       `json:"id" yaml:"id"`
+	Category string       `json:"category" yaml:"category"`
+	Cause    string       `json:"cause" yaml:"cause"`
+	Nodes    []CausalNode `json:"nodes" yaml:"nodes"`
+	Edges    []CausalEdge `json:"edges" yaml:"edges"`
+	// RequiredAdmissionNodeIDs expresses a conjunction of server-observed
+	// causal nodes required before this pattern can create a candidate. It is
+	// used for state transitions such as a rollout: observing the transition or
+	// an application error alone is insufficient, while their verified pair is
+	// diagnostically meaningful. It contains graph node IDs, never prose.
+	RequiredAdmissionNodeIDs []string                `json:"required_admission_node_ids,omitempty" yaml:"required_admission_node_ids,omitempty"`
+	SupportingEvidence       []CausalEvidencePattern `json:"supporting_evidence,omitempty" yaml:"supporting_evidence,omitempty"`
+	ContradictingEvidence    []CausalEvidencePattern `json:"contradicting_evidence,omitempty" yaml:"contradicting_evidence,omitempty"`
+	SourceIncidents          []string                `json:"source_incidents,omitempty" yaml:"source_incidents,omitempty"`
+	Cluster                  string                  `json:"cluster,omitempty" yaml:"cluster,omitempty"`
+	Namespace                string                  `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Source                   string                  `json:"source" yaml:"source"`
+	Confidence               float64                 `json:"confidence" yaml:"confidence"`
+	Status                   string                  `json:"status" yaml:"status"`
+	Version                  int                     `json:"version" yaml:"version"`
+	SupportCount             int                     `json:"support_count,omitempty" yaml:"support_count,omitempty"`
+	CreatedAt                time.Time               `json:"created_at,omitempty" yaml:"-"`
+	UpdatedAt                time.Time               `json:"updated_at,omitempty" yaml:"-"`
 }
 
 type HypothesisDraft struct {
@@ -527,7 +702,12 @@ type HypothesisDraft struct {
 	ContradictingEvidenceIDs []string `json:"contradicting_evidence_ids,omitempty"`
 	ExpectedCausalPath       []string `json:"expected_causal_path,omitempty"`
 	ExpectedCausalNodeIDs    []string `json:"expected_causal_node_ids,omitempty" jsonschema:"required,minItems=1"`
-	FalsificationConditions  []string `json:"falsification_conditions,omitempty"`
+	// RequireCausalMechanism is set only by the deterministic candidate engine.
+	// It prevents a symptom/observation-only path from becoming an accepted
+	// root-cause diagnosis while preserving compatibility for non-KubePilot
+	// baseline strategies that use the legacy verification contract.
+	RequireCausalMechanism  bool     `json:"require_causal_mechanism,omitempty"`
+	FalsificationConditions []string `json:"falsification_conditions,omitempty"`
 }
 
 type VerifiedHypothesis struct {
@@ -540,6 +720,8 @@ type VerifiedHypothesis struct {
 	MissingCausalNodes  []string                     `json:"missing_causal_nodes,omitempty"`
 	VerifiedEvidenceIDs []string                     `json:"verified_evidence_ids"`
 	FinalScore          float64                      `json:"final_score"`
+	ObjectiveScore      float64                      `json:"objective_score"`
+	ObservationCoverage float64                      `json:"observation_coverage"`
 	Status              HypothesisStatus             `json:"status,omitempty"`
 	ConfidenceHistory   []HypothesisConfidenceRecord `json:"confidence_history,omitempty"`
 }
@@ -650,6 +832,8 @@ type HypothesisConfidenceRecord struct {
 	HypothesisID        string    `json:"hypothesis_id"`
 	Sequence            int       `json:"sequence"`
 	Score               float64   `json:"score"`
+	ObjectiveScore      float64   `json:"objective_score,omitempty"`
+	ObservationCoverage float64   `json:"observation_coverage,omitempty"`
 	ModelPrior          float64   `json:"model_prior"`
 	SupportingScore     float64   `json:"supporting_score"`
 	ContradictionScore  float64   `json:"contradiction_score"`

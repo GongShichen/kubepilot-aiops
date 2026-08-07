@@ -70,15 +70,40 @@ func (*sequenceClient) Create(context.Context, scenarios.Scenario) (*domain.Inci
 func (c *sequenceClient) Get(context.Context, string) (*domain.Incident, error) {
 	status := c.statuses[min(c.index, len(c.statuses)-1)]
 	c.index++
-	return &domain.Incident{ID: "sequence", Status: status}, nil
+	incident := &domain.Incident{ID: "sequence", Status: status}
+	switch status {
+	case domain.StatusAwaitingApproval, domain.StatusNeedsAttention, domain.StatusRejected, domain.StatusRecoveryFailed, domain.StatusResolved:
+		incident.Investigation = completedInvestigation()
+	}
+	return incident, nil
 }
 func (*sequenceClient) Approve(context.Context, *domain.Incident) error { return nil }
+
+type auditSequenceClient struct {
+	incidents []domain.Incident
+	index     int
+}
+
+func (*auditSequenceClient) Create(context.Context, scenarios.Scenario) (*domain.Incident, error) {
+	return nil, errors.New("not used")
+}
+func (c *auditSequenceClient) Get(context.Context, string) (*domain.Incident, error) {
+	incident := c.incidents[min(c.index, len(c.incidents)-1)]
+	c.index++
+	return &incident, nil
+}
+func (*auditSequenceClient) Approve(context.Context, *domain.Incident) error { return nil }
+
+func completedInvestigation() *domain.Investigation {
+	return &domain.Investigation{Architecture: "eino-cognitive-diagnosis-runtime", CompletedAt: time.Now().UTC()}
+}
+
 func TestRunner(t *testing.T) {
 	reg := injector.NewRegistry()
 	dry := &injector.DryRun{}
 	reg.Register("service_fault", dry)
 	s := scenarios.Scenario{ID: "x", Category: "cpu", Variant: "busy_loop", Service: "payment-service", Target: "payment-service", Namespace: "kubepilot-benchmark", Injector: "service_fault", Timeouts: scenarios.Timeouts{FaultVisible: time.Second, Diagnosis: time.Second, Recovery: time.Second}, GroundTruth: scenarios.GroundTruth{RootCauseCategory: "cpu", Service: "payment-service", Resource: "payment-service", RequiredEvidence: []string{"cpu"}}}
-	client := &fakeClient{in: &domain.Incident{ID: "i", Status: domain.StatusNeedsAttention, RootCauseCategory: "cpu", RootCauseVariant: "busy_loop", RootCauseService: "payment-service", RootCauseResource: "payment-service", Service: "payment-service", Resource: "payment-service", RootCauseEvidenceIDs: []string{"e1"}, Evidence: []domain.Evidence{{ID: "e1", Kind: "cpu"}}}}
+	client := &fakeClient{in: &domain.Incident{ID: "i", Status: domain.StatusNeedsAttention, RootCauseCategory: "cpu", RootCauseVariant: "busy_loop", RootCauseService: "payment-service", RootCauseResource: "payment-service", Service: "payment-service", Resource: "payment-service", RootCauseEvidenceIDs: []string{"e1"}, Evidence: []domain.Evidence{{ID: "e1", Kind: "cpu"}}, Investigation: completedInvestigation()}}
 	items := (&Runner{Registry: reg, Client: client, PollInterval: time.Millisecond}).Run(context.Background(), []scenarios.Scenario{s})
 	if len(items) != 1 || items[0].Status != "passed" {
 		t.Fatalf("%#v", items)
@@ -89,7 +114,7 @@ func TestRunnerAutoApprovalUsesAuditedRecoveryResult(t *testing.T) {
 	registry := injector.NewRegistry()
 	registry.Register("service_fault", &injector.DryRun{})
 	scenario := scenarios.Scenario{ID: "recover", Category: "cpu", Variant: "busy_loop", Service: "payment-service", Target: "payment-service", Namespace: "kubepilot-benchmark", Injector: "service_fault", Timeouts: scenarios.Timeouts{FaultVisible: time.Second, Diagnosis: time.Second, Recovery: time.Second}, GroundTruth: scenarios.GroundTruth{RootCauseCategory: "cpu", Service: "payment-service", Resource: "payment-service", RequiredEvidence: []string{"cpu"}, AllowedRecoveryActions: []string{"restart_pod"}}}
-	incident := &domain.Incident{ID: "recover-incident", Status: domain.StatusAwaitingApproval, Namespace: scenario.Namespace, RootCauseCategory: "cpu", RootCauseVariant: "busy_loop", RootCauseService: "payment-service", RootCauseResource: "payment-service", RootCauseEvidenceIDs: []string{"e1"}, Evidence: []domain.Evidence{{ID: "e1", Kind: "cpu"}}, Proposal: &domain.RecoveryProposal{ID: "proposal", Action: domain.ActionRestartPod, Target: scenario.Target, Namespace: scenario.Namespace}, DryRun: &domain.DryRunResult{Success: true}}
+	incident := &domain.Incident{ID: "recover-incident", Status: domain.StatusAwaitingApproval, Namespace: scenario.Namespace, RootCauseCategory: "cpu", RootCauseVariant: "busy_loop", RootCauseService: "payment-service", RootCauseResource: "payment-service", RootCauseEvidenceIDs: []string{"e1"}, Evidence: []domain.Evidence{{ID: "e1", Kind: "cpu"}}, Proposal: &domain.RecoveryProposal{ID: "proposal", Action: domain.ActionRestartPod, Target: scenario.Target, Namespace: scenario.Namespace}, DryRun: &domain.DryRunResult{Success: true}, Investigation: completedInvestigation()}
 	result := (&Runner{Registry: registry, Client: &recoveryClient{in: incident}, AutoApprove: true, PollInterval: time.Millisecond}).Run(context.Background(), []scenarios.Scenario{scenario})
 	if len(result) != 1 || !result[0].ApprovalGranted || !result[0].RecoveryExecuted || !result[0].VerificationOK || result[0].SafetyViolation || result[0].Status != "passed" {
 		t.Fatalf("audited recovery result=%+v", result)
@@ -100,7 +125,7 @@ func TestRunnerRejectsIncorrectProposalWithoutMutation(t *testing.T) {
 	registry := injector.NewRegistry()
 	registry.Register("service_fault", &injector.DryRun{})
 	scenario := scenarios.Scenario{ID: "reject", Category: "cpu", Variant: "busy_loop", Service: "payment-service", Target: "payment-service", Namespace: "kubepilot-benchmark", Injector: "service_fault", Timeouts: scenarios.Timeouts{FaultVisible: time.Second, Diagnosis: time.Second, Recovery: time.Second}, GroundTruth: scenarios.GroundTruth{RootCauseCategory: "cpu", Service: "payment-service", Resource: "payment-service", RequiredEvidence: []string{"cpu"}}}
-	incident := &domain.Incident{ID: "reject-incident", Status: domain.StatusAwaitingApproval, Namespace: scenario.Namespace, RootCauseCategory: "network", RootCauseVariant: "selector_mismatch", Proposal: &domain.RecoveryProposal{ID: "proposal", Action: domain.ActionRollbackDeployment, Target: scenario.Target, Namespace: scenario.Namespace}}
+	incident := &domain.Incident{ID: "reject-incident", Status: domain.StatusAwaitingApproval, Namespace: scenario.Namespace, RootCauseCategory: "network", RootCauseVariant: "selector_mismatch", Proposal: &domain.RecoveryProposal{ID: "proposal", Action: domain.ActionRollbackDeployment, Target: scenario.Target, Namespace: scenario.Namespace}, Investigation: completedInvestigation()}
 	client := &rejectionClient{in: incident}
 	results := (&Runner{Registry: registry, Client: client, AutoApprove: true, PollInterval: time.Millisecond}).Run(context.Background(), []scenarios.Scenario{scenario})
 	if len(results) != 1 || !client.rejected || results[0].ApprovalGranted || results[0].RecoveryExecuted {
@@ -144,7 +169,7 @@ func (c *restartClient) Get(context.Context, string) (*domain.Incident, error) {
 	if c.calls == 1 {
 		return &domain.Incident{ID: "incident-restart", Status: domain.StatusNeedsAttention, DiagnosisError: "transient request failure after retries"}, nil
 	}
-	return &domain.Incident{ID: "incident-restart", Status: domain.StatusNeedsAttention, RootCauseCategory: "cpu", RootCauseVariant: "busy_loop", RootCauseService: "payment-service", RootCauseResource: "payment-service", RootCauseEvidenceIDs: []string{"e1"}, Evidence: []domain.Evidence{{ID: "e1", Kind: "cpu"}}}, nil
+	return &domain.Incident{ID: "incident-restart", Status: domain.StatusNeedsAttention, RootCauseCategory: "cpu", RootCauseVariant: "busy_loop", RootCauseService: "payment-service", RootCauseResource: "payment-service", RootCauseEvidenceIDs: []string{"e1"}, Evidence: []domain.Evidence{{ID: "e1", Kind: "cpu"}}, Investigation: completedInvestigation()}, nil
 }
 func (*restartClient) Approve(context.Context, *domain.Incident) error { return nil }
 
@@ -216,5 +241,24 @@ func TestRunnerWaitsAcrossIntermediateStatesAndHonorsCancellation(t *testing.T) 
 	_, err = (&Runner{Client: &sequenceClient{statuses: []domain.IncidentStatus{domain.StatusRecovering}}, PollInterval: time.Second}).waitFinal(ctx, "sequence")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel error=%v", err)
+	}
+}
+
+func TestRunnerWaitsForCompletedInvestigationAfterTerminalStatusEvent(t *testing.T) {
+	completed := domain.Incident{ID: "sequence", Status: domain.StatusNeedsAttention, RootCauseCategory: "dependency", RootCauseVariant: "redis_unavailable", Investigation: completedInvestigation()}
+	client := &auditSequenceClient{incidents: []domain.Incident{
+		{ID: "sequence", Status: domain.StatusNeedsAttention},
+		completed,
+	}}
+	runner := &Runner{Client: client, PollInterval: time.Nanosecond}
+	incident, err := runner.waitDiagnosis(context.Background(), "sequence")
+	if err != nil {
+		t.Fatalf("wait diagnosis: %v", err)
+	}
+	if client.index != 2 {
+		t.Fatalf("get calls=%d, want 2", client.index)
+	}
+	if incident.RootCauseVariant != "redis_unavailable" || incident.Investigation == nil || incident.Investigation.CompletedAt.IsZero() {
+		t.Fatalf("returned an incomplete diagnosis: %+v", incident)
 	}
 }

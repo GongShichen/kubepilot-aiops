@@ -144,14 +144,14 @@ func TestCleanupFailureStopsFullPipeline(t *testing.T) {
 func TestStrategyOrderIsDeterministicPermutation(t *testing.T) {
 	first := comparisonStrategyOrder("comparison-run")
 	second := comparisonStrategyOrder("comparison-run")
-	if stableJSON(first) != stableJSON(second) || len(first) != 4 {
+	if stableJSON(first) != stableJSON(second) || len(first) != 5 {
 		t.Fatalf("strategy randomization is not reproducible: first=%v second=%v", first, second)
 	}
 	seen := map[string]bool{}
 	for _, strategy := range first {
 		seen[strategy] = true
 	}
-	for _, required := range []string{"direct", "rag", "react", "kubepilot"} {
+	for _, required := range []string{"rule-only", "evidence-only", "cognitive", "active-diagnosis", "react"} {
 		if !seen[required] {
 			t.Fatalf("randomized strategy order lost %s: %v", required, first)
 		}

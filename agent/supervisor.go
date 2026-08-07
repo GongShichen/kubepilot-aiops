@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +17,7 @@ import (
 	causaldiscovery "github.com/kubepilot-aiops/kubepilot/internal/causal/discovery"
 	causalknowledge "github.com/kubepilot-aiops/kubepilot/internal/causal/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
+	evidencenorm "github.com/kubepilot-aiops/kubepilot/internal/evidence"
 	actionexecution "github.com/kubepilot-aiops/kubepilot/internal/execution"
 	rankpolicy "github.com/kubepilot-aiops/kubepilot/internal/reasoning/evidence"
 	"github.com/kubepilot-aiops/kubepilot/internal/retrieval/reranker"
@@ -126,11 +125,18 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 			return err
 		}
 		if hooks.eventSink != nil && from != to {
-			hooks.eventSink(ctx, workflowgraph.WorkflowEvent{IncidentID: incident.ID, RunID: ulid.Make().String(), Type: "status_transition", Name: string(to), Component: "EinoConstrainedReAct", OccurredAt: time.Now().UTC()})
+			hooks.eventSink(ctx, workflowgraph.WorkflowEvent{IncidentID: incident.ID, RunID: ulid.Make().String(), Type: "status_transition", Name: string(to), Component: domain.WorkflowRuntimeName, OccurredAt: time.Now().UTC()})
 		}
 		return nil
 	}
-	g := compose.NewGraph[*WorkflowState, *WorkflowState](compose.WithGenLocalState(func(context.Context) *WorkflowState { return &WorkflowState{Workflow: WorkflowName} }))
+	// WorkflowState is the graph payload: every node returns the same
+	// per-invocation state pointer and every branch receives that output. Do
+	// not maintain a second Eino local state copy here. A local copy and the
+	// edge payload can diverge across checkpointed concurrent invocations,
+	// allowing an evidence-only request to fall through to the legacy ReAct
+	// branch. The graph payload itself remains checkpointed and resumed by
+	// Eino, while avoiding a second source of truth for routing.
+	g := compose.NewGraph[*WorkflowState, *WorkflowState]()
 	add := func(name string, fn func(context.Context, *WorkflowState) (*WorkflowState, error)) error {
 		return g.AddLambdaNode(name, compose.InvokableLambda(fn), compose.WithNodeName(name))
 	}
@@ -149,10 +155,106 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 		if err := transition(ctx, s.Incident, domain.StatusCollecting); err != nil {
 			return s, err
 		}
-		return s, compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, local *WorkflowState) error { *local = *s; return nil })
+		return s, nil
 	}); err != nil {
 		return nil, err
 	}
+	if err := add("cognitive_intent", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if err := deps.Agents.cognitiveIntentNode(ctx, s); err != nil {
+			return s, err
+		}
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("query_compiler", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if err := deps.Agents.queryCompilerNode(s); err != nil {
+			return s, err
+		}
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("evidence_collection", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if err := deps.Agents.evidenceCollectionNode(ctx, s, constrainedToolDeps{Collectors: deps.Collectors, Reasoning: deps.Reasoning}); err != nil {
+			return s, err
+		}
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("signal_assertion_builder", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if err := deps.Agents.signalAssertionBuilderNode(s, constrainedToolDeps{Reasoning: deps.Reasoning}); err != nil {
+			return s, err
+		}
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("candidate_generation", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if err := deps.Agents.candidateGenerationNode(ctx, s, constrainedToolDeps{Reasoning: deps.Reasoning, Knowledge: deps.Knowledge}); err != nil {
+			return s, err
+		}
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("cognitive_reasoning", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if err := deps.Agents.cognitiveReasoningNode(ctx, s); err != nil {
+			return s, err
+		}
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("causal_falsification", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if err := deps.Agents.causalFalsificationNode(s); err != nil {
+			return s, err
+		}
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("objective_arbitration", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if err := deps.Agents.objectiveArbitrationNode(s); err != nil {
+			return s, err
+		}
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("recovery_permission", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if s.DiagnosisRuntime == nil {
+			return s, nil
+		}
+		if !s.DiagnosisRuntime.Completed {
+			return s, fmt.Errorf("recovery permission reached before deterministic diagnosis completed")
+		}
+		result, err := cognitiveDiagnosisResult(s)
+		if err != nil {
+			return s, err
+		}
+		if err = deps.Agents.applyDiagnosisResult(ctx, s, constrainedToolDeps{Reasoning: deps.Reasoning, Transition: transition}, result); err != nil {
+			return s, err
+		}
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	if err := add("constrained_recovery_agents", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+		if s.DiagnosisRuntime == nil || s.Incident.Status == domain.StatusNeedsAttention {
+			return s, nil
+		}
+		if err := deps.Agents.runConstrainedAgents(ctx, s, constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Transition: transition, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory}); err != nil {
+			return s, err
+		}
+		s.Incident.DiagnosisLedger = &s.DiagnosisLedger
+		return s, nil
+	}); err != nil {
+		return nil, err
+	}
+	// Existing baselines retain their original strategies and ADK ReAct
+	// footprint. The deterministic subgraph above is a no-op for them.
 	if err := add("constrained_react_agents", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
 		if err := deps.Agents.RunConstrained(ctx, s, constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Transition: transition, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory}); err != nil {
 			return s, err
@@ -232,10 +334,47 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	}); err != nil {
 		return nil, err
 	}
-	for _, edge := range [][2]string{{compose.START, "incident_intake"}, {"incident_intake", "constrained_react_agents"}, {"constrained_react_agents", "deterministic_proposal_validator"}} {
+	for _, edge := range [][2]string{
+		{compose.START, "incident_intake"},
+		{"incident_intake", "cognitive_intent"},
+		{"cognitive_intent", "query_compiler"},
+		{"query_compiler", "evidence_collection"},
+		{"evidence_collection", "signal_assertion_builder"},
+		{"signal_assertion_builder", "candidate_generation"},
+		{"candidate_generation", "cognitive_reasoning"},
+		{"cognitive_reasoning", "causal_falsification"},
+		{"causal_falsification", "objective_arbitration"},
+		{"constrained_react_agents", "deterministic_proposal_validator"},
+		{"constrained_recovery_agents", "deterministic_proposal_validator"},
+	} {
 		if err := g.AddEdge(edge[0], edge[1]); err != nil {
 			return nil, err
 		}
+	}
+	if err := g.AddBranch("objective_arbitration", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+		if s == nil || s.Incident == nil {
+			return "", fmt.Errorf("objective arbitration is missing workflow state")
+		}
+		if _, deterministic := cognitiveModeForMethod(s.Incident.DiagnosisMethod); deterministic && s.DiagnosisRuntime == nil {
+			return "", fmt.Errorf("deterministic diagnosis runtime state was lost before arbitration")
+		}
+		if s.DiagnosisRuntime == nil {
+			return "constrained_react_agents", nil
+		}
+		if !s.DiagnosisRuntime.Completed {
+			return "query_compiler", nil
+		}
+		return "recovery_permission", nil
+	}, map[string]bool{"constrained_react_agents": true, "query_compiler": true, "recovery_permission": true})); err != nil {
+		return nil, err
+	}
+	if err := g.AddBranch("recovery_permission", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+		if s.Incident.Status == domain.StatusNeedsAttention {
+			return "incident_finalizer", nil
+		}
+		return "constrained_recovery_agents", nil
+	}, map[string]bool{"incident_finalizer": true, "constrained_recovery_agents": true})); err != nil {
+		return nil, err
 	}
 	if err := g.AddBranch("deterministic_proposal_validator", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
 		if s.Incident.Status == domain.StatusNeedsAttention {
@@ -267,7 +406,7 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	if err := g.AddEdge("incident_finalizer", compose.END); err != nil {
 		return nil, err
 	}
-	options := []compose.GraphCompileOption{compose.WithGraphName(WorkflowName)}
+	options := []compose.GraphCompileOption{compose.WithGraphName(WorkflowName), compose.WithMaxRunSteps(GraphMaxSteps)}
 	if deps.Checkpoints != nil {
 		options = append(options, compose.WithCheckPointStore(deps.Checkpoints))
 	}
@@ -520,12 +659,26 @@ func normalizeEvidence(e *domain.Evidence, in *domain.Incident) {
 	if e.ObservedAt.IsZero() {
 		e.ObservedAt = e.Timestamp
 	}
-	if e.Content == nil {
-		e.Content = e.Data
+	// Facts is the canonical data contract. Content remains populated for
+	// callers using the legacy API, while Data is no longer a second mutable
+	// fact carrier that workers and rankers can accidentally disagree on.
+	facts := map[string]any{}
+	for _, values := range []map[string]any{e.Content, e.Data, e.Facts} {
+		for key, value := range values {
+			facts[key] = value
+		}
 	}
-	if e.Data == nil {
-		e.Data = e.Content
+	if len(facts) > 0 {
+		e.Facts = facts
+		e.Content = make(map[string]any, len(facts))
+		for key, value := range facts {
+			e.Content[key] = value
+		}
+	} else {
+		e.Facts = nil
+		e.Content = nil
 	}
+	e.Data = nil
 	if e.Namespace == "" {
 		e.Namespace = in.Namespace
 	}
@@ -541,9 +694,7 @@ func normalizeEvidence(e *domain.Evidence, in *domain.Incident) {
 	if e.Confidence <= 0 || e.Confidence > 1 {
 		e.Confidence = 1
 	}
-	raw, _ := json.Marshal(e.Content)
-	h := sha256.Sum256(append([]byte(e.Source+e.Type+e.Resource+e.WindowStart.UTC().Format(time.RFC3339Nano)+e.WindowEnd.UTC().Format(time.RFC3339Nano)), raw...))
-	e.ID = hex.EncodeToString(h[:])
+	e.ID = evidencenorm.StableID(*e)
 }
 
 func mergeEvidenceToolMessages(s *WorkflowState, messages []*schema.Message) error {
@@ -719,14 +870,14 @@ func approvalNode(ctx context.Context, s *WorkflowState, transition func(context
 		if err := transition(ctx, s.Incident, domain.StatusRejected); err != nil {
 			return s, err
 		}
-		return s, compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, local *WorkflowState) error { *local = *s; return nil })
+		return s, nil
 	}
 	s.ExecutionContext = &data.Context
 	s.Incident.ExecutionContext = &data.Context
 	if err := transition(ctx, s.Incident, domain.StatusRecovering); err != nil {
 		return s, err
 	}
-	return s, compose.ProcessState[*WorkflowState](ctx, func(_ context.Context, local *WorkflowState) error { *local = *s; return nil })
+	return s, nil
 }
 func validateExecutionContext(s *WorkflowState) error {
 	if s.ExecutionContext == nil || s.Incident.Proposal == nil || s.DryRun == nil {

@@ -332,8 +332,8 @@ func TestHierarchicalDiagnosisExecutesPlanWorkersBlindDebateAndArbitration(t *te
 	if result.Investigation == nil || len(result.Investigation.Plan.Tasks) != 4 || len(result.Investigation.Findings) < 4 || len(result.Investigation.Debate) < 1 || len(result.Investigation.Debate) > 2 || len(result.Investigation.MemoryReads) != 3 {
 		t.Fatalf("hierarchical execution was incomplete: %+v", result.Investigation)
 	}
-	if result.Investigation.Arbitration == nil || !result.Investigation.Arbitration.Accepted || result.SelectedHypothesisID != "primary" {
-		t.Fatalf("deterministic arbitration did not converge: %+v", result.Investigation.Arbitration)
+	if result.Investigation.Arbitration == nil || result.Investigation.Arbitration.Accepted || result.SelectedHypothesisID != "" {
+		t.Fatalf("objective arbitration accepted equally supported alternatives: %+v", result.Investigation.Arbitration)
 	}
 	chat.mu.Lock()
 	alternativeSawPrimary := chat.alternativeSawPrimary
@@ -345,6 +345,9 @@ func TestHierarchicalDiagnosisExecutesPlanWorkersBlindDebateAndArbitration(t *te
 		t.Fatal("hierarchical diagnosis did not persist Agent budgets")
 	}
 	for _, name := range diagnosisAgentNames() {
+		if name == CognitiveRuntimeName {
+			continue // Legacy hierarchical diagnosis does not invoke the Cognitive Runtime.
+		}
 		usage := incident.AgentBudget.Usage[name]
 		if usage.Iterations == 0 {
 			t.Fatalf("%s usage was not charged independently: %+v", name, incident.AgentBudget)

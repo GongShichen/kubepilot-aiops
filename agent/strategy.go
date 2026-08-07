@@ -28,6 +28,8 @@ type DiagnosisInput struct {
 type DiagnosisResult struct {
 	Method               string                      `json:"method"`
 	Hypotheses           []domain.HypothesisDraft    `json:"hypotheses"`
+	Verified             []domain.VerifiedHypothesis `json:"verified_hypotheses,omitempty"`
+	Assertions           []domain.StateAssertion     `json:"state_assertions,omitempty"`
 	SelectedHypothesisID string                      `json:"selected_hypothesis_id"`
 	Evidence             []domain.Evidence           `json:"evidence,omitempty"`
 	Candidates           []domain.RetrievalCandidate `json:"candidates,omitempty"`
@@ -144,8 +146,17 @@ func (r *AgentRegistry) RunConstrained(ctx context.Context, state *WorkflowState
 		if err = r.applyDiagnosisResult(ctx, state, deps, result); err != nil {
 			return err
 		}
-	case domain.DiagnosisMethodKubePilot:
-		result, err := r.runHierarchicalDiagnosis(ctx, state.Incident, deps)
+	case domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive, domain.DiagnosisMethodKubePilot:
+		mode := cognitiveDiagnosisMode{}
+		switch method {
+		case domain.DiagnosisMethodRuleOnly:
+			mode.RuleOnly = true
+		case domain.DiagnosisMethodCognitive:
+			mode.Cognitive = true
+		case domain.DiagnosisMethodActive, domain.DiagnosisMethodKubePilot:
+			mode.Cognitive, mode.Active = true, true
+		}
+		result, err := r.runCognitiveDiagnosis(ctx, state.Incident, deps, mode)
 		if err != nil {
 			return err
 		}
@@ -206,6 +217,7 @@ func (r *AgentRegistry) applyDiagnosisResult(ctx context.Context, state *Workflo
 	}
 	state.Incident.Evidence = mergeEvidence(state.Incident.Evidence, result.Evidence)
 	state.RankedEvidence = append([]domain.Evidence(nil), result.Evidence...)
+	state.StateAssertions = append([]domain.StateAssertion(nil), result.Assertions...)
 	state.Candidates = append([]domain.RetrievalCandidate(nil), result.Candidates...)
 	state.CausalPatterns = append([]domain.CausalPattern(nil), result.CausalPatterns...)
 	state.Features = deps.Reasoning.BuildFeatures(state.Incident, state.RankedEvidence)
@@ -218,22 +230,39 @@ func (r *AgentRegistry) applyDiagnosisResult(ctx context.Context, state *Workflo
 	}
 	if !result.BudgetAccounted {
 		for _, usage := range result.Investigation.ModelUsage {
-			if err := budgets.AddIteration(DiagnosisAgentName); err != nil {
+			agentName := usage.Agent
+			if agentName == "" {
+				agentName = DiagnosisAgentName
+			}
+			if _, known := r.limits[agentName]; !known {
+				// Single-pass baseline telemetry has a strategy-specific agent
+				// label, while its execution budget remains the diagnosis role.
+				agentName = DiagnosisAgentName
+			}
+			if err := budgets.AddIteration(agentName); err != nil {
 				return err
 			}
-			if err := budgets.AddTokens(DiagnosisAgentName, usage.OutputTokens); err != nil {
+			if err := budgets.AddTokens(agentName, usage.OutputTokens); err != nil {
 				return err
 			}
 		}
 	}
 	runtime := &constrainedRuntime{state: state, budgets: budgets, done: map[string]bool{}, transition: deps.Transition}
+	if len(result.Verified) > 0 {
+		state.HypothesisDrafts = append([]domain.HypothesisDraft(nil), result.Hypotheses...)
+		state.VerifiedHypotheses = append([]domain.VerifiedHypothesis(nil), result.Verified...)
+		state.DiagnosisLedger.Drafts = append([]domain.HypothesisDraft(nil), result.Hypotheses...)
+		state.DiagnosisLedger.Verified = append([]domain.VerifiedHypothesis(nil), result.Verified...)
+	}
 	runtime.hypotheses = safety.NewHypothesisTransitionService(&state.DiagnosisLedger, state.VerifiedHypotheses)
 	runtimeCtx := withConstrainedRuntime(ctx, runtime)
-	if _, err := recordHypotheses(runtimeCtx, HypothesisSubmission{ReasoningType: "hypothesis_verification", Hypotheses: result.Hypotheses}); err != nil {
-		return err
-	}
-	if _, err := verifyConstrainedHypotheses(runtimeCtx, deps); err != nil {
-		return err
+	if len(result.Verified) == 0 {
+		if _, err := recordHypotheses(runtimeCtx, HypothesisSubmission{ReasoningType: "hypothesis_verification", Hypotheses: result.Hypotheses}); err != nil {
+			return err
+		}
+		if _, err := verifyConstrainedHypotheses(runtimeCtx, deps); err != nil {
+			return err
+		}
 	}
 	if result.Investigation.Arbitration != nil && !result.Investigation.Arbitration.Accepted {
 		state.Incident.AgentBudget = budgets.State()
@@ -306,7 +335,7 @@ func collectInitialEvidence(ctx context.Context, incident *domain.Incident, coll
 			infrastructure = append(infrastructure, result.source+" evidence unavailable")
 			continue
 		}
-		evidence = append(evidence, result.items...)
+		evidence = append(evidence, normalizeCollectedEvidence(incident, result.items)...)
 	}
 	sort.SliceStable(evidence, func(i, j int) bool {
 		if evidence[i].Source == evidence[j].Source {
@@ -395,7 +424,7 @@ func (r *AgentRegistry) modelOptions() []model.Option {
 func (r *AgentRegistry) modelUsage(incidentID, agent string, message *schema.Message, duration time.Duration) domain.ModelUsageEvent {
 	parent, phase := SupervisorAgentName, "diagnosis"
 	switch agent {
-	case MetricWorkerName, LogWorkerName, TraceWorkerName, TopologyWorkerName, DiagnosisAgentName, AlternativeAgentName, CriticAgentName:
+	case MetricWorkerName, LogWorkerName, TraceWorkerName, TopologyWorkerName, DiagnosisAgentName, AlternativeAgentName, CriticAgentName, CognitiveRuntimeName:
 		parent = PlannerAgentName
 	case RecoveryAgentName:
 		phase = "recovery"

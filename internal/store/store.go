@@ -27,6 +27,14 @@ type IncidentStore interface {
 type WorkflowStatusStore interface {
 	UpdateWorkflowStatus(context.Context, string, domain.IncidentStatus, time.Time) error
 }
+
+// AlertAppendStore merges a newly observed alert into the latest persisted
+// incident while retaining diagnosis state assembled by a concurrently running
+// workflow. Implementations must perform the read/merge/write atomically for
+// a single incident.
+type AlertAppendStore interface {
+	AppendAlert(context.Context, string, domain.Alert, time.Time) (*domain.Incident, error)
+}
 type WorkflowIdentityStore interface {
 	WorkflowIdentity(context.Context, string) (string, error)
 }
@@ -100,6 +108,18 @@ func (s *MemoryStore) UpdateWorkflowStatus(_ context.Context, id string, status 
 	in.Status = status
 	in.UpdatedAt = occurredAt
 	return nil
+}
+func (s *MemoryStore) AppendAlert(_ context.Context, id string, alert domain.Alert, occurredAt time.Time) (*domain.Incident, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	in, ok := s.incidents[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	in.Alerts = append(in.Alerts, alert)
+	in.UpdatedAt = occurredAt
+	cp := *in
+	return &cp, nil
 }
 func (s *MemoryStore) Get(_ context.Context, id string) (*domain.Incident, error) {
 	s.mu.RLock()

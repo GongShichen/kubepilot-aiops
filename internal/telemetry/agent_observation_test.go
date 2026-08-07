@@ -41,12 +41,24 @@ func TestObserveAgentCountsHierarchicalWorkerFindings(t *testing.T) {
 	incident := &domain.Incident{
 		RootCause: "payment memory leak",
 		Investigation: &domain.Investigation{
-			Findings: []domain.WorkerFinding{{Worker: "metric"}, {Worker: "log"}, {Worker: "trace"}},
+			Findings:        []domain.WorkerFinding{{Worker: "metric", EvidenceIDs: []string{"m"}}, {Worker: "log", EvidenceIDs: []string{"l"}}, {Worker: "trace", EvidenceIDs: []string{"m", "t"}}},
+			DiagnosisRounds: 2,
 		},
 	}
 	got := ObserveAgent(incident)
-	if got.EvidenceQueries != 3 || got.EvidenceEfficiency != 1.0/3.0 {
+	if got.EvidenceQueries != 3 || got.EvidenceEfficiency != 1.0/3.0 || got.IndependentEvidenceRequests != 3 || got.NewEvidenceIDs != 3 || got.ConvergenceRounds != 2 {
 		t.Fatalf("hierarchical evidence work was not observed: %+v", got)
+	}
+}
+
+func TestObserveAgentClassifiesCognitivePolicyOutcomes(t *testing.T) {
+	incident := &domain.Incident{Investigation: &domain.Investigation{
+		CognitiveReasoning: []domain.CognitiveReasoning{{InvestigationPolicies: []domain.InvestigationPolicy{{Status: "useful"}, {Status: "ineffective_no_decision_change"}, {Status: "rejected_low_diagnostic_value"}}}},
+		ExpansionRequests:  []domain.CandidateExpansionRequest{{Status: "activated_non_actionable"}},
+	}}
+	got := ObserveAgent(incident)
+	if got.CognitiveProposals != 4 || got.CognitiveAcceptedProposals != 3 || got.CognitiveUsefulProposals != 1 || got.CognitiveRejectedProposals != 1 {
+		t.Fatalf("cognitive proposal outcomes were not observed: %+v", got)
 	}
 }
 
