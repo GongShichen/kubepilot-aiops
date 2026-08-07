@@ -43,6 +43,7 @@ type Supervisor struct {
 	rankingPolicyHash string
 	rerankerService   reranker.Service
 	brainStates       *sync.Map
+	brainRuntime      *brainGraphRuntime
 }
 
 type supervisorHooks struct{ eventSink workflowgraph.EventSink }
@@ -438,7 +439,7 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	if deps.RankingPolicy != nil {
 		rankingHash = deps.RankingPolicy.Hash
 	}
-	return &Supervisor{runnable: run, checkpoints: deleter, hooks: hooks, skillSnapshotHash: deps.Agents.SkillSnapshotHash(), brainSkillHash: brainResolver.SnapshotHash(), brainToolHash: brainToolHash, brainPolicyHash: brainRuntime.policyHash, rankingPolicyHash: rankingHash, rerankerService: deps.Reranker, brainStates: brainStates}, nil
+	return &Supervisor{runnable: run, checkpoints: deleter, hooks: hooks, skillSnapshotHash: deps.Agents.SkillSnapshotHash(), brainSkillHash: brainResolver.SnapshotHash(), brainToolHash: brainToolHash, brainPolicyHash: brainRuntime.policyHash, rankingPolicyHash: rankingHash, rerankerService: deps.Reranker, brainStates: brainStates, brainRuntime: brainRuntime}, nil
 }
 
 type verificationRoundResult struct {
@@ -969,6 +970,18 @@ func (s *Supervisor) Run(ctx context.Context, in *domain.Incident) (*WorkflowSta
 		}
 	}
 	state, err := s.runnable.Invoke(ctx, initial, compose.WithCheckPointID("incident:"+in.ID), compose.WithRuntimeMaxSteps(maxSteps), compose.WithCallbacks(handler))
+	if err != nil && domain.IsKubePilotBrainMethod(in.DiagnosisMethod) {
+		if _, interrupted := compose.ExtractInterruptInfo(err); !interrupted {
+			failed := state
+			if failed == nil {
+				failed = initial
+			}
+			if s.brainRuntime != nil {
+				s.brainRuntime.finalizeGraphFailure(failed)
+			}
+			state = failed
+		}
+	}
 	if err == nil && s.checkpoints != nil {
 		_ = s.checkpoints.Delete(ctx, "incident:"+in.ID)
 	}
@@ -986,6 +999,20 @@ func (s *Supervisor) Resume(ctx context.Context, id, interruptID string, data *A
 	// would replace the state restored by Eino before the interrupt boundary and
 	// can cause upstream collection nodes to run again.
 	state, err := s.runnable.Invoke(ctx, nil, compose.WithCheckPointID("incident:"+id), compose.WithRuntimeMaxSteps(BrainGraphMaxSteps), compose.WithCallbacks(handler))
+	if err != nil {
+		if _, interrupted := compose.ExtractInterruptInfo(err); !interrupted {
+			failed := state
+			if failed == nil && s.brainStates != nil {
+				if value, ok := s.brainStates.Load(id); ok {
+					failed, _ = value.(*WorkflowState)
+				}
+			}
+			if failed != nil && failed.Incident != nil && domain.IsKubePilotBrainMethod(failed.Incident.DiagnosisMethod) && s.brainRuntime != nil {
+				s.brainRuntime.finalizeGraphFailure(failed)
+				state = failed
+			}
+		}
+	}
 	if err == nil && s.checkpoints != nil {
 		_ = s.checkpoints.Delete(ctx, "incident:"+id)
 	}

@@ -24,6 +24,92 @@ type brainGraphModel struct {
 	history []string
 }
 
+// brainTurnBudgetModel deliberately keeps issuing valid native tool calls so
+// the domain MaxTurns boundary, rather than an Eino graph-step guard or the
+// structured-output correction budget, must end the Workflow Attempt.
+type brainTurnBudgetModel struct {
+	mu    sync.Mutex
+	calls int
+}
+
+type failingBrainModel struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (m *failingBrainModel) Generate(_ context.Context, _ []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	if m.calls > 1 {
+		return nil, fmt.Errorf("synthetic provider failure")
+	}
+	available := map[string]bool{}
+	for _, info := range model.GetCommonOptions(nil, opts...).Tools {
+		available[info.Name] = true
+	}
+	if !available["submit_incident_understanding"] {
+		return nil, fmt.Errorf("understanding tool is unavailable")
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"intent": "record bounded impact", "expected_observation": []string{"persisted understanding"},
+		"summary": "gateway degraded", "affected_targets": []any{map[string]any{"namespace": "kubepilot-demo", "service": "gateway-service", "resource": "gateway-service", "kind": "Service"}},
+		"possible_domains": []string{"application"}, "unknowns": []string{"mechanism"},
+	})
+	return withMockUsage(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "failure-understanding", Type: "function", Function: schema.FunctionCall{Name: "submit_incident_understanding", Arguments: string(raw)}}}}), nil
+}
+
+func (m *failingBrainModel) Stream(ctx context.Context, messages []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, messages, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (m *brainTurnBudgetModel) Generate(_ context.Context, messages []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	options := model.GetCommonOptions(nil, opts...)
+	available := map[string]bool{}
+	for _, info := range options.Tools {
+		available[info.Name] = true
+	}
+	var payload struct {
+		Phase domain.BrainPhase `json:"phase"`
+	}
+	for _, message := range messages {
+		if message.Role == schema.User {
+			_ = json.Unmarshal([]byte(message.Content), &payload)
+		}
+	}
+	call := func(name string, arguments map[string]any) (*schema.Message, error) {
+		if !available[name] {
+			return nil, fmt.Errorf("budget model requested unavailable tool %s in phase %s", name, payload.Phase)
+		}
+		raw, _ := json.Marshal(arguments)
+		return withMockUsage(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: fmt.Sprintf("budget-call-%02d", m.calls), Type: "function", Function: schema.FunctionCall{Name: name, Arguments: string(raw)}}}}), nil
+	}
+	target := map[string]any{"namespace": "kubepilot-demo", "service": "gateway-service", "resource": "gateway-service", "kind": "Service"}
+	switch payload.Phase {
+	case domain.BrainPhaseIntake:
+		return call("submit_incident_understanding", map[string]any{"intent": "record bounded impact", "expected_observation": []string{"persisted understanding"}, "summary": "gateway degraded", "affected_targets": []any{target}, "possible_domains": []string{"application"}, "unknowns": []string{"mechanism"}})
+	case domain.BrainPhasePlanning:
+		return call("submit_investigation_plan", map[string]any{"intent": "plan bounded investigation", "expected_observation": []string{"persisted plan"}, "objective": "exercise the configured Brain turn boundary", "goals": []string{"keep native structured actions auditable"}, "stop_conditions": []string{"Brain turn budget exhausted"}})
+	default:
+		return call("request_skills", map[string]any{"intent": fmt.Sprintf("retain a native structured action at turn %d", m.calls), "expected_observation": []string{"audited Skill activation status"}, "skill_ids": []string{"revise-hypotheses"}, "reason": fmt.Sprintf("exercise-turn-%d", m.calls), "trigger": "BUDGET_BOUNDARY_TEST"})
+	}
+}
+
+func (m *brainTurnBudgetModel) Stream(ctx context.Context, messages []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, messages, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
 func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -223,6 +309,88 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 	}
 	if final.DiagnosisRuntime != nil || len(final.Candidates) != 0 || len(final.HypothesisDrafts) != 0 || len(final.VerifiedHypotheses) != 0 || final.Incident.Investigation.Arbitration != nil || final.Incident.DiagnosisLedger != nil {
 		t.Fatalf("KubePilot entered a deterministic baseline path: runtime=%+v candidates=%d drafts=%d verified=%d arbitration=%+v", final.DiagnosisRuntime, len(final.Candidates), len(final.HypothesisDrafts), len(final.VerifiedHypotheses), final.Incident.Investigation.Arbitration)
+	}
+}
+
+func TestBrainGraphStepBudgetAllowsDomainMaxTurnsToTerminate(t *testing.T) {
+	ctx := context.Background()
+	brainModel := &brainTurnBudgetModel{}
+	registry, err := NewAgentRegistry(ctx, brainModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Agents: registry, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	incident := &domain.Incident{ID: "incident-turn-boundary", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "gateway degraded", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
+	state, runErr := supervisor.Run(ctx, incident)
+	if runErr != nil {
+		t.Fatalf("Eino graph guard preempted the domain Brain budget: %v", runErr)
+	}
+	if state == nil || state.Termination == nil || state.Termination.Reason != domain.TerminationBudgetExhausted {
+		t.Fatalf("domain MaxTurns did not create the termination event: %+v", state)
+	}
+	if state.BrainBudget.Usage.Turns != brainruntime.DefaultMaxTurns || len(state.BrainTurns) != brainruntime.DefaultMaxTurns {
+		t.Fatalf("unexpected Brain turn usage at termination: usage=%+v turns=%d", state.BrainBudget.Usage, len(state.BrainTurns))
+	}
+	if state.Incident.Investigation == nil || state.Incident.Investigation.CompletedAt.IsZero() || state.WorkflowAttempt == nil || state.WorkflowAttempt.Status != domain.WorkflowAttemptCompleted || state.WorkflowAttempt.CompletedAt.IsZero() {
+		t.Fatalf("MaxTurns termination did not persist a complete audit: investigation=%+v attempt=%+v", state.Incident.Investigation, state.WorkflowAttempt)
+	}
+}
+
+func TestFatalGraphFailureFinalizesBrainAuditWithoutChangingDiagnosis(t *testing.T) {
+	now := time.Now().UTC()
+	diagnosis := &domain.AgentDiagnosis{ID: "diagnosis-partial", Statement: "LLM-owned partial diagnosis", ModelConfidence: .4}
+	attempt := &domain.WorkflowAttempt{ID: "attempt-failure", IncidentID: "incident-failure", Sequence: 1, Status: domain.WorkflowAttemptActive, StartedAt: now.Add(-time.Minute)}
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "incident-failure", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Investigation: &domain.Investigation{Architecture: "eino-native-self-reflective-brain", StartedAt: now.Add(-time.Minute)}},
+		BrainState: BrainState{
+			AgentDiagnosis:       diagnosis,
+			WorkflowAttempt:      attempt,
+			BrainBudget:          domain.BrainBudgetState{Limits: brainruntime.DefaultBudget(), Usage: domain.BrainBudgetUsage{Turns: 7, ToolCalls: 6}},
+			EvidenceSnapshotHash: "evidence-snapshot",
+			ExecutionSnapshot:    domain.ExecutionSnapshot{SkillSnapshotHash: "skills", ModelConfigHash: "model", ToolSchemaHash: "tools", PolicyHash: "policy"},
+		},
+	}
+	(&brainGraphRuntime{}).finalizeGraphFailure(state)
+	if state.Termination == nil || state.Termination.Reason != domain.TerminationFatalInfrastructure {
+		t.Fatalf("fatal graph failure missing explicit termination: %+v", state.Termination)
+	}
+	if state.AgentDiagnosis != diagnosis || state.AgentDiagnosis.Statement != "LLM-owned partial diagnosis" || state.AgentDiagnosis.ModelConfidence != .4 {
+		t.Fatalf("Runtime rewrote the LLM diagnosis while recording failure: %+v", state.AgentDiagnosis)
+	}
+	if state.Incident.Investigation.CompletedAt.IsZero() || state.Incident.Investigation.Termination == nil || state.Incident.Investigation.Termination.Reason != domain.TerminationFatalInfrastructure {
+		t.Fatalf("fatal graph failure left Investigation audit incomplete: %+v", state.Incident.Investigation)
+	}
+	if attempt.Status != domain.WorkflowAttemptCompleted || attempt.CompletedAt.IsZero() || state.Incident.WorkflowAttempt != attempt {
+		t.Fatalf("fatal graph failure left Workflow Attempt active: %+v", attempt)
+	}
+}
+
+func TestSupervisorReturnsFinalizedBrainStateOnGraphFailure(t *testing.T) {
+	ctx := context.Background()
+	registry, err := NewAgentRegistry(ctx, &failingBrainModel{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Agents: registry, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	incident := &domain.Incident{ID: "incident-runtime-failure", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "gateway degraded", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
+	state, runErr := supervisor.Run(ctx, incident)
+	if runErr == nil || !strings.Contains(runErr.Error(), "synthetic provider failure") {
+		t.Fatalf("expected provider failure, got %v", runErr)
+	}
+	if state == nil || state.Incident != incident {
+		t.Fatalf("Supervisor discarded partial WorkflowState on graph failure: %+v", state)
+	}
+	if state.Termination == nil || state.Termination.Reason != domain.TerminationFatalInfrastructure || incident.Investigation == nil || incident.Investigation.CompletedAt.IsZero() || incident.Investigation.Termination == nil {
+		t.Fatalf("graph failure audit is incomplete: termination=%+v investigation=%+v", state.Termination, incident.Investigation)
+	}
+	if state.WorkflowAttempt == nil || state.WorkflowAttempt.Status != domain.WorkflowAttemptCompleted || state.WorkflowAttempt.CompletedAt.IsZero() || incident.WorkflowAttempt != state.WorkflowAttempt {
+		t.Fatalf("graph failure left the Workflow Attempt active: %+v", state.WorkflowAttempt)
 	}
 }
 

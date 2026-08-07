@@ -398,11 +398,15 @@ func (m *IncidentManager) diagnose(id string) {
 			m.publish(in)
 			return
 		}
-		_ = domain.Transition(in, domain.StatusNeedsAttention)
-		in.DiagnosisError = redactWorkflowError(err)
-		in.UpdatedAt = time.Now().UTC()
-		_ = m.Store.Update(persistCtx, in)
-		m.audit(persistCtx, id, "diagnosis_failed", in.DiagnosisError, nil)
+		failed := in
+		if state != nil && state.Incident != nil {
+			failed = state.Incident
+		}
+		_ = domain.Transition(failed, domain.StatusNeedsAttention)
+		failed.DiagnosisError = redactWorkflowError(err)
+		failed.UpdatedAt = time.Now().UTC()
+		_ = m.Store.Update(persistCtx, failed)
+		m.audit(persistCtx, id, "diagnosis_failed", failed.DiagnosisError, nil)
 		return
 	}
 	state.Incident.DiagnosisError = ""
@@ -501,12 +505,16 @@ func (m *IncidentManager) resumeWorkflow(id string, approved bool, idempotencyKe
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer persistCancel()
 	if runErr != nil {
-		_ = domain.Transition(in, domain.StatusNeedsAttention)
-		in.DiagnosisError = redactWorkflowError(runErr)
-		in.UpdatedAt = time.Now().UTC()
-		_ = m.Store.Update(persistCtx, in)
-		m.audit(persistCtx, id, "workflow_resume_failed", in.DiagnosisError, nil)
-		m.publish(in)
+		failed := in
+		if state != nil && state.Incident != nil {
+			failed = state.Incident
+		}
+		_ = domain.Transition(failed, domain.StatusNeedsAttention)
+		failed.DiagnosisError = redactWorkflowError(runErr)
+		failed.UpdatedAt = time.Now().UTC()
+		_ = m.Store.Update(persistCtx, failed)
+		m.audit(persistCtx, id, "workflow_resume_failed", failed.DiagnosisError, nil)
+		m.publish(failed)
 		return
 	}
 	state.Incident.WorkflowInterruptID = ""

@@ -542,6 +542,41 @@ func (r *brainGraphRuntime) terminationRouter(_ context.Context, state *Workflow
 	return state, nil
 }
 
+// finalizeGraphFailure preserves a complete, replayable audit when Eino exits
+// before a normal domain termination. A graph/runtime failure is never
+// converted into incident evidence or a diagnosis; it is recorded as a fatal
+// infrastructure termination while retaining the LLM-owned partial state.
+func (r *brainGraphRuntime) finalizeGraphFailure(state *WorkflowState) {
+	if state == nil || state.Incident == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if state.Incident.Investigation == nil {
+		state.Incident.Investigation = &domain.Investigation{Architecture: "eino-native-self-reflective-brain", StartedAt: now}
+	}
+	if state.Termination == nil {
+		termination, _ := brainruntime.NewTermination(
+			domain.TerminationFatalInfrastructure,
+			currentBrainTurnID(state),
+			finalHypothesisID(state),
+			state.EvidenceSnapshotHash,
+			&state.ExecutionSnapshot,
+			[]string{"workflow graph execution failed before normal termination"},
+			state.BrainBudget,
+		)
+		state.Termination = &termination
+	}
+	state.Incident.Investigation.CompletedAt = now
+	if state.WorkflowAttempt != nil {
+		state.WorkflowAttempt.Status = domain.WorkflowAttemptCompleted
+		state.WorkflowAttempt.CompletedAt = now
+		state.WorkflowAttempt.EvidenceSnapshotHash = state.EvidenceSnapshotHash
+		state.Incident.WorkflowAttempt = state.WorkflowAttempt
+	}
+	state.Incident.UpdatedAt = now
+	r.syncInvestigation(state)
+}
+
 func (r *brainGraphRuntime) syncInvestigation(state *WorkflowState) {
 	if state == nil || state.Incident == nil || state.Incident.Investigation == nil {
 		return

@@ -18,13 +18,16 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-// One Brain turn can traverse context, model, gateway, category routing, tool,
-// classification, observation, grounding, reflection routing and termination.
-// The fixed tail covers recovery and finalization nodes after the Brain budget
-// is exhausted. There is intentionally no wall-clock incident timeout.
+// One Brain turn can traverse termination, context, model, gateway, category
+// routing, tool, classification, observation, grounding, belief commit and
+// reflection routing before the next turn starts. Eino counts each of those
+// synchronous graph levels as a run step. Keep this defensive graph bound
+// strictly above the domain Brain budget so MaxTurns, not Eino, owns the
+// auditable termination decision. The fixed tail covers graph entry and the
+// final termination edge. There is intentionally no wall-clock timeout.
 const (
-	brainGraphStepsPerTurn = 10
-	brainGraphTailSteps    = 12
+	brainGraphStepsPerTurn = 12
+	brainGraphTailSteps    = 16
 	BrainGraphMaxSteps     = brainruntime.DefaultMaxTurns*brainGraphStepsPerTurn + brainGraphTailSteps
 )
 
