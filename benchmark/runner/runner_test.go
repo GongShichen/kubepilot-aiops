@@ -28,6 +28,16 @@ func TestOptionalTimeoutContextLeavesZeroTimeoutUnbounded(t *testing.T) {
 	}
 }
 
+func TestInfrastructureFailureClassifiesExhaustedModelRequest(t *testing.T) {
+	result := reporter.CaseResult{Error: "diagnosis workflow: transient request failure after retries: failed to create chat completion: context deadline exceeded"}
+	if !infrastructureFailure(result) {
+		t.Fatal("exhausted model request must be classified as infrastructure failure")
+	}
+	if infrastructureFailure(reporter.CaseResult{Error: "diagnosis workflow: hypothesis grounding rejected"}) {
+		t.Fatal("logical diagnosis rejection must not be classified as infrastructure failure")
+	}
+}
+
 type recoveryClient struct{ in *domain.Incident }
 
 func (c *recoveryClient) Create(context.Context, scenarios.Scenario) (*domain.Incident, error) {

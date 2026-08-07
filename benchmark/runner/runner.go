@@ -414,6 +414,24 @@ func infrastructureFailure(result reporter.CaseResult) bool {
 			return true
 		}
 	}
+	// A diagnosis workflow can fail after the model client's own bounded
+	// retries. That failure is external/runtime infrastructure, not a wrong RCA.
+	// Keep these markers aligned with shouldRestartCase so an exhausted restart
+	// is excluded from model-quality metrics and counted against the run's
+	// infrastructure-health gate.
+	for _, marker := range []string{
+		"transient request failure after retries",
+		"request failed after ",
+		"failed to receive stream chunk",
+		"context deadline exceeded",
+		"connection reset",
+		"broken pipe",
+		"unexpected eof",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
 	return false
 }
 
