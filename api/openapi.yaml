@@ -411,7 +411,7 @@ components:
         expected_observation: {type: array, items: {type: string}}
     AgentActionEnvelope:
       type: object
-      required: [action_id, incident_id, turn_id, phase, tool_name, tool_category, evidence_snapshot_hash, idempotency_key, intent]
+      required: [action_id, incident_id, turn_id, phase, tool_name, tool_category, routed_tool_category, evidence_snapshot_hash, idempotency_key, intent]
       properties:
         action_id: {type: string}
         incident_id: {type: string}
@@ -419,6 +419,7 @@ components:
         phase: {type: string, enum: [INTAKE, PLANNING, INVESTIGATION, REFLECTION, DIAGNOSIS, RECOVERY, VERIFICATION, ESCALATION]}
         tool_name: {type: string}
         tool_category: {type: string, enum: [EVIDENCE, RETRIEVAL, REASONING, RECOVERY, CONTROL]}
+        routed_tool_category: {type: string, enum: [EVIDENCE, RETRIEVAL, REASONING, RECOVERY, CONTROL]}
         skill_refs: {type: array, items: {$ref: '#/components/schemas/SkillRef'}}
         evidence_snapshot_hash: {type: string}
         idempotency_key: {type: string}

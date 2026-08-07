@@ -22,7 +22,9 @@ Use only server-issued resource references and the incident namespace.
 
 ## Allowed Tools
 
-Use resource discovery, Kubernetes inspection, or topology retrieval tools only.
+Use `discover_resources` or `inspect_kubernetes` through the EVIDENCE category
+only. Historical incident, runbook, and causal-pattern retrieval do not resolve
+current resources and must not be used as substitutes.
 
 ## Required IDs
 
@@ -34,8 +36,17 @@ Return resolved ResourceRef IDs, relationships, and unresolved gaps.
 
 ## Output Example
 
+Before any hypothesis is admitted:
+
 ```json
 {"tool":"discover_resources","arguments":{"intent":"resolve the scoped workload and one-hop dependency identities","expected_observation":["typed ResourceRefs and topology relationships"],"targets":[{"namespace":"<incident-namespace>","service":"<server-service>","kind":"Service"}],"signal_kinds":["workload","service","endpoint_slice"],"window_minutes":5}}
+```
+
+After admission, every Evidence call must bind one or more exact server-issued
+hypothesis revision IDs:
+
+```json
+{"tool":"discover_resources","arguments":{"intent":"resolve one-hop dependencies needed by the admitted hypothesis","expected_observation":["typed ResourceRefs and topology relationships"],"hypothesis_ids":["<server-hypothesis-revision-id>"],"evidence_need":["dependency identity and availability"],"targets":[{"namespace":"<incident-namespace>","service":"<server-service>","kind":"Service"}],"signal_kinds":["workload","service","endpoint_slice"],"window_minutes":5}}
 ```
 
 ## Stop & Failure Conditions

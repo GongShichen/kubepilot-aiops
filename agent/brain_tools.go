@@ -1244,7 +1244,7 @@ func validateBrainTerminationRequest(state *WorkflowState, input finishBrainInpu
 
 func newBrainEnvelope(state *WorkflowState, toolName string, category domain.BrainToolCategory, intent domain.AgentActionIntent) domain.AgentActionEnvelope {
 	id := ulid.Make().String()
-	return domain.AgentActionEnvelope{ActionID: id, IncidentID: state.Incident.ID, TurnID: currentBrainTurnID(state), Phase: state.BrainPhase, ToolName: toolName, ToolCategory: category, SkillRefs: append([]domain.SkillRef(nil), state.ActiveSkillRefs...), EvidenceSnapshotHash: state.EvidenceSnapshotHash, IdempotencyKey: brainruntime.Hash(struct {
+	return domain.AgentActionEnvelope{ActionID: id, IncidentID: state.Incident.ID, TurnID: currentBrainTurnID(state), Phase: state.BrainPhase, ToolName: toolName, ToolCategory: category, RoutedToolCategory: currentBrainToolCategory(state), SkillRefs: append([]domain.SkillRef(nil), state.ActiveSkillRefs...), EvidenceSnapshotHash: state.EvidenceSnapshotHash, IdempotencyKey: brainruntime.Hash(struct {
 		Incident, Turn, Tool string
 		Intent               domain.AgentActionIntent
 	}{state.Incident.ID, currentBrainTurnID(state), toolName, intent}), Intent: intent}

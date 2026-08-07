@@ -52,6 +52,32 @@ func TestToolPolicyRejectsMissingBindingRepeatsAndNoInformation(t *testing.T) {
 	}
 }
 
+func TestToolPolicyAllowsConstraintRetryAfterRoutedCategoryChanges(t *testing.T) {
+	policy := ToolPolicy{Policy: DefaultToolCallingPolicy()}
+	request := domain.AgentActionEnvelope{
+		ActionID: "wrong-route", IncidentID: "i", ToolName: "discover_resources",
+		ToolCategory: domain.BrainToolEvidence, RoutedToolCategory: domain.BrainToolRetrieval,
+		Intent: domain.AgentActionIntent{
+			Intent: "resolve one-hop dependencies", ExpectedObservation: []string{"typed resource identities"},
+			HypothesisIDs: []string{"h1"}, TargetScope: []domain.ResourceRef{{Namespace: "ns", Service: "api"}},
+		},
+	}
+	history := []domain.BrainToolExecution{{Envelope: request, Result: domain.ToolResultRecord{Class: domain.ToolResultConstraint, ConstraintCode: "tool_not_available_in_category"}}}
+	unchanged := request
+	unchanged.ActionID = "unchanged-route"
+	decision := policy.Validate(unchanged, history, true, map[domain.BrainToolCategory]bool{domain.BrainToolEvidence: true})
+	if decision.Allowed || !contains(decision.ReasonCodes, "unchanged_constraint_retry") {
+		t.Fatalf("unchanged routed constraint retry was not rejected: %+v", decision)
+	}
+	corrected := request
+	corrected.ActionID = "correct-route"
+	corrected.RoutedToolCategory = domain.BrainToolEvidence
+	decision = policy.Validate(corrected, history, true, map[domain.BrainToolCategory]bool{domain.BrainToolEvidence: true})
+	if !decision.Allowed {
+		t.Fatalf("request corrected to the exposed Tool Category was rejected as an exact repeat: %+v", decision)
+	}
+}
+
 func TestToolPolicyRequiresExpectedObservationForControlTools(t *testing.T) {
 	policy := ToolPolicy{Policy: DefaultToolCallingPolicy()}
 	envelope := domain.AgentActionEnvelope{

@@ -142,9 +142,10 @@ func actionFingerprint(envelope domain.AgentActionEnvelope) string {
 	return Hash(struct {
 		ToolName             string                   `json:"tool_name"`
 		Category             domain.BrainToolCategory `json:"category"`
+		RoutedCategory       domain.BrainToolCategory `json:"routed_category"`
 		Intent               domain.AgentActionIntent `json:"intent"`
 		EvidenceSnapshotHash string                   `json:"evidence_snapshot_hash"`
-	}{envelope.ToolName, envelope.ToolCategory, envelope.Intent, envelope.EvidenceSnapshotHash})
+	}{envelope.ToolName, envelope.ToolCategory, envelope.RoutedToolCategory, envelope.Intent, envelope.EvidenceSnapshotHash})
 }
 
 func targetFingerprint(targets []domain.ResourceRef) string {

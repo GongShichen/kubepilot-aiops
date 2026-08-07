@@ -921,6 +921,91 @@ func TestToolCategorySelectionRejectsSkillCategoryMismatch(t *testing.T) {
 	}
 }
 
+func TestExploreResourcesSkillRoutesOnlyToEvidenceToolsNode(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, ok := resolver.packages["explore-resources"]
+	if !ok {
+		t.Fatal("explore-resources Skill is missing")
+	}
+	if pkg.Spec.Version != "2" || len(pkg.Spec.AllowedToolCategories) != 1 || pkg.Spec.AllowedToolCategories[0] != domain.BrainToolEvidence {
+		t.Fatalf("resource exploration grants a Tool Category without a current-resource tool: %+v", pkg.Spec)
+	}
+	registry, err := buildBrainCapabilities(constrainedToolDeps{}, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNodeContains := func(node, name string, wanted bool) {
+		t.Helper()
+		infos, loadErr := registry.ToolInfosForNode(context.Background(), node)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		found := false
+		for _, info := range infos {
+			found = found || info.Name == name
+		}
+		if found != wanted {
+			t.Fatalf("node %s tool %s present=%t want=%t", node, name, found, wanted)
+		}
+	}
+	assertNodeContains(captools.NodeBrainEvidence, "discover_resources", true)
+	assertNodeContains(captools.NodeBrainRetrieval, "discover_resources", false)
+
+	newState := func(id string) *WorkflowState {
+		return &WorkflowState{
+			Incident: &domain.Incident{ID: id, Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+			BrainState: BrainState{
+				BrainPhase: domain.BrainPhaseInvestigation, BrainTurns: []domain.BrainTurn{{ID: "turn:" + id, Sequence: 1, ToolCategory: domain.BrainToolReasoning}},
+				BrainToolPolicy: brainruntime.DefaultToolCallingPolicy(), BrainBudget: domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+				ActiveToolCategory: domain.BrainToolReasoning, ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
+			},
+		}
+	}
+	retrieval, err := runBrainSelectCategory(withBrainWorkflowState(context.Background(), newState("resource-retrieval")), resolver, selectBrainCategoryInput{
+		Intent: "resolve current resources", ExpectedObservation: []string{"typed resource identities"}, Category: domain.BrainToolRetrieval,
+		SkillIDs: []string{"explore-resources"}, Reason: "resolve one-hop scope", Trigger: "CANDIDATE_CONFLICT",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retrieval.Class != domain.ToolResultConstraint || retrieval.ConstraintCode != "tool_category_not_granted_by_requested_skill" {
+		t.Fatalf("resource exploration incorrectly granted RETRIEVAL: %+v", retrieval)
+	}
+	evidence, err := runBrainSelectCategory(withBrainWorkflowState(context.Background(), newState("resource-evidence")), resolver, selectBrainCategoryInput{
+		Intent: "resolve current resources", ExpectedObservation: []string{"typed resource identities"}, Category: domain.BrainToolEvidence,
+		SkillIDs: []string{"explore-resources"}, Reason: "resolve one-hop scope", Trigger: "CANDIDATE_CONFLICT",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Class != domain.ToolResultValidation || evidence.Status != "OK" || evidence.SelectedCategory != domain.BrainToolEvidence {
+		t.Fatalf("resource exploration did not grant its Evidence ToolsNode: %+v", evidence)
+	}
+}
+
+func TestToolEnvelopeAuditsLogicalAndActuallyRoutedCategories(t *testing.T) {
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "routed-category", Namespace: "team-a", Service: "api", Resource: "api"},
+		BrainState: BrainState{
+			BrainTurns: []domain.BrainTurn{{ID: "turn:routed", ToolCategory: domain.BrainToolRetrieval}},
+			BrainMessages: []*schema.Message{{
+				Role: schema.Assistant,
+				ToolCalls: []schema.ToolCall{{
+					ID: "call:routed", Type: "function",
+					Function: schema.FunctionCall{Name: "discover_resources", Arguments: `{"intent":"resolve resources","expected_observation":["typed resources"]}`},
+				}},
+			}},
+		},
+	}
+	envelope := envelopeFromToolCall(state, "call:routed", "discover_resources")
+	if envelope.ToolCategory != domain.BrainToolEvidence || envelope.RoutedToolCategory != domain.BrainToolRetrieval {
+		t.Fatalf("tool envelope lost logical or actual route category: %+v", envelope)
+	}
+}
+
 func TestRejectedSkillRequestReturnsExplicitConstraintAndAudit(t *testing.T) {
 	resolver, err := LoadDefaultBrainSkillResolver()
 	if err != nil {

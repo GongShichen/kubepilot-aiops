@@ -29,10 +29,10 @@ skills:
     allowed_tool_categories: [REASONING, CONTROL]
     output_contract: investigation-plan-v1
   - id: explore-resources
-    version: "1"
+    version: "2"
     requires: [brain-kernel]
     compatible_phases: [PLANNING, INVESTIGATION]
-    allowed_tool_categories: [EVIDENCE, RETRIEVAL]
+    allowed_tool_categories: [EVIDENCE]
     output_contract: resource-exploration-v1
   - id: select-tools
     version: "1"

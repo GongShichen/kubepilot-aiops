@@ -481,7 +481,20 @@ func envelopeFromToolCall(state *WorkflowState, callID, toolName string) domain.
 			}
 		}
 	}
-	return domain.AgentActionEnvelope{ActionID: callID, IncidentID: state.Incident.ID, TurnID: currentBrainTurnID(state), Phase: state.BrainPhase, ToolName: toolName, ToolCategory: categoryForToolName(toolName), SkillRefs: append([]domain.SkillRef(nil), state.ActiveSkillRefs...), EvidenceSnapshotHash: state.EvidenceSnapshotHash, IdempotencyKey: brainruntime.Hash(struct{ Incident, Call string }{state.Incident.ID, callID}), Intent: intent}
+	return domain.AgentActionEnvelope{ActionID: callID, IncidentID: state.Incident.ID, TurnID: currentBrainTurnID(state), Phase: state.BrainPhase, ToolName: toolName, ToolCategory: categoryForToolName(toolName), RoutedToolCategory: currentBrainToolCategory(state), SkillRefs: append([]domain.SkillRef(nil), state.ActiveSkillRefs...), EvidenceSnapshotHash: state.EvidenceSnapshotHash, IdempotencyKey: brainruntime.Hash(struct{ Incident, Call string }{state.Incident.ID, callID}), Intent: intent}
+}
+
+func currentBrainToolCategory(state *WorkflowState) domain.BrainToolCategory {
+	if state != nil && len(state.BrainTurns) > 0 {
+		category := state.BrainTurns[len(state.BrainTurns)-1].ToolCategory
+		if category != "" {
+			return category
+		}
+	}
+	if state == nil {
+		return ""
+	}
+	return effectiveToolCategory(state)
 }
 
 func brainProvenanceTargets(state *WorkflowState, envelope domain.AgentActionEnvelope) []domain.ResourceRef {

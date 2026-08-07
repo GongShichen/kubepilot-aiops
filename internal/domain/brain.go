@@ -332,6 +332,7 @@ type AgentActionEnvelope struct {
 	Phase                BrainPhase        `json:"phase"`
 	ToolName             string            `json:"tool_name"`
 	ToolCategory         BrainToolCategory `json:"tool_category"`
+	RoutedToolCategory   BrainToolCategory `json:"routed_tool_category"`
 	SkillRefs            []SkillRef        `json:"skill_refs,omitempty"`
 	EvidenceSnapshotHash string            `json:"evidence_snapshot_hash"`
 	IdempotencyKey       string            `json:"idempotency_key"`
