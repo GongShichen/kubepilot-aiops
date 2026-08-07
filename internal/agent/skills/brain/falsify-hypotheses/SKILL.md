@@ -29,6 +29,12 @@ Use validation, comparison, and read-only evidence capabilities.
 
 Submit a validation/comparison call or a discriminating evidence request.
 
+## Output example
+
+```json
+{"tool":"validate_hypothesis","arguments":{"intent":"test the bound mechanism against current cited facts","expected_observation":["Grounding Level, coverage, support, contradiction, and missing observations"],"hypothesis_id":"<hypothesis-revision-id>","supporting_evidence_ids":["<evidence-id>"],"contradicting_evidence_ids":[],"missing_observations":["<unobserved-falsifier>"],"expected_causal_node_ids":["<server-causal-node-id>"]}}
+```
+
 ## Stop and failure conditions
 
 Stop on decisive validation, evidence saturation, or unavailable scope.

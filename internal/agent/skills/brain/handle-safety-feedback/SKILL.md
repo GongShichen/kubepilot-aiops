@@ -29,6 +29,14 @@ Use planning, read-only, recovery proposal, or control tools allowed by the curr
 
 Return a corrected intent/plan or an escalation action.
 
+## Output example
+
+For a human-required or non-repairable boundary:
+
+```json
+{"tool":"finish_investigation","arguments":{"intent":"preserve the current grounded state and request human authority","expected_observation":["audited human escalation"],"reason":"HUMAN_ESCALATION","hypothesis_id":"<current-hypothesis-revision-id>","unresolved_gaps":["<server-reported-safety-gap>"]}}
+```
+
 ## Stop and failure conditions
 
 Stop when feedback is satisfied, corrections are exhausted, or human authority is required.

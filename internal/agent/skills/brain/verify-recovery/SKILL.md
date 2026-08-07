@@ -29,6 +29,14 @@ Use verification and control capabilities only.
 
 Submit completion, recoverable failure reflection, or escalation.
 
+## Output example
+
+The Runtime owns success/failure termination. For an unknown outcome, request human escalation:
+
+```json
+{"tool":"finish_investigation","arguments":{"intent":"escalate an unconfirmed execution outcome without another mutation","expected_observation":["audited human escalation"],"reason":"HUMAN_ESCALATION","hypothesis_id":"<selected-hypothesis-revision-id>","unresolved_gaps":["execution outcome is not confirmed by server verification"]}}
+```
+
 ## Stop and failure conditions
 
 Stop on verified success, confirmed failure handoff, or unknown outcome escalation.

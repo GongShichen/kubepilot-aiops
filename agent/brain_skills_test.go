@@ -1,10 +1,59 @@
 package agent
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
+
+func TestBrainSkillsProvideValidStructuredOutputExamples(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, pkg := range resolver.packages {
+		marker := "## Output example"
+		if !strings.Contains(pkg.Content, marker) {
+			t.Fatalf("brain skill %s has no output example", id)
+		}
+		section := strings.SplitN(pkg.Content, marker, 2)[1]
+		if next := strings.Index(section, "\n## "); next >= 0 {
+			section = section[:next]
+		}
+		blocks := strings.Split(section, "```json\n")
+		valid := 0
+		for _, block := range blocks[1:] {
+			end := strings.Index(block, "\n```")
+			if end < 0 {
+				t.Fatalf("brain skill %s has an unterminated JSON output example", id)
+			}
+			var example struct {
+				Tool      string         `json:"tool"`
+				Arguments map[string]any `json:"arguments"`
+			}
+			if err = json.Unmarshal([]byte(block[:end]), &example); err != nil {
+				t.Fatalf("brain skill %s has invalid JSON output example: %v", id, err)
+			}
+			if strings.TrimSpace(example.Tool) == "" || strings.TrimSpace(stringValue(example.Arguments["intent"])) == "" {
+				t.Fatalf("brain skill %s output example is missing tool or intent", id)
+			}
+			if values, ok := example.Arguments["expected_observation"].([]any); !ok || len(values) == 0 {
+				t.Fatalf("brain skill %s output example is missing expected_observation", id)
+			}
+			valid++
+		}
+		if valid == 0 {
+			t.Fatalf("brain skill %s has no JSON output example", id)
+		}
+	}
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
 
 func TestBrainSkillResolverPinsCompleteBundlesAndDependencies(t *testing.T) {
 	resolver, err := LoadDefaultBrainSkillResolver()

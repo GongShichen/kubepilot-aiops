@@ -29,6 +29,12 @@ Use hypothesis submission capabilities only. The Runtime may check format, verif
 
 Submit PROPOSED hypotheses with ROOT relation, category, statement, mechanism, targets, evidence needs, falsification conditions, model confidence, and complete AgentActionIntent metadata.
 
+## Output example
+
+```json
+{"tool":"submit_hypotheses","arguments":{"intent":"create a bounded falsifiable competing set","expected_observation":["admission and resolved scope decisions"],"hypotheses":[{"statement":"The observed degradation is caused by a local execution stall","category":"application","mechanism":"execution stall","targets":[{"namespace":"<incident-namespace>","service":"<server-service>","kind":"Service"}],"evidence_needs":["current workload execution evidence"],"falsification_conditions":["current workload execution is healthy"],"model_confidence":0.5}]}}
+```
+
 ## Stop and failure conditions
 
 Stop when a bounded competing set exists or no hypothesis is verifiable.

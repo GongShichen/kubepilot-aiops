@@ -29,6 +29,14 @@ Use diagnosis submission and terminal control capabilities only.
 
 Submit AgentDiagnosis with category, statement, mechanism, revision, target, evidence, validation, and snapshot references.
 
+## Output example
+
+Copy immutable semantics and confidence from the selected revision:
+
+```json
+{"tool":"submit_diagnosis","arguments":{"intent":"persist the selected evidence-grounded diagnosis","expected_observation":["diagnosis persistence and provisional status"],"hypothesis_id":"<hypothesis-revision-id>","statement":"<exact-selected-revision-statement>","category":"<exact-selected-revision-category>","mechanism":"<exact-selected-revision-mechanism>","targets":[{"namespace":"<incident-namespace>","service":"<server-service>","kind":"Service"}],"model_confidence":0.7,"evidence_ids":["<evidence-id>"],"validation_result_ids":["<current-grounding-id>"]}}
+```
+
 ## Stop and failure conditions
 
 Stop with confident diagnosis, provisional diagnosis, continued investigation, or escalation.

@@ -28,6 +28,12 @@ Use metric evidence tools only. Read references/metric-signals.md when selecting
 
 Return an AgentActionIntent with target, hypothesis IDs, evidence need, and expected observation.
 
+## Output example
+
+```json
+{"tool":"query_prometheus_evidence","arguments":{"intent":"distinguish the bound resource and dependency hypotheses","expected_observation":["current and baseline server-normalized metric states"],"targets":[{"namespace":"<incident-namespace>","service":"<server-service>","kind":"Service"}],"hypothesis_ids":["<hypothesis-revision-id>"],"evidence_need":["current resource pressure state"],"signal_kinds":["cpu","memory","request_rate"],"window_minutes":5}}
+```
+
 ## Stop and failure conditions
 
 Stop after a decisive observation, two no-information results, or policy rejection.

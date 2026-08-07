@@ -28,6 +28,12 @@ Use log evidence tools only. Read references/log-signals.md for reliability rule
 
 Return a bounded log evidence request tied to hypotheses and expected observations.
 
+## Output example
+
+```json
+{"tool":"query_loki_evidence","arguments":{"intent":"seek a distinct target-bound failure template","expected_observation":["classified severe templates or an explicit no-information result"],"targets":[{"namespace":"<incident-namespace>","service":"<server-service>","kind":"Service"}],"hypothesis_ids":["<hypothesis-revision-id>"],"evidence_need":["application failure signature"],"signal_kinds":["error","timeout"],"window_minutes":5}}
+```
+
 ## Stop and failure conditions
 
 Stop after decisive templates, two no-information results, or policy rejection.

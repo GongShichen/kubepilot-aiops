@@ -28,6 +28,12 @@ Use control tools only. Never suggest bypassing a denied capability.
 
 Submit a structured escalation and TerminationEvent.
 
+## Output example
+
+```json
+{"tool":"finish_investigation","arguments":{"intent":"end autonomous work and preserve the evidence-linked handoff","expected_observation":["persisted TerminationEvent"],"reason":"HUMAN_ESCALATION","hypothesis_id":"<best-current-revision-id>","unresolved_gaps":["<missing-observation-or-authority>"]}}
+```
+
 ## Stop and failure conditions
 
 Stop immediately after the escalation is accepted.

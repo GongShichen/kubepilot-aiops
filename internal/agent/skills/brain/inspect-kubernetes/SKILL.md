@@ -28,6 +28,12 @@ Use Kubernetes read-only tools. Read references/kubernetes-resources.md for scop
 
 Return a typed inspection request with hypotheses and expected observations.
 
+## Output example
+
+```json
+{"tool":"query_kubernetes_evidence","arguments":{"intent":"inspect the smallest current resource set for the bound hypothesis","expected_observation":["typed workload, event, EndpointSlice, or policy facts"],"targets":[{"namespace":"<incident-namespace>","resource":"<server-resource>","kind":"Deployment"}],"hypothesis_ids":["<hypothesis-revision-id>"],"evidence_need":["current Kubernetes state"],"signal_kinds":["workload","event","endpoint_slice"],"window_minutes":5}}
+```
+
 ## Stop and failure conditions
 
 Stop when required resource facts exist, scope is denied, or evidence saturates.

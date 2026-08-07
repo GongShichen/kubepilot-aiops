@@ -28,6 +28,12 @@ Use resource discovery, Kubernetes inspection, or topology retrieval tools only.
 
 Return resolved ResourceRef IDs, relationships, and unresolved gaps.
 
+## Output example
+
+```json
+{"tool":"query_kubernetes_evidence","arguments":{"intent":"resolve the scoped workload and one-hop dependency identities","expected_observation":["typed ResourceRefs and topology relationships"],"targets":[{"namespace":"<incident-namespace>","service":"<server-service>","kind":"Service"}],"signal_kinds":["workload","service","endpoint_slice"],"window_minutes":5}}
+```
+
 ## Stop and failure conditions
 
 Stop when requested targets are resolved, out of scope, or unavailable.

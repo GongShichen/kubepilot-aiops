@@ -28,6 +28,12 @@ Use trace evidence tools only. Read references/trace-signals.md when choosing ob
 
 Return a trace request with target, bound hypotheses, and expected path observation.
 
+## Output example
+
+```json
+{"tool":"query_trace_evidence","arguments":{"intent":"locate latency or error propagation on the resolved path","expected_observation":["server-issued upstream and downstream span facts"],"targets":[{"namespace":"<incident-namespace>","service":"<server-service>","kind":"Service"}],"hypothesis_ids":["<hypothesis-revision-id>"],"evidence_need":["request path failure location"],"signal_kinds":["latency","error"],"window_minutes":5}}
+```
+
 ## Stop and failure conditions
 
 Stop when the path is distinguished, unavailable, or saturated.

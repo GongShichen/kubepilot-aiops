@@ -29,6 +29,18 @@ Request only tools exposed by the Runtime. Do not compose raw PromQL, LogQL, kub
 
 Emit one or more read-only calls in one category, or one serial reasoning/control call.
 
+## Output example
+
+Activate the required optional Skill before selecting its category:
+
+```json
+{"tool":"request_skills","arguments":{"intent":"load the metric investigation procedure","expected_observation":["Skill activation decision"],"skill_ids":["investigate-metrics"],"reason":"a metric observation can distinguish the active hypotheses","trigger":"HYPOTHESIS_CONFLICT"}}
+```
+
+```json
+{"tool":"select_tool_category","arguments":{"intent":"route the next turn to bounded evidence collection","expected_observation":["EVIDENCE category activation"],"category":"EVIDENCE"}}
+```
+
 ## Stop and failure conditions
 
 Stop when no policy-compliant call can add information.

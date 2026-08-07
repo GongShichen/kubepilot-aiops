@@ -29,6 +29,14 @@ Use only tools exposed for the active phase and Skills. Never request raw query 
 
 Return a valid Eino tool call carrying an AgentActionIntent; plain prose is not a completed turn.
 
+## Output example
+
+Use the exact exposed tool schema and replace placeholders only with server-issued IDs:
+
+```json
+{"tool":"<exposed-tool>","arguments":{"intent":"state the bounded purpose","expected_observation":["name the result that will change the next decision"]}}
+```
+
 ## Stop and failure conditions
 
 Stop on a terminal control action, an exhausted budget, or a non-repairable safety boundary.

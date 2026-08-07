@@ -31,6 +31,16 @@ Use hypothesis submission when no hypothesis exists; otherwise use reflection su
 
 Return a structured corrective action. When a hypothesis exists, return BeliefDelta records and a next goal. When none exists, return a hypothesis submission or Skill request that resolves the procedural blocker. Do not expose hidden reasoning.
 
+## Output example
+
+With an admitted hypothesis, commit only the subjective confidence change:
+
+```json
+{"tool":"commit_belief_delta","arguments":{"intent":"update belief after current counterevidence","expected_observation":["server acceptance of the BeliefDelta"],"hypothesis_id":"<hypothesis-revision-id>","new_confidence":0.3,"direction":"DECREASE","evidence_ids":["<evidence-id>"],"validation_result_ids":["<grounding-id>"],"revision_required":false}}
+```
+
+Without an admitted hypothesis, use the `submit_hypotheses` example from `form-hypotheses` or request the missing Skill; do not invent a hypothesis ID.
+
 ## Stop and failure conditions
 
 Stop when belief changes are committed, the missing Skill or hypothesis is submitted, or the trigger cannot be resolved safely. Never claim success after an empty or unclassified Tool Result.
