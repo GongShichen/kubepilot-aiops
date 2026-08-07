@@ -52,6 +52,39 @@ func TestRegistryEnforcesNodeAllowlistAndBounds(t *testing.T) {
 	}
 }
 
+func TestRegistryValidatesToolArgumentsBeforeTypedInvocation(t *testing.T) {
+	type input struct {
+		Intent string `json:"intent" jsonschema:"required"`
+		Count  int    `json:"count" jsonschema:"required,minimum=1"`
+	}
+	capability, err := NewCapability("typed_tool", "typed", func(context.Context, input) (string, error) {
+		return "ok", nil
+	}, Registration{Category: CategoryReasoning, AllowedNodes: []string{NodeBrainReasoning}, Timeout: time.Second, MaxArgumentBytes: 1024, MaxOutputBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry()
+	if err = registry.Register(context.Background(), capability); err != nil {
+		t.Fatal(err)
+	}
+	for name, arguments := range map[string]string{
+		"invalid_json": `{"intent":"investigate" "count":1}`,
+		"wrong_type":   `{"intent":"investigate","count":"one"}`,
+		"missing":      `{"intent":"investigate"}`,
+		"trailing":     `{"intent":"investigate","count":1} {}`,
+	} {
+		if err = registry.ValidateArgumentsForNode(NodeBrainReasoning, "typed_tool", arguments); err == nil {
+			t.Fatalf("%s arguments passed pre-invocation validation", name)
+		}
+	}
+	if err = registry.ValidateArgumentsForNode(NodeBrainReasoning, "typed_tool", `{"intent":"investigate","count":2}`); err != nil {
+		t.Fatalf("valid typed arguments were rejected: %v", err)
+	}
+	if err = registry.ValidateArgumentsForNode(NodeBrainReasoning, "unknown_tool", `{"intent":"investigate"}`); err != nil {
+		t.Fatalf("valid JSON for an unknown tool did not reach UnknownToolsHandler: %v", err)
+	}
+}
+
 func TestCapabilityRegistrationIsImmutable(t *testing.T) {
 	meta := Registration{Category: CategoryReasoning, AllowedNodes: []string{NodeDiagnosisReact}, Timeout: time.Second, MaxArgumentBytes: 100, MaxOutputBytes: 100}
 	capability, err := NewCapability("reason", "reason", func(context.Context, struct{}) (string, error) { return "ok", nil }, meta)

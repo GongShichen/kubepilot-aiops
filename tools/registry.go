@@ -6,13 +6,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+	validationjsonschema "github.com/google/jsonschema-go/jsonschema"
 )
 
 type ToolCategory string
@@ -52,9 +55,10 @@ type Registration struct {
 }
 
 type registeredTool struct {
-	tool       tool.BaseTool
-	capability Capability
-	meta       Registration
+	tool           tool.BaseTool
+	capability     Capability
+	meta           Registration
+	argumentSchema *validationjsonschema.Resolved
 }
 
 type boundedTool struct {
@@ -110,11 +114,34 @@ func prepareCapability(ctx context.Context, capability Capability) (string, regi
 	if err = validateRegistration(info.Name, meta); err != nil {
 		return "", registeredTool{}, err
 	}
+	argumentSchema, err := compileArgumentSchema(info)
+	if err != nil {
+		return "", registeredTool{}, fmt.Errorf("compile tool %s argument schema: %w", info.Name, err)
+	}
 	invokable, ok := candidate.(tool.InvokableTool)
 	if !ok {
 		return "", registeredTool{}, fmt.Errorf("tool %s must be invokable", info.Name)
 	}
-	return info.Name, registeredTool{tool: boundedTool{InvokableTool: invokable, meta: meta}, capability: capability, meta: cloneRegistration(meta)}, nil
+	return info.Name, registeredTool{tool: boundedTool{InvokableTool: invokable, meta: meta}, capability: capability, meta: cloneRegistration(meta), argumentSchema: argumentSchema}, nil
+}
+
+func compileArgumentSchema(info *schema.ToolInfo) (*validationjsonschema.Resolved, error) {
+	if info == nil || info.ParamsOneOf == nil {
+		return nil, fmt.Errorf("tool schema is required")
+	}
+	einoSchema, err := info.ParamsOneOf.ToJSONSchema()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(einoSchema)
+	if err != nil {
+		return nil, err
+	}
+	var validationSchema validationjsonschema.Schema
+	if err = json.Unmarshal(raw, &validationSchema); err != nil {
+		return nil, err
+	}
+	return validationSchema.Resolve(nil)
 }
 
 func (r *Registry) RegisterAll(ctx context.Context, capabilities ...Capability) error {
@@ -204,6 +231,58 @@ func (r *Registry) ToolInfosForNode(ctx context.Context, node string) ([]*schema
 		infos = append(infos, info)
 	}
 	return infos, nil
+}
+
+// ValidateArgumentsForNode performs the same JSON shape validation exposed to
+// the model before Eino's ToolsNode attempts its typed Go unmarshalling. This
+// keeps provider formatting errors inside the Agent protocol: callers can
+// return a non-empty Tool status for every ToolCall instead of turning a single
+// malformed argument object into a graph-level NodeRunError.
+//
+// Unknown tool names deliberately pass schema validation after valid JSON so
+// ToolsNode's UnknownToolsHandler can return the normal category constraint.
+func (r *Registry) ValidateArgumentsForNode(node, name, arguments string) error {
+	arguments = strings.TrimSpace(arguments)
+	if arguments == "" {
+		return fmt.Errorf("arguments must be one JSON object")
+	}
+	decoder := json.NewDecoder(strings.NewReader(arguments))
+	var instance any
+	if err := decoder.Decode(&instance); err != nil {
+		return fmt.Errorf("arguments are not valid JSON: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err == nil {
+		return fmt.Errorf("arguments contain more than one JSON value")
+	} else if err != io.EOF {
+		return fmt.Errorf("arguments have invalid trailing data: %w", err)
+	}
+
+	r.mu.RLock()
+	item, exists := r.items[name]
+	r.mu.RUnlock()
+	if !exists || !registrationAllowsNode(item.meta, node) {
+		return nil
+	}
+	if len(arguments) > item.meta.MaxArgumentBytes {
+		return fmt.Errorf("arguments exceed %d bytes", item.meta.MaxArgumentBytes)
+	}
+	if item.argumentSchema == nil {
+		return fmt.Errorf("argument schema is unavailable")
+	}
+	if err := item.argumentSchema.Validate(instance); err != nil {
+		return fmt.Errorf("arguments do not match the exposed schema: %w", err)
+	}
+	return nil
+}
+
+func registrationAllowsNode(meta Registration, node string) bool {
+	for _, allowed := range meta.AllowedNodes {
+		if allowed == node {
+			return true
+		}
+	}
+	return false
 }
 
 // SchemaHash freezes the exact model-visible schemas and registration policy

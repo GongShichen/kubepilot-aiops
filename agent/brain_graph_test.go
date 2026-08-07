@@ -740,6 +740,54 @@ func TestStructuredOutputGuardStopsAfterCorrectionBudget(t *testing.T) {
 	}
 }
 
+func TestToolArgumentGuardReturnsOneNonEmptyStatusPerCall(t *testing.T) {
+	registry, err := buildBrainCapabilities(constrainedToolDeps{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidCall := schema.ToolCall{ID: "call-invalid", Type: "function", Function: schema.FunctionCall{Name: "submit_investigation_plan", Arguments: `{"intent":"plan" "expected_observation":["persisted"],"objective":"diagnose","goals":["inspect"],"stop_conditions":["grounded"]}`}}
+	validCall := schema.ToolCall{ID: "call-valid-sibling", Type: "function", Function: schema.FunctionCall{Name: "submit_investigation_plan", Arguments: `{"intent":"plan","expected_observation":["persisted"],"objective":"diagnose","goals":["inspect"],"stop_conditions":["grounded"]}`}}
+	assistant := schema.AssistantMessage("", []schema.ToolCall{invalidCall, validCall})
+	ensureBrainAssistantToolCallContent(assistant)
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "argument-guard", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainMessages:        []*schema.Message{assistant},
+			BrainPhase:           domain.BrainPhasePlanning,
+			BrainTurns:           []domain.BrainTurn{{ID: "turn:argument-guard", Sequence: 1}},
+			BrainBudget:          domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			ExecutionSnapshot:    domain.ExecutionSnapshot{ToolSchemaHash: "tool-hash"},
+			EvidenceSnapshotHash: "evidence-hash",
+			ActiveToolCategory:   domain.BrainToolReasoning,
+		},
+	}
+	runtime := &brainGraphRuntime{tools: registry}
+	if _, err = runtime.handleInvalidToolArguments(withBrainWorkflowState(context.Background(), state), assistant); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.ToolExecutions) != 2 || state.BrainBudget.Usage.ToolCalls != 2 || state.BrainBudget.Usage.StructuredCorrections != 1 {
+		t.Fatalf("invalid atomic batch accounting is incomplete: executions=%d usage=%+v", len(state.ToolExecutions), state.BrainBudget.Usage)
+	}
+	if state.PendingReflection != nil || state.Termination != nil {
+		t.Fatalf("provider argument correction changed cognition or terminated early: reflection=%v termination=%+v", state.PendingReflection, state.Termination)
+	}
+	for index, execution := range state.ToolExecutions {
+		if execution.Result.Class != domain.ToolResultError || execution.Result.Status != "REJECTED" || execution.Result.Summary == "" || execution.Result.Infrastructure || execution.Result.Provenance.ToolCallID == "" || execution.Result.Provenance.ToolName == "" || execution.Result.Provenance.RawArtifactHash == "" || execution.Result.Provenance.ParserVersion != "brain-tool-argument-guard-v1" {
+			t.Fatalf("invalid ToolCall %d did not receive a complete status: %+v", index, execution)
+		}
+	}
+	if state.ToolExecutions[0].Result.ConstraintCode != "invalid_tool_arguments" || state.ToolExecutions[1].Result.ConstraintCode != "atomic_tool_batch_invalid" {
+		t.Fatalf("atomic rejection did not distinguish invalid and unexecuted siblings: %+v", state.ToolExecutions)
+	}
+	if len(state.BrainMessages) != 4 || state.BrainMessages[1].Role != schema.Tool || state.BrainMessages[1].ToolCallID != invalidCall.ID || strings.TrimSpace(state.BrainMessages[1].Content) == "" || state.BrainMessages[2].Role != schema.Tool || state.BrainMessages[2].ToolCallID != validCall.ID || strings.TrimSpace(state.BrainMessages[2].Content) == "" || state.BrainMessages[3].Role != schema.User || !strings.Contains(state.BrainMessages[3].Content, `"type":"runtime_tool_argument_correction"`) {
+		t.Fatalf("invalid Assistant batch was not closed with paired non-empty Tool messages: %+v", state.BrainMessages)
+	}
+	units := completeBrainMessageUnits(state.BrainMessages)
+	if len(units) != 2 || len(units[0]) != 3 {
+		t.Fatalf("checkpoint history contains orphan ToolCalls: %+v", units)
+	}
+}
+
 func TestToolHistoryUsesServerClassifiedResultWithProvenance(t *testing.T) {
 	assistant := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call-1", Type: "function", Function: schema.FunctionCall{Name: "inspect_kubernetes", Arguments: `{"intent":"inspect readiness","expected_observation":["current pod state"],"targets":[{"namespace":"team-a","service":"api"}]}`}}}}
 	now := time.Now().UTC()

@@ -12,6 +12,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/topology"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
+	captools "github.com/kubepilot-aiops/kubepilot/tools"
 )
 
 func (r *brainGraphRuntime) classifyToolResults(ctx context.Context, messages []*schema.Message) (*WorkflowState, error) {
@@ -415,6 +416,115 @@ func (r *brainGraphRuntime) handleUnstructured(ctx context.Context, message *sch
 	}
 	r.syncInvestigation(state)
 	return state, nil
+}
+
+// handleInvalidToolArguments is the provider-normalization boundary immediately
+// before Eino ToolsNode. Eino normally unmarshals directly into a typed input;
+// malformed provider JSON would therefore escape as NodeRunError before the
+// capability can return a Tool result. Reject the whole Assistant batch
+// atomically and pair every ToolCall with a non-empty, classified Tool message.
+func (r *brainGraphRuntime) handleInvalidToolArguments(ctx context.Context, message *schema.Message) (*WorkflowState, error) {
+	state, err := brainWorkflowState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if message == nil || len(message.ToolCalls) == 0 {
+		return r.handleUnstructured(ctx, message)
+	}
+	now := time.Now().UTC()
+	registryNode := brainRegistryNode(effectiveToolCategory(state))
+	invalid := make(map[string]error, len(message.ToolCalls))
+	for _, call := range message.ToolCalls {
+		if validationErr := r.tools.ValidateArgumentsForNode(registryNode, call.Function.Name, call.Function.Arguments); validationErr != nil {
+			invalid[call.ID] = validationErr
+		}
+	}
+	if len(invalid) == 0 {
+		return nil, fmt.Errorf("tool argument guard invoked without an invalid ToolCall")
+	}
+	for _, call := range message.ToolCalls {
+		envelope := envelopeFromToolCall(state, call.ID, call.Function.Name)
+		validationErr, isInvalid := invalid[call.ID]
+		code := "atomic_tool_batch_invalid"
+		summary := "tool call was not executed because another call in the same Assistant batch had invalid arguments"
+		if isInvalid {
+			code = "invalid_tool_arguments"
+			summary = "tool arguments were rejected before execution: " + compactToolArgumentError(validationErr)
+		}
+		provenance := domain.ToolResultProvenance{
+			ToolCallID: call.ID, ToolName: call.Function.Name, ToolSchemaHash: state.ExecutionSnapshot.ToolSchemaHash,
+			Collector: "brain-tool-argument-guard", TargetRefs: brainProvenanceTargets(state, envelope),
+			WindowStart: now, WindowEnd: now, ObservedAt: now,
+			RawArtifactHash: brainruntime.Hash(struct {
+				ToolName      string `json:"tool_name"`
+				ArgumentsHash string `json:"arguments_hash"`
+				Code          string `json:"code"`
+			}{call.Function.Name, brainruntime.Hash(call.Function.Arguments), code}),
+			ParserVersion: "brain-tool-argument-guard-v1", EvidenceIDs: []string{},
+		}
+		result := domain.ToolResultRecord{Class: domain.ToolResultError, Status: "REJECTED", Summary: summary, ConstraintCode: code, Infrastructure: false, OccurredAt: now, Provenance: provenance}
+		state.ToolExecutions = append(state.ToolExecutions, domain.BrainToolExecution{Envelope: envelope, Result: result})
+		state.Observations = append(state.Observations, result)
+		if !state.BrainBudget.ToolCallsExhausted {
+			state.BrainBudget.Usage.ToolCalls++
+		}
+		content, marshalErr := json.Marshal(map[string]any{
+			"class": result.Class, "status": result.Status, "summary": result.Summary,
+			"constraint_code": result.ConstraintCode, "infrastructure_failure": false,
+			"new_information": false, "provenance": result.Provenance,
+		})
+		if marshalErr != nil {
+			return nil, fmt.Errorf("encode invalid ToolCall result: %w", marshalErr)
+		}
+		state.BrainMessages = append(state.BrainMessages, schema.ToolMessage(string(content), call.ID, schema.WithToolName(call.Function.Name)))
+	}
+
+	if state.BrainBudget.Usage.StructuredCorrections >= state.BrainBudget.Limits.MaxStructuredCorrections {
+		termination, _ := brainruntime.NewTermination(domain.TerminationBudgetExhausted, currentBrainTurnID(state), finalHypothesisID(state), state.EvidenceSnapshotHash, &state.ExecutionSnapshot, []string{"structured action correction budget exhausted after invalid ToolCall arguments"}, state.BrainBudget)
+		state.Termination = &termination
+	} else {
+		state.BrainBudget.Usage.StructuredCorrections++
+		correction, _ := json.Marshal(map[string]any{
+			"type": "runtime_tool_argument_correction", "class": domain.ToolResultError,
+			"status": "REJECTED", "constraint_code": "invalid_tool_arguments",
+			"summary":      "The previous native ToolCall batch was not executed. Every call received a Tool result. Retry with exactly one JSON object that matches the exposed tool schema.",
+			"active_phase": state.BrainPhase, "active_tool_category": effectiveToolCategory(state),
+			"structured_corrections_remaining": state.BrainBudget.Limits.MaxStructuredCorrections - state.BrainBudget.Usage.StructuredCorrections,
+		})
+		state.BrainMessages = append(state.BrainMessages, schema.UserMessage(string(correction)))
+	}
+	message.ReasoningContent = ""
+	// Invalid provider arguments are a protocol correction, not an Incident
+	// observation and not a belief change. Retry the same phase and category.
+	state.PendingReflection = nil
+	r.syncInvestigation(state)
+	return state, nil
+}
+
+func compactToolArgumentError(err error) string {
+	if err == nil {
+		return "arguments do not match the exposed schema"
+	}
+	value := strings.Join(strings.Fields(err.Error()), " ")
+	if len(value) > 480 {
+		value = value[:480] + "..."
+	}
+	return value
+}
+
+func brainRegistryNode(category domain.BrainToolCategory) string {
+	switch category {
+	case domain.BrainToolEvidence:
+		return captools.NodeBrainEvidence
+	case domain.BrainToolRetrieval:
+		return captools.NodeBrainRetrieval
+	case domain.BrainToolRecovery:
+		return captools.NodeBrainRecovery
+	case domain.BrainToolControl:
+		return captools.NodeBrainControl
+	default:
+		return captools.NodeBrainReasoning
+	}
 }
 
 func (r *brainGraphRuntime) terminationRouter(_ context.Context, state *WorkflowState) (*WorkflowState, error) {

@@ -150,6 +150,9 @@ func buildBrainGraph(ctx context.Context, runtime *brainGraphRuntime) (compose.A
 	if err = graph.AddLambdaNode("tool_result_classifier", compose.InvokableLambda(runtime.classifyToolResults), compose.WithNodeName("tool_result_classifier")); err != nil {
 		return nil, err
 	}
+	if err = graph.AddLambdaNode("tool_argument_guard", compose.InvokableLambda(runtime.handleInvalidToolArguments), compose.WithNodeName("tool_argument_guard")); err != nil {
+		return nil, err
+	}
 
 	toolNodes := map[domain.BrainToolCategory]string{}
 	for category, registryNode := range registryNodes {
@@ -221,7 +224,7 @@ func buildBrainGraph(ctx context.Context, runtime *brainGraphRuntime) (compose.A
 	if err = graph.AddEdge("reflection_context_builder", "reflection_update"); err != nil {
 		return nil, err
 	}
-	destinations := map[string]bool{"structured_output_guard": true}
+	destinations := map[string]bool{"structured_output_guard": true, "tool_argument_guard": true}
 	for _, key := range toolNodes {
 		destinations[key] = true
 	}
@@ -233,11 +236,18 @@ func buildBrainGraph(ctx context.Context, runtime *brainGraphRuntime) (compose.A
 		if stateErr != nil {
 			return "", stateErr
 		}
-		return toolNodes[effectiveToolCategory(state)], nil
+		category := effectiveToolCategory(state)
+		registryNode := registryNodes[category]
+		for _, call := range message.ToolCalls {
+			if err := runtime.tools.ValidateArgumentsForNode(registryNode, call.Function.Name, call.Function.Arguments); err != nil {
+				return "tool_argument_guard", nil
+			}
+		}
+		return toolNodes[category], nil
 	}, destinations)); err != nil {
 		return nil, err
 	}
-	for _, edge := range [][2]string{{"tool_result_classifier", "observation_update"}, {"observation_update", "belief_update"}, {"belief_update", "belief_commit"}, {"belief_commit", "reflection_router"}, {"structured_output_guard", "reflection_router"}} {
+	for _, edge := range [][2]string{{"tool_result_classifier", "observation_update"}, {"observation_update", "belief_update"}, {"belief_update", "belief_commit"}, {"belief_commit", "reflection_router"}, {"structured_output_guard", "reflection_router"}, {"tool_argument_guard", "reflection_router"}} {
 		if err = graph.AddEdge(edge[0], edge[1]); err != nil {
 			return nil, err
 		}
