@@ -361,7 +361,6 @@ func (r *brainGraphRuntime) handleUnstructured(ctx context.Context, message *sch
 	if err != nil {
 		return nil, err
 	}
-	state.BrainBudget.Usage.StructuredCorrections++
 	now := time.Now().UTC()
 	intent := domain.AgentActionIntent{Intent: "reject an unstructured Assistant turn", ExpectedObservation: []string{"one native call to an exposed structured tool on the corrective turn"}}
 	envelope := newBrainEnvelope(state, "structured_output_guard", domain.BrainToolControl, intent)
@@ -384,10 +383,15 @@ func (r *brainGraphRuntime) handleUnstructured(ctx context.Context, message *sch
 	}
 	state.ToolExecutions = append(state.ToolExecutions, domain.BrainToolExecution{Envelope: envelope, Result: result})
 	state.Observations = append(state.Observations, result)
+	// MaxStructuredCorrections counts corrective retries actually granted to
+	// the model, not invalid outputs observed by the guard. Terminating on >=
+	// immediately after incrementing made a configured limit of three provide
+	// only two corrective turns.
 	if state.BrainBudget.Usage.StructuredCorrections >= state.BrainBudget.Limits.MaxStructuredCorrections {
 		termination, _ := brainruntime.NewTermination(domain.TerminationBudgetExhausted, currentBrainTurnID(state), finalHypothesisID(state), state.EvidenceSnapshotHash, &state.ExecutionSnapshot, []string{"structured action correction budget exhausted"}, state.BrainBudget)
 		state.Termination = &termination
 	} else {
+		state.BrainBudget.Usage.StructuredCorrections++
 		// A provider-format failure is not an Incident observation or a change in
 		// belief. Retry the same phase/category with the same Skill authority and
 		// an explicit non-empty Runtime status. Routing through cognitive

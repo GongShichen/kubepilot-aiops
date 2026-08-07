@@ -714,10 +714,23 @@ func TestStructuredOutputGuardStopsAfterCorrectionBudget(t *testing.T) {
 			t.Fatal("structured guard retained hidden reasoning")
 		}
 	}
+	if state.Termination != nil {
+		t.Fatalf("structured guard terminated before granting the configured corrective retries: %+v", state.Termination)
+	}
+	if state.BrainBudget.Usage.StructuredCorrections != budget.MaxStructuredCorrections || len(state.ToolExecutions) != budget.MaxStructuredCorrections || len(state.BrainMessages) != budget.MaxStructuredCorrections {
+		t.Fatalf("structured correction retries were not fully granted: usage=%+v executions=%d messages=%d", state.BrainBudget.Usage, len(state.ToolExecutions), len(state.BrainMessages))
+	}
+	finalMessage := &schema.Message{Role: schema.Assistant, Content: "still-prose-only", ReasoningContent: "hidden"}
+	if _, err := runtime.handleUnstructured(withBrainWorkflowState(context.Background(), state), finalMessage); err != nil {
+		t.Fatal(err)
+	}
+	if finalMessage.ReasoningContent != "" {
+		t.Fatal("structured guard retained hidden reasoning on terminal rejection")
+	}
 	if state.Termination == nil || state.Termination.Reason != domain.TerminationBudgetExhausted {
 		t.Fatalf("structured correction budget did not terminate explicitly: %+v", state.Termination)
 	}
-	if state.BrainBudget.Usage.StructuredCorrections != budget.MaxStructuredCorrections || len(state.ToolExecutions) != budget.MaxStructuredCorrections || len(state.BrainMessages) != budget.MaxStructuredCorrections-1 {
+	if state.BrainBudget.Usage.StructuredCorrections != budget.MaxStructuredCorrections || len(state.ToolExecutions) != budget.MaxStructuredCorrections+1 || len(state.BrainMessages) != budget.MaxStructuredCorrections {
 		t.Fatalf("structured correction accounting is inconsistent: usage=%+v executions=%d messages=%d", state.BrainBudget.Usage, len(state.ToolExecutions), len(state.BrainMessages))
 	}
 	for _, execution := range state.ToolExecutions {
