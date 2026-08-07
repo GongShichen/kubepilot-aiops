@@ -56,7 +56,7 @@ func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Messag
 	sanitized, record, persist := normalizeBrainAssistantOutput(message, "", now)
 	if state, stateErr := brainWorkflowState(ctx); stateErr == nil {
 		record.TurnID = currentBrainTurnID(state)
-		state.AssistantTurns = append(state.AssistantTurns, record)
+		recordBrainAssistantTurn(state, record)
 		if persist {
 			state.BrainMessages = append(state.BrainMessages, sanitized)
 		}
@@ -291,6 +291,10 @@ func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowSta
 	state.SkillActivations = append(state.SkillActivations, resolved.Activations...)
 	turn := domain.BrainTurn{ID: "turn:" + ulid.Make().String(), Sequence: len(state.BrainTurns) + 1, Phase: state.BrainPhase, SkillRefs: append([]domain.SkillRef(nil), resolved.Refs...), ToolCategory: effectiveToolCategory(state), StartedAt: time.Now().UTC()}
 	state.BrainTurns = append(state.BrainTurns, turn)
+	// Allocate the audit slot while WorkflowState is the graph payload. The
+	// ChatModel adapter later updates this existing element instead of appending
+	// a new slice header outside the graph's state edge.
+	state.AssistantTurns = append(state.AssistantTurns, domain.AssistantTurnRecord{TurnID: turn.ID, ObservedAt: turn.StartedAt})
 	state.BrainBudget.Usage.Turns++
 	state.EvidenceSnapshotHash = brainruntime.EvidenceSnapshotHash(state.Incident.Evidence)
 	currentSnapshot := domain.ExecutionSnapshot{SkillSnapshotHash: r.resolver.SnapshotHash(), ModelConfigHash: state.Incident.ModelConfigHash, ToolSchemaHash: r.toolHash, PolicyHash: r.policyHash}
@@ -501,6 +505,22 @@ func normalizeBrainAssistantOutput(message *schema.Message, turnID string, obser
 		ensureBrainAssistantToolCallContent(&sanitized)
 	}
 	return &sanitized, record, record.Persisted
+}
+
+func recordBrainAssistantTurn(state *WorkflowState, record domain.AssistantTurnRecord) {
+	if state == nil {
+		return
+	}
+	for index := len(state.AssistantTurns) - 1; index >= 0; index-- {
+		if state.AssistantTurns[index].TurnID == record.TurnID {
+			state.AssistantTurns[index] = record
+			return
+		}
+	}
+	// Defensive fallback for direct adapter tests or a future model node that
+	// does not pass through contextBuilder. Production graph turns always have
+	// a preallocated slot.
+	state.AssistantTurns = append(state.AssistantTurns, record)
 }
 
 func ensureBrainAssistantToolCallContent(message *schema.Message) {

@@ -184,6 +184,14 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 	if len(inv.AgentHypotheses) != 2 || len(inv.HypothesisGroundings) != 2 || len(inv.Reflections) == 0 || inv.AgentDiagnosis == nil || inv.AgentDiagnosis.Provisional {
 		t.Fatalf("incomplete Brain audit chain: hypotheses=%d groundings=%d reflections=%d diagnosis=%+v", len(inv.AgentHypotheses), len(inv.HypothesisGroundings), len(inv.Reflections), inv.AgentDiagnosis)
 	}
+	if len(inv.AssistantTurns) != len(inv.BrainTurns) {
+		t.Fatalf("Assistant provider audit did not follow Brain turns: assistant=%d brain=%d", len(inv.AssistantTurns), len(inv.BrainTurns))
+	}
+	for _, turn := range inv.AssistantTurns {
+		if turn.TurnID == "" || turn.ObservedAt.IsZero() || !turn.Persisted || !turn.ToolCallPresent {
+			t.Fatalf("incomplete Assistant turn audit: %+v", turn)
+		}
+	}
 	if inv.Termination == nil || inv.Termination.Reason != domain.TerminationDiagnosisConfident || inv.WorkflowAttempt == nil || inv.WorkflowAttempt.Status != domain.WorkflowAttemptInterrupted {
 		t.Fatalf("unexpected pre-approval termination/attempt: termination=%+v attempt=%+v", inv.Termination, inv.WorkflowAttempt)
 	}
