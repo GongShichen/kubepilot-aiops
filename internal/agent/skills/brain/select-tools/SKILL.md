@@ -35,17 +35,17 @@ Emit one or more read-only calls in one category, or one serial reasoning/contro
 
 ## Output Example
 
-Activate the required optional Skill before selecting its category. When every
-accepted Skill narrows to the same non-control category, the Runtime returns
-that category in the activation result and the next turn executes it directly:
+Request the exact optional Skill and its category atomically. The Runtime
+validates the Skill dependency graph and verifies that the requested Skill
+actually grants the requested category. It never guesses a Skill from the
+category:
 
 ```json
-{"tool":"request_skills","arguments":{"intent":"load the metric investigation procedure","expected_observation":["Skill activation decision"],"skill_ids":["investigate-metrics"],"reason":"a metric observation can distinguish the active hypotheses","trigger":"HYPOTHESIS_CONFLICT"}}
+{"tool":"select_tool_category","arguments":{"intent":"route the next turn to bounded metric collection","expected_observation":["metric Skill activation and EVIDENCE category selection"],"category":"EVIDENCE","skill_ids":["investigate-metrics"],"reason":"a metric observation can distinguish the active hypotheses","trigger":"HYPOTHESIS_CONFLICT"}}
 ```
 
-```json
-{"tool":"select_tool_category","arguments":{"intent":"route the next turn to bounded evidence collection","expected_observation":["EVIDENCE category activation"],"category":"EVIDENCE"}}
-```
+Use `request_skills` separately only when repairing a prior constraint from a
+Reflection turn and no category transition can yet be selected.
 
 ## Stop & Failure Conditions
 

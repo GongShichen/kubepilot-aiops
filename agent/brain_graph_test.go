@@ -128,26 +128,13 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 			if available["query_metrics"] {
 				return call("query_metrics", map[string]any{"intent": "test local resource pressure", "expected_observation": []string{"current resource saturation facts"}, "targets": []any{target}, "hypothesis_ids": hypothesisIDs, "evidence_need": []string{"resource pressure signal"}, "signal_kinds": []string{"cpu", "memory"}, "window_minutes": 5})
 			}
-			if strings.Contains(system, `<skill id="investigate-metrics"`) {
-				return call("select_tool_category", map[string]any{"intent": "activate the metric evidence boundary", "expected_observation": []string{"Evidence ToolsNode selected for the next turn"}, "category": "EVIDENCE"})
-			}
-			attemptedWithoutSkill := false
-			for _, prior := range m.history {
-				attemptedWithoutSkill = attemptedWithoutSkill || prior == string(domain.BrainPhaseInvestigation)+":select_tool_category"
-			}
-			if !attemptedWithoutSkill {
-				return call("select_tool_category", map[string]any{"intent": "attempt evidence collection before the required Skill is active", "expected_observation": []string{"bounded category decision"}, "category": "EVIDENCE"})
-			}
-			return call("request_skills", map[string]any{"intent": "load the metric investigation procedure", "expected_observation": []string{"versioned metric Skill activation decision"}, "skill_ids": []string{"investigate-metrics"}, "reason": "resource pressure is a leading discriminating observation", "trigger": "HYPOTHESIS_CONFLICT"})
+			return call("select_tool_category", map[string]any{"intent": "activate the metric evidence boundary", "expected_observation": []string{"metric Skill activation and Evidence ToolsNode selection"}, "category": "EVIDENCE", "skill_ids": []string{"investigate-metrics"}, "reason": "resource pressure is a leading discriminating observation", "trigger": "HYPOTHESIS_CONFLICT"})
 		}
 		if !hasKubernetes {
 			if available["inspect_kubernetes"] {
 				return call("inspect_kubernetes", map[string]any{"intent": "obtain an independent Kubernetes source", "expected_observation": []string{"current workload readiness and restart facts"}, "targets": []any{target}, "hypothesis_ids": hypothesisIDs, "evidence_need": []string{"resource pressure signal"}, "signal_kinds": []string{"workload", "pod"}, "window_minutes": 5})
 			}
-			if strings.Contains(system, `<skill id="inspect-kubernetes"`) {
-				return call("select_tool_category", map[string]any{"intent": "activate the Kubernetes evidence boundary", "expected_observation": []string{"Evidence ToolsNode selected for the next turn"}, "category": "EVIDENCE"})
-			}
-			return call("request_skills", map[string]any{"intent": "load the Kubernetes inspection procedure", "expected_observation": []string{"versioned Kubernetes Skill activation decision"}, "skill_ids": []string{"inspect-kubernetes"}, "reason": "automatic recovery requires an independent Kubernetes source", "trigger": "GROUNDING_GAP"})
+			return call("select_tool_category", map[string]any{"intent": "activate the Kubernetes evidence boundary", "expected_observation": []string{"Kubernetes Skill activation and Evidence ToolsNode selection"}, "category": "EVIDENCE", "skill_ids": []string{"inspect-kubernetes"}, "reason": "automatic recovery requires an independent Kubernetes source", "trigger": "GROUNDING_GAP"})
 		}
 		grounded := map[string]domain.HypothesisGrounding{}
 		for _, grounding := range payload.Groundings {
@@ -854,6 +841,70 @@ func TestReflectionSkillRequestResolvesAgainstResumePhase(t *testing.T) {
 	}
 	if !found || !resolved.AllowedCategories[domain.BrainToolEvidence] {
 		t.Fatalf("resumed Skill bundle did not grant its bounded Evidence category: refs=%+v categories=%+v", resolved.Refs, resolved.AllowedCategories)
+	}
+}
+
+func TestToolCategorySelectionAtomicallyActivatesBrainChosenSkill(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "atomic-skill-category", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase:            domain.BrainPhaseInvestigation,
+			BrainTurns:            []domain.BrainTurn{{ID: "turn:atomic", Sequence: 1}},
+			BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
+			BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			ActiveToolCategory:    domain.BrainToolReasoning,
+			ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
+		},
+	}
+	output, err := runBrainSelectCategory(withBrainWorkflowState(context.Background(), state), resolver, selectBrainCategoryInput{
+		Intent: "select bounded metric evidence", ExpectedObservation: []string{"metric Skill activation and category decision"}, Category: domain.BrainToolEvidence,
+		SkillIDs: []string{"investigate-metrics"}, Reason: "metrics distinguish admitted hypotheses", Trigger: "HYPOTHESIS_CONFLICT",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Class != domain.ToolResultValidation || output.Status != "OK" || output.SelectedCategory != domain.BrainToolEvidence || len(output.RequestedSkills) != 1 || output.RequestedSkills[0].SkillID != "investigate-metrics" {
+		t.Fatalf("atomic Skill/category decision was not admitted: %+v", output)
+	}
+	(&brainGraphRuntime{}).applyCapabilityOutput(state, output)
+	if state.ActiveToolCategory != domain.BrainToolEvidence || len(state.RequestedSkills) != 1 || state.PendingReflection != nil {
+		t.Fatalf("atomic Skill/category decision did not update the next Brain boundary: %+v", state.BrainState)
+	}
+	resolved, err := resolver.Resolve(state.BrainPhase, state.RequestedSkills, state.BrainBudget.Limits.MaxOptionalSkillsPerTurn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.AllowedCategories[domain.BrainToolEvidence] {
+		t.Fatalf("Brain-chosen Skill did not grant the selected category: %+v", resolved.AllowedCategories)
+	}
+}
+
+func TestToolCategorySelectionRejectsSkillCategoryMismatch(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "skill-category-mismatch", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase: domain.BrainPhaseInvestigation, BrainTurns: []domain.BrainTurn{{ID: "turn:mismatch", Sequence: 1}},
+			BrainToolPolicy: brainruntime.DefaultToolCallingPolicy(), BrainBudget: domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			ActiveToolCategory: domain.BrainToolReasoning, ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
+		},
+	}
+	output, err := runBrainSelectCategory(withBrainWorkflowState(context.Background(), state), resolver, selectBrainCategoryInput{
+		Intent: "select retrieval with a metric-only Skill", ExpectedObservation: []string{"explicit category mismatch"}, Category: domain.BrainToolRetrieval,
+		SkillIDs: []string{"investigate-metrics"}, Reason: "test mismatch", Trigger: "HYPOTHESIS_CONFLICT",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Class != domain.ToolResultConstraint || output.Status != "REJECTED" || output.ConstraintCode != "tool_category_not_granted_by_requested_skill" || len(output.RequestedSkills) != 0 {
+		t.Fatalf("Skill/category mismatch expanded authority: %+v", output)
 	}
 }
 

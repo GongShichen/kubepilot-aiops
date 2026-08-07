@@ -167,6 +167,9 @@ type selectBrainCategoryInput struct {
 	Intent              string                   `json:"intent" jsonschema:"required"`
 	ExpectedObservation []string                 `json:"expected_observation" jsonschema:"required,minItems=1"`
 	Category            domain.BrainToolCategory `json:"category" jsonschema:"required,enum=EVIDENCE,enum=RETRIEVAL,enum=REASONING,enum=RECOVERY,enum=CONTROL"`
+	SkillIDs            []string                 `json:"skill_ids" jsonschema:"required,minItems=1,maxItems=2"`
+	Reason              string                   `json:"reason" jsonschema:"required"`
+	Trigger             string                   `json:"trigger" jsonschema:"required"`
 }
 
 type advanceBrainPhaseInput struct {
@@ -364,8 +367,8 @@ func buildBrainCapabilities(deps constrainedToolDeps, resolver *BrainSkillResolv
 	} else {
 		capabilities = append(capabilities, capability)
 	}
-	if capability, err := captools.NewCapability("select_tool_category", "Select the single primary Tool Category for the next Brain turn.", func(ctx context.Context, input selectBrainCategoryInput) (brainCapabilityOutput, error) {
-		return runBrainSelectCategory(ctx, input)
+	if capability, err := captools.NewCapability("select_tool_category", "Atomically request exact optional Skill IDs and select the single primary Tool Category they grant for the next Brain turn.", func(ctx context.Context, input selectBrainCategoryInput) (brainCapabilityOutput, error) {
+		return runBrainSelectCategory(ctx, resolver, input)
 	}, brainRegistration(captools.CategoryAgent, controlNodes...)); err != nil {
 		return nil, err
 	} else {
@@ -1007,6 +1010,18 @@ func runBrainRequestSkills(ctx context.Context, resolver *BrainSkillResolver, in
 	if denied := authorizeBrainTool(state, envelope); denied != nil {
 		return *denied, nil
 	}
+	accepted, rejected, resolved, resolveErr := resolveBrainSkillRequests(state, resolver, input)
+	if resolveErr != nil {
+		return constraintBrainOutput(envelope, "skill_resolution_failed", resolveErr.Error()), nil
+	}
+	if len(accepted) == 0 {
+		return brainCapabilityOutput{Class: domain.ToolResultConstraint, Status: "REJECTED", Summary: skillActivationSummary(nil, rejected), ConstraintCode: "skill_request_not_activated", SkillActivations: rejected, NewInformation: false, Provenance: baseBrainProvenance(envelope, "skill-resolver-v1", resolved.Activations)}, nil
+	}
+	selectedCategory := resolver.unambiguousRequestedCategory(accepted)
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: skillActivationSummary(accepted, rejected), RequestedSkills: accepted, SkillActivations: rejected, SelectedCategory: selectedCategory, NewInformation: true, Provenance: baseBrainProvenance(envelope, "skill-resolver-v1", resolved.Activations)}, nil
+}
+
+func resolveBrainSkillRequests(state *WorkflowState, resolver *BrainSkillResolver, input requestBrainSkillsInput) ([]SkillRequest, []domain.SkillActivation, ResolvedBrainSkills, error) {
 	requests := make([]SkillRequest, 0, len(input.SkillIDs))
 	for _, id := range input.SkillIDs {
 		requests = append(requests, SkillRequest{SkillID: id, Reason: input.Reason, Trigger: input.Trigger, RequestedBy: "BRAIN", RequestedTurn: currentBrainTurnID(state)})
@@ -1025,9 +1040,9 @@ func runBrainRequestSkills(ctx context.Context, resolver *BrainSkillResolver, in
 	if resolutionPhase == domain.BrainPhaseReflection && state.ResumeBrainPhase != "" {
 		resolutionPhase = state.ResumeBrainPhase
 	}
-	resolved, resolveErr := resolver.Resolve(resolutionPhase, requests, maxOptional)
-	if resolveErr != nil {
-		return constraintBrainOutput(envelope, "skill_resolution_failed", resolveErr.Error()), nil
+	resolved, err := resolver.Resolve(resolutionPhase, requests, maxOptional)
+	if err != nil {
+		return nil, nil, ResolvedBrainSkills{}, err
 	}
 	accepted := []SkillRequest{}
 	rejected := []domain.SkillActivation{}
@@ -1049,11 +1064,7 @@ func runBrainRequestSkills(ctx context.Context, resolver *BrainSkillResolver, in
 			rejected = append(rejected, domain.SkillActivation{SkillID: request.SkillID, Phase: resolutionPhase, Reason: request.Reason, Trigger: request.Trigger, RequestedBy: request.RequestedBy, RequestedTurn: request.RequestedTurn, Status: "REJECTED", RejectedReason: "activation_decision_missing", ActivatedAt: time.Now().UTC()})
 		}
 	}
-	if len(accepted) == 0 {
-		return brainCapabilityOutput{Class: domain.ToolResultConstraint, Status: "REJECTED", Summary: skillActivationSummary(nil, rejected), ConstraintCode: "skill_request_not_activated", SkillActivations: rejected, NewInformation: false, Provenance: baseBrainProvenance(envelope, "skill-resolver-v1", resolved.Activations)}, nil
-	}
-	selectedCategory := resolver.unambiguousRequestedCategory(accepted)
-	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: skillActivationSummary(accepted, rejected), RequestedSkills: accepted, SkillActivations: rejected, SelectedCategory: selectedCategory, NewInformation: true, Provenance: baseBrainProvenance(envelope, "skill-resolver-v1", resolved.Activations)}, nil
+	return accepted, rejected, resolved, nil
 }
 
 func skillActivationSummary(accepted []SkillRequest, rejected []domain.SkillActivation) string {
@@ -1096,7 +1107,7 @@ func runBrainReadSkillReference(ctx context.Context, resolver *BrainSkillResolve
 	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "active Skill reference loaded", ReferenceContent: content, ReferenceID: input.SkillID + "/" + input.Reference, NewInformation: true, Provenance: baseBrainProvenance(envelope, "skill-reference-v1", content)}, nil
 }
 
-func runBrainSelectCategory(ctx context.Context, input selectBrainCategoryInput) (brainCapabilityOutput, error) {
+func runBrainSelectCategory(ctx context.Context, resolver *BrainSkillResolver, input selectBrainCategoryInput) (brainCapabilityOutput, error) {
 	state, err := brainWorkflowState(ctx)
 	if err != nil {
 		return brainCapabilityOutput{}, err
@@ -1105,14 +1116,43 @@ func runBrainSelectCategory(ctx context.Context, input selectBrainCategoryInput)
 	if denied := authorizeBrainTool(state, envelope); denied != nil {
 		return *denied, nil
 	}
-	allowed := input.Category == domain.BrainToolControl
-	for _, category := range state.ActiveSkillCategories {
-		allowed = allowed || category == input.Category
+	request := requestBrainSkillsInput{Intent: input.Intent, ExpectedObservation: input.ExpectedObservation, SkillIDs: input.SkillIDs, Reason: input.Reason, Trigger: input.Trigger}
+	accepted, rejected, resolved, resolveErr := resolveBrainSkillRequests(state, resolver, request)
+	if resolveErr != nil {
+		return constraintBrainOutput(envelope, "skill_resolution_failed", resolveErr.Error()), nil
 	}
-	if !allowed {
-		return constraintBrainOutput(envelope, "tool_category_not_granted_by_skill", "requested Tool Category is not granted by the active Skill bundle"), nil
+	if len(accepted) == 0 {
+		return brainCapabilityOutput{Class: domain.ToolResultConstraint, Status: "REJECTED", Summary: skillActivationSummary(nil, rejected), ConstraintCode: "skill_request_not_activated", SkillActivations: rejected, NewInformation: false, Provenance: baseBrainProvenance(envelope, "skill-category-router-v1", resolved.Activations)}, nil
 	}
-	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "next primary Tool Category selected", SelectedCategory: input.Category, NewInformation: input.Category != state.ActiveToolCategory, Provenance: baseBrainProvenance(envelope, "tool-category-router-v1", input.Category)}, nil
+	// Dependencies may be broad routing Skills (for example select-tools). They
+	// must not lend one of their categories to a narrower requested Skill. Only
+	// the exact IDs chosen by the Brain may grant the selected category.
+	if !brainRequestedSkillsGrantCategory(resolver, accepted, input.Category) {
+		for _, request := range accepted {
+			rejected = append(rejected, domain.SkillActivation{SkillID: request.SkillID, Phase: state.BrainPhase, Reason: request.Reason, Trigger: request.Trigger, RequestedBy: request.RequestedBy, RequestedTurn: request.RequestedTurn, Status: "REJECTED", RejectedReason: "requested_skill_does_not_grant_category", ActivatedAt: time.Now().UTC()})
+		}
+		return brainCapabilityOutput{Class: domain.ToolResultConstraint, Status: "REJECTED", Summary: skillActivationSummary(nil, rejected), ConstraintCode: "tool_category_not_granted_by_requested_skill", SkillActivations: rejected, NewInformation: false, Provenance: baseBrainProvenance(envelope, "skill-category-router-v1", resolved.Activations)}, nil
+	}
+	summary := skillActivationSummary(accepted, rejected) + "; selected Tool Category: " + string(input.Category)
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: summary, RequestedSkills: accepted, SkillActivations: rejected, SelectedCategory: input.Category, NewInformation: true, Provenance: baseBrainProvenance(envelope, "skill-category-router-v1", resolved.Activations)}, nil
+}
+
+func brainRequestedSkillsGrantCategory(resolver *BrainSkillResolver, requests []SkillRequest, category domain.BrainToolCategory) bool {
+	if resolver == nil || len(requests) == 0 {
+		return false
+	}
+	for _, request := range requests {
+		pkg, ok := resolver.packages[request.SkillID]
+		if !ok {
+			continue
+		}
+		for _, granted := range pkg.Spec.AllowedToolCategories {
+			if granted == category {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func runBrainAdvancePhase(ctx context.Context, input advanceBrainPhaseInput) (brainCapabilityOutput, error) {

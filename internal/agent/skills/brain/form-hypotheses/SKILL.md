@@ -45,4 +45,15 @@ Stop when a bounded competing set exists or no hypothesis is verifiable.
 
 ## Handoff
 
-Hand off to Admission results, select-tools, or escalate-incident.
+After the Runtime admits the competing set, the next action must atomically
+request an exact phase-compatible Optional Skill and select the Tool Category
+that Skill grants. Do not call `select_tool_category` without `skill_ids`,
+`reason`, and `trigger`, and do not select a category before its Skill is
+admitted. For example, to test a resource-pressure hypothesis, invoke this as a
+native tool call (never as Assistant text):
+
+```json
+{"tool":"select_tool_category","arguments":{"intent":"activate bounded metric evidence collection","expected_observation":["metric Skill activation and EVIDENCE category selection"],"category":"EVIDENCE","skill_ids":["investigate-metrics"],"reason":"current metrics distinguish the admitted hypotheses","trigger":"HYPOTHESIS_CONFLICT"}}
+```
+
+Hand off to the activated evidence/retrieval Skill or escalate-incident.

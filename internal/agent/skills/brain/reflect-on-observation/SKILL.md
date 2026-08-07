@@ -45,6 +45,15 @@ With an admitted hypothesis, commit only the subjective confidence change:
 
 Without an admitted hypothesis, use the `submit_hypotheses` example from `form-hypotheses` or request the missing Skill; do not invent a hypothesis ID.
 
+When the trigger is `CONSTRAINT_FAILURE` with
+`tool_category_not_granted_by_skill`, repair the procedural boundary by
+requesting an exact ID from `available_optional_skills`. Invoke this through the
+native tool-call channel, never as Assistant text:
+
+```json
+{"tool":"request_skills","arguments":{"intent":"repair the denied evidence category with a bounded procedure","expected_observation":["phase-compatible Skill activation decision"],"skill_ids":["<exact-available-skill-id>"],"reason":"the selected observation can distinguish admitted hypotheses","trigger":"CONSTRAINT_FAILURE"}}
+```
+
 ## Stop & Failure Conditions
 
 Stop when belief changes are committed, the missing Skill or hypothesis is submitted, or the trigger cannot be resolved safely. Never claim success after an empty or unclassified Tool Result.
