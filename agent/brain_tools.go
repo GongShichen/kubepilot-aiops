@@ -207,6 +207,7 @@ type brainCapabilityOutput struct {
 	Diagnosis         *domain.AgentDiagnosis        `json:"diagnosis,omitempty"`
 	RecoveryPlan      *domain.AgentRecoveryPlan     `json:"recovery_plan,omitempty"`
 	RequestedSkills   []SkillRequest                `json:"requested_skills,omitempty"`
+	SkillActivations  []domain.SkillActivation      `json:"skill_activations,omitempty"`
 	SelectedCategory  domain.BrainToolCategory      `json:"selected_category,omitempty"`
 	NextPhase         domain.BrainPhase             `json:"next_phase,omitempty"`
 	Termination       *domain.TerminationEvent      `json:"termination,omitempty"`
@@ -778,15 +779,54 @@ func runBrainRequestSkills(ctx context.Context, resolver *BrainSkillResolver, in
 		return constraintBrainOutput(envelope, "skill_resolution_failed", resolveErr.Error()), nil
 	}
 	accepted := []SkillRequest{}
+	rejected := []domain.SkillActivation{}
 	for _, request := range requests {
+		matched := false
 		for _, activation := range resolved.Activations {
-			if activation.SkillID == request.SkillID && activation.Status == "ACTIVATED" {
-				accepted = append(accepted, request)
-				break
+			if activation.SkillID != request.SkillID {
+				continue
 			}
+			matched = true
+			if activation.Status == "ACTIVATED" {
+				accepted = append(accepted, request)
+			} else {
+				rejected = append(rejected, activation)
+			}
+			break
+		}
+		if !matched {
+			rejected = append(rejected, domain.SkillActivation{SkillID: request.SkillID, Phase: resolutionPhase, Reason: request.Reason, Trigger: request.Trigger, RequestedBy: request.RequestedBy, RequestedTurn: request.RequestedTurn, Status: "REJECTED", RejectedReason: "activation_decision_missing", ActivatedAt: time.Now().UTC()})
 		}
 	}
-	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "optional Skill request validated for the next turn", RequestedSkills: accepted, NewInformation: len(accepted) > 0, Provenance: baseBrainProvenance(envelope, "skill-resolver-v1", resolved.Refs)}, nil
+	if len(accepted) == 0 {
+		return brainCapabilityOutput{Class: domain.ToolResultConstraint, Status: "REJECTED", Summary: skillActivationSummary(nil, rejected), ConstraintCode: "skill_request_not_activated", SkillActivations: rejected, NewInformation: false, Provenance: baseBrainProvenance(envelope, "skill-resolver-v1", resolved.Activations)}, nil
+	}
+	selectedCategory := resolver.unambiguousRequestedCategory(accepted)
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: skillActivationSummary(accepted, rejected), RequestedSkills: accepted, SkillActivations: rejected, SelectedCategory: selectedCategory, NewInformation: true, Provenance: baseBrainProvenance(envelope, "skill-resolver-v1", resolved.Activations)}, nil
+}
+
+func skillActivationSummary(accepted []SkillRequest, rejected []domain.SkillActivation) string {
+	activatedIDs := make([]string, 0, len(accepted))
+	for _, request := range accepted {
+		activatedIDs = append(activatedIDs, request.SkillID)
+	}
+	sort.Strings(activatedIDs)
+	rejectedDecisions := make([]string, 0, len(rejected))
+	for _, activation := range rejected {
+		rejectedDecisions = append(rejectedDecisions, activation.SkillID+":"+activation.RejectedReason)
+	}
+	sort.Strings(rejectedDecisions)
+	parts := []string{}
+	if len(activatedIDs) > 0 {
+		parts = append(parts, "activated Skills: "+strings.Join(activatedIDs, ", "))
+	}
+	if len(rejectedDecisions) > 0 {
+		parts = append(parts, "rejected Skills: "+strings.Join(rejectedDecisions, ", "))
+	}
+	if len(parts) == 0 {
+		return "no Skill activation decision was produced"
+	}
+	return strings.Join(parts, "; ")
 }
 
 func runBrainReadSkillReference(ctx context.Context, resolver *BrainSkillResolver, input readBrainSkillReferenceInput) (brainCapabilityOutput, error) {

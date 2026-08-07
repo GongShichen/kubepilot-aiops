@@ -78,6 +78,13 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 	case domain.BrainPhasePlanning:
 		return call("submit_investigation_plan", map[string]any{"intent": "create a falsifiable investigation plan", "expected_observation": []string{"persisted investigation goals"}, "objective": "separate resource pressure from deployment regression", "goals": []string{"collect independent runtime and Kubernetes facts", "validate two competing hypotheses"}, "stop_conditions": []string{"two hypotheses validated against current evidence"}})
 	case domain.BrainPhaseReflection:
+		// Exercise the real repair path used when the Brain selected an Evidence
+		// category before loading its phase-compatible Skill. The Reflection must
+		// request that Skill, return to INVESTIGATION, activate it, and only then
+		// select/execute the Evidence category.
+		if len(payload.Evidence) == 0 && !strings.Contains(system, `<skill id="investigate-metrics"`) {
+			return call("request_skills", map[string]any{"intent": "repair the denied evidence category with its bounded metric procedure", "expected_observation": []string{"phase-compatible metric Skill activation"}, "skill_ids": []string{"investigate-metrics"}, "reason": "resource pressure is the leading discriminating observation", "trigger": "CONSTRAINT_FAILURE"})
+		}
 		selected := ""
 		for _, grounding := range payload.Groundings {
 			if grounding.Level == domain.GroundingRefuted {
@@ -114,6 +121,13 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 			}
 			if strings.Contains(system, `<skill id="investigate-metrics"`) {
 				return call("select_tool_category", map[string]any{"intent": "activate the metric evidence boundary", "expected_observation": []string{"Evidence ToolsNode selected for the next turn"}, "category": "EVIDENCE"})
+			}
+			attemptedWithoutSkill := false
+			for _, prior := range m.history {
+				attemptedWithoutSkill = attemptedWithoutSkill || prior == string(domain.BrainPhaseInvestigation)+":select_tool_category"
+			}
+			if !attemptedWithoutSkill {
+				return call("select_tool_category", map[string]any{"intent": "attempt evidence collection before the required Skill is active", "expected_observation": []string{"bounded category decision"}, "category": "EVIDENCE"})
 			}
 			return call("request_skills", map[string]any{"intent": "load the metric investigation procedure", "expected_observation": []string{"versioned metric Skill activation decision"}, "skill_ids": []string{"investigate-metrics"}, "reason": "resource pressure is a leading discriminating observation", "trigger": "HYPOTHESIS_CONFLICT"})
 		}
@@ -193,7 +207,7 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 		}
 	}
 	if inv.Termination == nil || inv.Termination.Reason != domain.TerminationDiagnosisConfident || inv.WorkflowAttempt == nil || inv.WorkflowAttempt.Status != domain.WorkflowAttemptInterrupted {
-		t.Fatalf("unexpected pre-approval termination/attempt: termination=%+v attempt=%+v", inv.Termination, inv.WorkflowAttempt)
+		t.Fatalf("unexpected pre-approval termination/attempt: termination=%+v attempt=%+v history=%v", inv.Termination, inv.WorkflowAttempt, brainModel.history)
 	}
 	for _, execution := range inv.ToolExecutions {
 		if execution.Result.Provenance.ToolCallID == "" || execution.Result.Provenance.ToolName == "" || execution.Result.Provenance.ToolSchemaHash == "" || execution.Result.Provenance.ObservedAt.IsZero() {
@@ -473,12 +487,12 @@ func TestReflectionSkillRequestResolvesAgainstResumePhase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output.Class != domain.ToolResultValidation || len(output.RequestedSkills) != 1 || output.RequestedSkills[0].SkillID != "investigate-metrics" {
+	if output.Class != domain.ToolResultValidation || len(output.RequestedSkills) != 1 || output.RequestedSkills[0].SkillID != "investigate-metrics" || output.SelectedCategory != domain.BrainToolEvidence {
 		t.Fatalf("reflection Skill request was not admitted for the resume phase: %+v", output)
 	}
 	(&brainGraphRuntime{}).applyCapabilityOutput(state, output)
-	if state.BrainPhase != domain.BrainPhaseInvestigation || state.ResumeBrainPhase != "" || len(state.RequestedSkills) != 1 {
-		t.Fatalf("reflection did not resume investigation with the admitted Skill: phase=%s resume=%s requests=%+v", state.BrainPhase, state.ResumeBrainPhase, state.RequestedSkills)
+	if state.BrainPhase != domain.BrainPhaseInvestigation || state.ResumeBrainPhase != "" || len(state.RequestedSkills) != 1 || state.ActiveToolCategory != domain.BrainToolEvidence {
+		t.Fatalf("reflection did not resume investigation with the admitted Skill: phase=%s resume=%s category=%s requests=%+v", state.BrainPhase, state.ResumeBrainPhase, state.ActiveToolCategory, state.RequestedSkills)
 	}
 	if !state.Reflections[0].Accepted {
 		t.Fatalf("corrective Skill request was not recorded as an accepted reflection: %+v", state.Reflections[0])
@@ -493,5 +507,34 @@ func TestReflectionSkillRequestResolvesAgainstResumePhase(t *testing.T) {
 	}
 	if !found || !resolved.AllowedCategories[domain.BrainToolEvidence] {
 		t.Fatalf("resumed Skill bundle did not grant its bounded Evidence category: refs=%+v categories=%+v", resolved.Refs, resolved.AllowedCategories)
+	}
+}
+
+func TestRejectedSkillRequestReturnsExplicitConstraintAndAudit(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &WorkflowState{
+		Incident:              &domain.Incident{ID: "rejected-skill", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainPhase:            domain.BrainPhaseReflection,
+		ResumeBrainPhase:      domain.BrainPhaseInvestigation,
+		BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
+		BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		ActiveToolCategory:    domain.BrainToolReasoning,
+		ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning, domain.BrainToolControl},
+	}
+	output, err := runBrainRequestSkills(withBrainWorkflowState(context.Background(), state), resolver, requestBrainSkillsInput{
+		Intent: "request a phase-incompatible capability", ExpectedObservation: []string{"explicit rejection decision"}, SkillIDs: []string{"plan-recovery"}, Reason: "attempt recovery during investigation", Trigger: "CONSTRAINT_FAILURE",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Class != domain.ToolResultConstraint || output.Status != "REJECTED" || output.ConstraintCode != "skill_request_not_activated" || output.NewInformation || len(output.RequestedSkills) != 0 || len(output.SkillActivations) != 1 || !strings.Contains(output.Summary, "plan-recovery:incompatible_phase") {
+		t.Fatalf("rejected Skill request did not return its actual execution state: %+v", output)
+	}
+	(&brainGraphRuntime{}).applyCapabilityOutput(state, output)
+	if len(state.SkillActivations) != 1 || state.SkillActivations[0].RejectedReason != "incompatible_phase" || state.PendingReflection == nil || *state.PendingReflection != domain.ReflectionConstraintFailure {
+		t.Fatalf("rejected Skill decision was not retained in the audit state: %+v", state)
 	}
 }

@@ -31,7 +31,9 @@ Emit one or more read-only calls in one category, or one serial reasoning/contro
 
 ## Output example
 
-Activate the required optional Skill before selecting its category:
+Activate the required optional Skill before selecting its category. When every
+accepted Skill narrows to the same non-control category, the Runtime returns
+that category in the activation result and the next turn executes it directly:
 
 ```json
 {"tool":"request_skills","arguments":{"intent":"load the metric investigation procedure","expected_observation":["Skill activation decision"],"skill_ids":["investigate-metrics"],"reason":"a metric observation can distinguish the active hypotheses","trigger":"HYPOTHESIS_CONFLICT"}}

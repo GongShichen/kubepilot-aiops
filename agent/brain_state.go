@@ -159,6 +159,9 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 	if len(output.RequestedSkills) > 0 {
 		state.RequestedSkills = output.RequestedSkills
 	}
+	if len(output.SkillActivations) > 0 {
+		state.SkillActivations = append(state.SkillActivations, output.SkillActivations...)
+	}
 	if output.ReferenceContent != "" && output.ReferenceID != "" {
 		if state.LoadedSkillReferences == nil {
 			state.LoadedSkillReferences = map[string]string{}

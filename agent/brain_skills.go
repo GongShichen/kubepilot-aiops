@@ -367,6 +367,34 @@ func (r ResolvedBrainSkills) ReadReference(skillID, name string) (string, error)
 	return content, nil
 }
 
+// unambiguousRequestedCategory returns a category only when the accepted
+// requested Skills themselves (not mandatory phase Skills or their dependency
+// closure) narrow execution to exactly one non-control category. It therefore
+// cannot expand authority: contextBuilder still intersects the selected
+// category with the resolved Skill bundle before exposing a ToolsNode.
+func (r *BrainSkillResolver) unambiguousRequestedCategory(requests []SkillRequest) domain.BrainToolCategory {
+	categories := map[domain.BrainToolCategory]bool{}
+	for _, request := range requests {
+		pkg, ok := r.packages[request.SkillID]
+		if !ok {
+			continue
+		}
+		for _, category := range pkg.Spec.AllowedToolCategories {
+			if category == domain.BrainToolControl {
+				continue
+			}
+			categories[category] = true
+		}
+	}
+	if len(categories) != 1 {
+		return ""
+	}
+	for category := range categories {
+		return category
+	}
+	return ""
+}
+
 func activationFor(pkg brainSkillPackage, request SkillRequest, phase domain.BrainPhase, now time.Time) domain.SkillActivation {
 	return domain.SkillActivation{SkillID: pkg.Spec.ID, Version: pkg.Spec.Version, ContentHash: pkg.Hash, Phase: phase, Reason: request.Reason, Trigger: request.Trigger, RequestedBy: request.RequestedBy, RequestedTurn: request.RequestedTurn, Status: "ACTIVATED", ActivatedAt: now}
 }
