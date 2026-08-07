@@ -193,7 +193,12 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 			state.PendingReflection = &trigger
 		}
 	}
-	if state.BrainPhase == domain.BrainPhaseReflection && (output.BeliefDelta != nil || len(output.Hypotheses) > 0) {
+	// A phase-compatible Skill request is also a complete corrective reflection:
+	// it repairs the procedural blocker without inventing a BeliefDelta. Resume
+	// the interrupted phase so the next context can activate that Skill and
+	// expose only its bounded Tool Categories.
+	reflectionResolved := output.BeliefDelta != nil || len(output.Hypotheses) > 0 || len(output.RequestedSkills) > 0
+	if state.BrainPhase == domain.BrainPhaseReflection && reflectionResolved {
 		if len(state.Reflections) > 0 {
 			index := len(state.Reflections) - 1
 			state.Reflections[index].Accepted = true

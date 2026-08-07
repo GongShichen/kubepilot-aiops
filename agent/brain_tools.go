@@ -763,7 +763,17 @@ func runBrainRequestSkills(ctx context.Context, resolver *BrainSkillResolver, in
 	if method, _ := domain.NormalizeDiagnosisMethod(state.Incident.DiagnosisMethod); method == domain.DiagnosisMethodKubePilotNoOptionalSkills {
 		maxOptional = 0
 	}
-	resolved, resolveErr := resolver.Resolve(state.BrainPhase, requests, maxOptional)
+	// A reflection turn may repair an investigation constraint by requesting a
+	// phase-specific Skill for the turn that resumes after reflection. Resolve
+	// that request against the resume phase; resolving against REFLECTION would
+	// reject every evidence Skill as phase-incompatible and trap the Brain in a
+	// constraint/reflection loop even though the requested capability is valid
+	// for the pending investigation.
+	resolutionPhase := state.BrainPhase
+	if resolutionPhase == domain.BrainPhaseReflection && state.ResumeBrainPhase != "" {
+		resolutionPhase = state.ResumeBrainPhase
+	}
+	resolved, resolveErr := resolver.Resolve(resolutionPhase, requests, maxOptional)
 	if resolveErr != nil {
 		return constraintBrainOutput(envelope, "skill_resolution_failed", resolveErr.Error()), nil
 	}

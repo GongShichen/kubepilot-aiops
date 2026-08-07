@@ -447,3 +447,51 @@ func TestReflectionCanCorrectPreHypothesisConstraintBySubmittingHypotheses(t *te
 		t.Fatalf("Reflection could not produce the structured correction needed to leave the pre-hypothesis failure: %+v", output)
 	}
 }
+
+func TestReflectionSkillRequestResolvesAgainstResumePhase(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &WorkflowState{
+		Incident:              &domain.Incident{ID: "reflection-skill", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainPhase:            domain.BrainPhaseReflection,
+		ResumeBrainPhase:      domain.BrainPhaseInvestigation,
+		BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
+		BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		ActiveToolCategory:    domain.BrainToolReasoning,
+		ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning, domain.BrainToolControl},
+		Reflections:           []domain.ReflectionRecord{{ID: "reflection:constraint", Trigger: domain.ReflectionConstraintFailure}},
+	}
+	output, err := runBrainRequestSkills(withBrainWorkflowState(context.Background(), state), resolver, requestBrainSkillsInput{
+		Intent:              "load the bounded metric procedure after a denied evidence category",
+		ExpectedObservation: []string{"phase-compatible Skill activation"},
+		SkillIDs:            []string{"investigate-metrics"},
+		Reason:              "metrics can distinguish the admitted hypotheses",
+		Trigger:             "CONSTRAINT_FAILURE",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Class != domain.ToolResultValidation || len(output.RequestedSkills) != 1 || output.RequestedSkills[0].SkillID != "investigate-metrics" {
+		t.Fatalf("reflection Skill request was not admitted for the resume phase: %+v", output)
+	}
+	(&brainGraphRuntime{}).applyCapabilityOutput(state, output)
+	if state.BrainPhase != domain.BrainPhaseInvestigation || state.ResumeBrainPhase != "" || len(state.RequestedSkills) != 1 {
+		t.Fatalf("reflection did not resume investigation with the admitted Skill: phase=%s resume=%s requests=%+v", state.BrainPhase, state.ResumeBrainPhase, state.RequestedSkills)
+	}
+	if !state.Reflections[0].Accepted {
+		t.Fatalf("corrective Skill request was not recorded as an accepted reflection: %+v", state.Reflections[0])
+	}
+	resolved, err := resolver.Resolve(state.BrainPhase, state.RequestedSkills, state.BrainBudget.Limits.MaxOptionalSkillsPerTurn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, ref := range resolved.Refs {
+		found = found || ref.ID == "investigate-metrics"
+	}
+	if !found || !resolved.AllowedCategories[domain.BrainToolEvidence] {
+		t.Fatalf("resumed Skill bundle did not grant its bounded Evidence category: refs=%+v categories=%+v", resolved.Refs, resolved.AllowedCategories)
+	}
+}
