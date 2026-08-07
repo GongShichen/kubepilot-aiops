@@ -778,6 +778,36 @@ func TestBrainAssistantToolCallIsPersistedWithVisibleSummary(t *testing.T) {
 	}
 }
 
+func TestBrainProviderHistoryRepairsMalformedToolArgumentsWithoutChangingAuditState(t *testing.T) {
+	assistant := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{
+		ID:   "call-truncated",
+		Type: "function",
+		Function: schema.FunctionCall{
+			Name:      "select_tool_category",
+			Arguments: `{"intent":"select reasoning"`,
+		},
+	}}}
+	toolResult := schema.ToolMessage(
+		`{"class":"ERROR","status":"REJECTED","summary":"tool arguments were rejected before execution","constraint_code":"invalid_tool_arguments"}`,
+		"call-truncated",
+		schema.WithToolName("select_tool_category"),
+	)
+
+	normalized := normalizeBrainModelMessages([]*schema.Message{assistant, toolResult})
+	if len(normalized) != 2 {
+		t.Fatalf("provider history lost the closed Tool transaction: %+v", normalized)
+	}
+	if got := normalized[0].ToolCalls[0].Function.Arguments; got != `{}` {
+		t.Fatalf("provider history retained malformed Tool arguments: %q", got)
+	}
+	if got := assistant.ToolCalls[0].Function.Arguments; got != `{"intent":"select reasoning"` {
+		t.Fatalf("provider normalization modified the authoritative audit state: %q", got)
+	}
+	if normalized[1].Role != schema.Tool || normalized[1].ToolCallID != "call-truncated" || strings.TrimSpace(normalized[1].Content) == "" {
+		t.Fatalf("provider history lost the explicit Tool execution status: %+v", normalized[1])
+	}
+}
+
 func TestBrainContextAdvertisesResumePhaseOptionalSkills(t *testing.T) {
 	resolver, err := LoadDefaultBrainSkillResolver()
 	if err != nil {
@@ -953,6 +983,13 @@ func TestToolArgumentGuardReturnsOneNonEmptyStatusPerCall(t *testing.T) {
 	units := completeBrainMessageUnits(state.BrainMessages)
 	if len(units) != 2 || len(units[0]) != 3 {
 		t.Fatalf("checkpoint history contains orphan ToolCalls: %+v", units)
+	}
+	providerHistory := normalizeBrainModelMessages(append([]*schema.Message(nil), units[0]...))
+	if len(providerHistory) != 3 || providerHistory[0].ToolCalls[0].Function.Arguments != `{}` {
+		t.Fatalf("invalid ToolCall could not be safely replayed to the provider: %+v", providerHistory)
+	}
+	if state.BrainMessages[0].ToolCalls[0].Function.Arguments != invalidCall.Function.Arguments {
+		t.Fatalf("provider replay normalization modified the audited ToolCall: %+v", state.BrainMessages[0])
 	}
 }
 

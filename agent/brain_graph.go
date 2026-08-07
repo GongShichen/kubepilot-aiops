@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -563,11 +564,21 @@ func normalizeBrainModelMessages(values []*schema.Message) []*schema.Message {
 			continue
 		}
 		copyMessage := *value
+		copyMessage.ToolCalls = slices.Clone(value.ToolCalls)
 		copyMessage.ReasoningContent = ""
 		if copyMessage.Role == schema.Assistant {
 			if strings.TrimSpace(copyMessage.Content) == "" && len(copyMessage.ToolCalls) == 0 {
 				continue
 			}
+			// A provider can stop at its output-token boundary after emitting a
+			// ToolCall name/ID but before completing the JSON arguments. The
+			// Runtime still closes that call with a classified REJECTED Tool
+			// result, but replaying the malformed argument fragment makes some
+			// Chat APIs reject the entire next request. Preserve the original
+			// fragment in the WorkflowState/audit hash and repair only this
+			// provider-input copy to a valid JSON object. The paired Tool result
+			// remains the authoritative execution status.
+			normalizeBrainToolCallArgumentsForProvider(&copyMessage)
 			ensureBrainAssistantToolCallContent(&copyMessage)
 		}
 		if strings.TrimSpace(copyMessage.Content) == "" && copyMessage.Role == schema.Tool {
@@ -576,6 +587,20 @@ func normalizeBrainModelMessages(values []*schema.Message) []*schema.Message {
 		out = append(out, &copyMessage)
 	}
 	return out
+}
+
+func normalizeBrainToolCallArgumentsForProvider(message *schema.Message) {
+	if message == nil || message.Role != schema.Assistant {
+		return
+	}
+	for index := range message.ToolCalls {
+		raw := strings.TrimSpace(message.ToolCalls[index].Function.Arguments)
+		var object map[string]json.RawMessage
+		if raw != "" && json.Unmarshal([]byte(raw), &object) == nil && object != nil {
+			continue
+		}
+		message.ToolCalls[index].Function.Arguments = `{}`
+	}
 }
 
 func normalizeBrainAssistantOutput(message *schema.Message, turnID string, observedAt time.Time) (*schema.Message, domain.AssistantTurnRecord, bool) {
