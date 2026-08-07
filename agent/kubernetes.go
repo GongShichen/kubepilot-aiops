@@ -14,6 +14,7 @@ import (
 	evidencenorm "github.com/kubepilot-aiops/kubepilot/internal/evidence"
 	"github.com/kubepilot-aiops/kubepilot/tools"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -34,7 +35,7 @@ func (a KubernetesEvidenceCollector) Collect(ctx context.Context, in *domain.Inc
 	deployment, depErr := a.Client.Deployment(ctx, in.Namespace, in.Resource)
 	events, evErr := a.Client.Events(ctx, in.Namespace)
 	service, serviceErr := a.Client.Service(ctx, in.Namespace, in.Service)
-	endpoints, endpointsErr := a.Client.Endpoints(ctx, in.Namespace, in.Service)
+	endpointSlices, endpointSlicesErr := a.Client.EndpointSlices(ctx, in.Namespace, in.Service)
 	configMaps, configErr := a.Client.ConfigMaps(ctx, in.Namespace)
 	networkPolicies, policiesErr := a.Client.NetworkPolicies(ctx, in.Namespace)
 	services, servicesErr := a.Client.Services(ctx, in.Namespace)
@@ -94,8 +95,12 @@ func (a KubernetesEvidenceCollector) Collect(ctx context.Context, in *domain.Inc
 	if serviceErr == nil {
 		data["service"] = map[string]any{"selector": service.Spec.Selector, "ports": service.Spec.Ports, "cluster_ip": service.Spec.ClusterIP}
 	}
-	if endpointsErr == nil {
-		data["endpoints"] = endpoints.Subsets
+	if endpointSlicesErr == nil {
+		// Preserve the established normalized `endpoints` fact while sourcing it
+		// from discovery.k8s.io/v1 EndpointSlice. Only currently ready endpoints
+		// enter the availability fact, so an empty slice has the same stable
+		// diagnostic meaning as the former empty v1 Endpoints subsets.
+		data["endpoints"] = readyEndpointFacts(endpointSlices.Items)
 	}
 	if configErr == nil {
 		names := make([]string, 0, len(configMaps.Items))
@@ -124,6 +129,51 @@ func (a KubernetesEvidenceCollector) Collect(ctx context.Context, in *domain.Inc
 	}
 	items := []domain.Evidence{{Source: "kubernetes", Kind: "workload_state", Summary: summary, Data: data, ObservedAt: time.Now().UTC()}}
 	return evidencenorm.Normalize(in, request, items), nil
+}
+
+func readyEndpointFacts(slices []discoveryv1.EndpointSlice) []map[string]any {
+	out := make([]map[string]any, 0)
+	for _, slice := range slices {
+		ports := make([]map[string]any, 0, len(slice.Ports))
+		for _, port := range slice.Ports {
+			item := map[string]any{}
+			if port.Name != nil {
+				item["name"] = *port.Name
+			}
+			if port.Port != nil {
+				item["port"] = *port.Port
+			}
+			if port.Protocol != nil {
+				item["protocol"] = *port.Protocol
+			}
+			ports = append(ports, item)
+		}
+		sort.SliceStable(ports, func(i, j int) bool {
+			return fmt.Sprint(ports[i]["name"], "\x00", ports[i]["port"], "\x00", ports[i]["protocol"]) < fmt.Sprint(ports[j]["name"], "\x00", ports[j]["port"], "\x00", ports[j]["protocol"])
+		})
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.Conditions.Ready != nil && !*endpoint.Conditions.Ready {
+				continue
+			}
+			addresses := append([]string(nil), endpoint.Addresses...)
+			sort.Strings(addresses)
+			item := map[string]any{"addresses": addresses, "ports": ports, "address_type": slice.AddressType}
+			if endpoint.Hostname != nil {
+				item["hostname"] = *endpoint.Hostname
+			}
+			if endpoint.Zone != nil {
+				item["zone"] = *endpoint.Zone
+			}
+			if endpoint.TargetRef != nil {
+				item["target_ref"] = map[string]any{"kind": endpoint.TargetRef.Kind, "name": endpoint.TargetRef.Name, "uid": endpoint.TargetRef.UID}
+			}
+			out = append(out, item)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return fmt.Sprint(out[i]["addresses"], "\x00", out[i]["hostname"], "\x00", out[i]["zone"]) < fmt.Sprint(out[j]["addresses"], "\x00", out[j]["hostname"], "\x00", out[j]["zone"])
+	})
+	return out
 }
 
 // containerStatusFacts preserves the small portion of Pod status that has

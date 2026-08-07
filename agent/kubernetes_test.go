@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 )
 
 func TestSanitizeContainersRedactsSecretsWithoutEvaluationSpecialCases(t *testing.T) {
@@ -31,6 +32,23 @@ func TestSanitizeContainersRedactsSecretsWithoutEvaluationSpecialCases(t *testin
 	}
 	if environment[3]["name"] != "DB_ADDR" || environment[3]["value"] != "mysql:3306" {
 		t.Fatalf("safe value missing: %#v", environment[3])
+	}
+}
+
+func TestReadyEndpointFactsUsesEndpointSliceReadinessAndStableOrder(t *testing.T) {
+	items := []discoveryv1.EndpointSlice{
+		{AddressType: discoveryv1.AddressTypeIPv4, Ports: []discoveryv1.EndpointPort{{Name: pointer("http"), Port: pointer(int32(8080))}}, Endpoints: []discoveryv1.Endpoint{
+			{Addresses: []string{"10.0.0.2"}, Conditions: discoveryv1.EndpointConditions{Ready: pointer(true)}},
+			{Addresses: []string{"10.0.0.3"}, Conditions: discoveryv1.EndpointConditions{Ready: pointer(false)}},
+		}},
+		{AddressType: discoveryv1.AddressTypeIPv4, Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.0.0.1"}}}},
+	}
+	facts := readyEndpointFacts(items)
+	if len(facts) != 2 {
+		t.Fatalf("ready EndpointSlice projection=%#v", facts)
+	}
+	if got := facts[0]["addresses"].([]string); len(got) != 1 || got[0] != "10.0.0.1" {
+		t.Fatalf("EndpointSlice projection was not stable: %#v", facts)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -77,11 +78,12 @@ func (k *KubernetesClient) Services(ctx context.Context, ns string) (*corev1.Ser
 	}
 	return k.client.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
 }
-func (k *KubernetesClient) Endpoints(ctx context.Context, ns, name string) (*corev1.Endpoints, error) {
+func (k *KubernetesClient) EndpointSlices(ctx context.Context, ns, service string) (*discoveryv1.EndpointSliceList, error) {
 	if err := k.namespace(ns); err != nil {
 		return nil, err
 	}
-	return k.client.CoreV1().Endpoints(ns).Get(ctx, name, metav1.GetOptions{})
+	selector := fmt.Sprintf("%s=%s", discoveryv1.LabelServiceName, service)
+	return k.client.DiscoveryV1().EndpointSlices(ns).List(ctx, metav1.ListOptions{LabelSelector: selector})
 }
 func (k *KubernetesClient) ConfigMaps(ctx context.Context, ns string) (*corev1.ConfigMapList, error) {
 	if err := k.namespace(ns); err != nil {

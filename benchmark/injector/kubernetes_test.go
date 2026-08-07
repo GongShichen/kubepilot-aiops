@@ -10,6 +10,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/benchmark/scenarios"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -74,11 +75,15 @@ func TestRetryServiceProxyStopsOnContextCancellation(t *testing.T) {
 
 func TestHasReadyServiceEndpointRequiresNamedServicePort(t *testing.T) {
 	service := &corev1.Service{Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: 8080}}}}
-	withoutReady := &corev1.Endpoints{Subsets: []corev1.EndpointSubset{{NotReadyAddresses: []corev1.EndpointAddress{{IP: "10.0.0.2"}}, Ports: []corev1.EndpointPort{{Name: "http", Port: 8080}}}}}
+	withoutReady := &discoveryv1.EndpointSliceList{Items: []discoveryv1.EndpointSlice{{
+		Ports:     []discoveryv1.EndpointPort{{Name: ptr("http"), Port: ptr(int32(8080))}},
+		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.0.0.2"}, Conditions: discoveryv1.EndpointConditions{Ready: ptr(false)}}},
+	}}}
 	if hasReadyServiceEndpoint(service, withoutReady) {
 		t.Fatal("not-ready endpoint was accepted")
 	}
-	ready := &corev1.Endpoints{Subsets: []corev1.EndpointSubset{{Addresses: []corev1.EndpointAddress{{IP: "10.0.0.2"}}, Ports: []corev1.EndpointPort{{Name: "http", Port: 8080}}}}}
+	ready := withoutReady.DeepCopy()
+	ready.Items[0].Endpoints[0].Conditions.Ready = ptr(true)
 	if !hasReadyServiceEndpoint(service, ready) {
 		t.Fatal("ready named endpoint was not accepted")
 	}

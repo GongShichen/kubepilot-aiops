@@ -13,10 +13,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -354,8 +356,8 @@ func (k *Kubernetes) waitServiceProxyEndpoint(ctx context.Context, namespace, se
 	for {
 		current, serviceErr := k.client.CoreV1().Services(namespace).Get(ctx, service, metav1.GetOptions{})
 		if serviceErr == nil {
-			endpoints, endpointErr := k.client.CoreV1().Endpoints(namespace).Get(ctx, service, metav1.GetOptions{})
-			if endpointErr == nil && hasReadyServiceEndpoint(current, endpoints) {
+			endpointSlices, endpointErr := k.client.DiscoveryV1().EndpointSlices(namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.Set{discoveryv1.LabelServiceName: service}.AsSelector().String()})
+			if endpointErr == nil && hasReadyServiceEndpoint(current, endpointSlices) {
 				return nil
 			}
 		}
@@ -367,8 +369,8 @@ func (k *Kubernetes) waitServiceProxyEndpoint(ctx context.Context, namespace, se
 	}
 }
 
-func hasReadyServiceEndpoint(service *corev1.Service, endpoints *corev1.Endpoints) bool {
-	if service == nil || endpoints == nil {
+func hasReadyServiceEndpoint(service *corev1.Service, endpointSlices *discoveryv1.EndpointSliceList) bool {
+	if service == nil || endpointSlices == nil {
 		return false
 	}
 	portNames := map[string]bool{}
@@ -377,16 +379,18 @@ func hasReadyServiceEndpoint(service *corev1.Service, endpoints *corev1.Endpoint
 			portNames[port.Name] = true
 		}
 	}
-	for _, subset := range endpoints.Subsets {
-		if len(subset.Addresses) == 0 {
-			continue
-		}
-		if len(portNames) == 0 {
-			return len(subset.Ports) > 0
-		}
-		for _, port := range subset.Ports {
-			if portNames[port.Name] {
-				return true
+	for _, slice := range endpointSlices.Items {
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.Conditions.Ready != nil && !*endpoint.Conditions.Ready {
+				continue
+			}
+			if len(portNames) == 0 {
+				return len(endpoint.Addresses) > 0 && len(slice.Ports) > 0
+			}
+			for _, port := range slice.Ports {
+				if port.Name != nil && portNames[*port.Name] && len(endpoint.Addresses) > 0 {
+					return true
+				}
 			}
 		}
 	}

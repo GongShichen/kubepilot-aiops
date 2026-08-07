@@ -15,6 +15,7 @@ import (
 	captools "github.com/kubepilot-aiops/kubepilot/tools"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -177,8 +178,8 @@ func TestKubernetesCollectorBuildsSanitizedWorkloadAndDependencyEvidence(t *test
 	recentEvent := &corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: "recent", Namespace: "kubepilot-demo", CreationTimestamp: metav1.NewTime(now)}, Type: "Warning", Reason: "BackOff", Message: "container restarting", InvolvedObject: corev1.ObjectReference{Name: "payment-1"}}
 	unrelatedEvent := &corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: "kubepilot-demo", CreationTimestamp: metav1.NewTime(now)}, Type: "Warning", Reason: "BackOff", Message: "unrelated job failed", InvolvedObject: corev1.ObjectReference{Name: "load-generator-7"}}
 	paymentService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "payment-service", Namespace: "kubepilot-demo"}, Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "payment-service"}, Ports: []corev1.ServicePort{{Port: 8080, TargetPort: intstr.FromInt32(8080)}}}}
-	paymentEndpoints := &corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: "payment-service", Namespace: "kubepilot-demo"}, Subsets: []corev1.EndpointSubset{{Addresses: []corev1.EndpointAddress{{IP: "10.0.0.2"}}}}}
-	mysqlEndpoints := &corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: "mysql", Namespace: "kubepilot-demo"}, Subsets: []corev1.EndpointSubset{{Addresses: []corev1.EndpointAddress{{IP: "10.0.0.3"}}}}}
+	paymentEndpoints := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "payment-service-v1", Namespace: "kubepilot-demo", Labels: map[string]string{discoveryv1.LabelServiceName: "payment-service"}}, AddressType: discoveryv1.AddressTypeIPv4, Ports: []discoveryv1.EndpointPort{{Port: pointer(int32(8080))}}, Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.0.0.2"}, Conditions: discoveryv1.EndpointConditions{Ready: pointer(true)}}}}
+	mysqlEndpoints := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "mysql-v1", Namespace: "kubepilot-demo", Labels: map[string]string{discoveryv1.LabelServiceName: "mysql"}}, AddressType: discoveryv1.AddressTypeIPv4, Ports: []discoveryv1.EndpointPort{{Port: pointer(int32(3306))}}, Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.0.0.3"}, Conditions: discoveryv1.EndpointConditions{Ready: pointer(true)}}}}
 	paymentConfig := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "payment-config", Namespace: "kubepilot-demo"}}
 	paymentPolicy := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: "allow-payment", Namespace: "kubepilot-demo"}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "payment-service"}}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress}, Egress: []networkingv1.NetworkPolicyEgressRule{}}}
 	unrelatedPolicy := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: "unrelated-policy", Namespace: "kubepilot-demo"}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "mysql"}}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}}}
