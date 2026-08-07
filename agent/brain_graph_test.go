@@ -19,10 +19,9 @@ import (
 )
 
 type brainGraphModel struct {
-	mu                  sync.Mutex
-	calls               int
-	forcedToolChoiceUse int
-	history             []string
+	mu      sync.Mutex
+	calls   int
+	history []string
 }
 
 func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message, opts ...model.Option) (*schema.Message, error) {
@@ -30,9 +29,6 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 	defer m.mu.Unlock()
 	m.calls++
 	options := model.GetCommonOptions(nil, opts...)
-	if options.ToolChoice != nil && *options.ToolChoice == schema.ToolChoiceForced {
-		m.forcedToolChoiceUse++
-	}
 	available := map[string]bool{}
 	for _, info := range options.Tools {
 		available[info.Name] = true
@@ -240,11 +236,6 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 	}
 	if final.DiagnosisRuntime != nil || len(final.Candidates) != 0 || len(final.HypothesisDrafts) != 0 || len(final.VerifiedHypotheses) != 0 || final.Incident.Investigation.Arbitration != nil || final.Incident.DiagnosisLedger != nil {
 		t.Fatalf("KubePilot entered a deterministic baseline path: runtime=%+v candidates=%d drafts=%d verified=%d arbitration=%+v", final.DiagnosisRuntime, len(final.Candidates), len(final.HypothesisDrafts), len(final.VerifiedHypotheses), final.Incident.Investigation.Arbitration)
-	}
-	brainModel.mu.Lock()
-	defer brainModel.mu.Unlock()
-	if brainModel.calls == 0 || brainModel.forcedToolChoiceUse != brainModel.calls {
-		t.Fatalf("Brain model calls did not enforce the native structured action boundary: calls=%d forced=%d", brainModel.calls, brainModel.forcedToolChoiceUse)
 	}
 }
 
@@ -683,6 +674,7 @@ func TestStructuredOutputGuardPersistsCompleteConstraintProvenance(t *testing.T)
 			BrainBudget:          domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
 			ExecutionSnapshot:    domain.ExecutionSnapshot{ToolSchemaHash: "tool-hash"},
 			EvidenceSnapshotHash: "evidence-hash",
+			ActiveToolCategory:   domain.BrainToolEvidence,
 		},
 	}
 	message := &schema.Message{Role: schema.Assistant, Content: `{"tool":"collect-evidence"}`, ReasoningContent: "hidden"}
@@ -697,11 +689,54 @@ func TestStructuredOutputGuardPersistsCompleteConstraintProvenance(t *testing.T)
 	if execution.Envelope.ToolName != "structured_output_guard" || execution.Envelope.ActionID == "" || provenance.ToolCallID != execution.Envelope.ActionID || provenance.ToolName != execution.Envelope.ToolName || provenance.ToolSchemaHash != "tool-hash" || provenance.ObservedAt.IsZero() || len(provenance.TargetRefs) != 1 || provenance.ParserVersion != "structured-output-guard-v2" {
 		t.Fatalf("structured guard provenance is incomplete: %+v", execution)
 	}
-	if execution.Result.Class != domain.ToolResultConstraint || execution.Result.Status != "REJECTED" || execution.Result.ConstraintCode != "structured_action_required" || execution.Result.Summary == "" || state.PendingReflection == nil || *state.PendingReflection != domain.ReflectionConstraintFailure {
+	if execution.Result.Class != domain.ToolResultConstraint || execution.Result.Status != "REJECTED" || execution.Result.ConstraintCode != "structured_action_required" || execution.Result.Summary == "" || state.PendingReflection != nil {
 		t.Fatalf("structured guard did not expose an explicit corrective status: %+v", execution.Result)
+	}
+	if len(state.BrainMessages) != 1 || state.BrainMessages[0].Role != schema.User || !strings.Contains(state.BrainMessages[0].Content, `"type":"runtime_structured_correction"`) || !strings.Contains(state.BrainMessages[0].Content, `"active_tool_category":"EVIDENCE"`) {
+		t.Fatalf("structured guard did not inject a visible same-category correction: %+v", state.BrainMessages)
+	}
+	next, err := (&brainGraphRuntime{}).reflectionRoute(context.Background(), state)
+	if err != nil || next != "brain_termination_router" || state.BrainPhase != domain.BrainPhaseInvestigation || state.ActiveToolCategory != domain.BrainToolEvidence {
+		t.Fatalf("structured correction changed phase or category: next=%s err=%v state=%+v", next, err, state)
 	}
 	if message.ReasoningContent != "" {
 		t.Fatal("structured guard retained hidden reasoning")
+	}
+}
+
+func TestStructuredOutputGuardStopsAfterCorrectionBudget(t *testing.T) {
+	budget := brainruntime.DefaultBudget()
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "guard-budget", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainPhase:           domain.BrainPhaseInvestigation,
+			BrainTurns:           []domain.BrainTurn{{ID: "turn:guard-budget", Sequence: 1}},
+			BrainBudget:          domain.BrainBudgetState{Limits: budget},
+			ExecutionSnapshot:    domain.ExecutionSnapshot{ToolSchemaHash: "tool-hash"},
+			EvidenceSnapshotHash: "evidence-hash",
+			ActiveToolCategory:   domain.BrainToolEvidence,
+		},
+	}
+	runtime := &brainGraphRuntime{}
+	for attempt := 0; attempt < budget.MaxStructuredCorrections; attempt++ {
+		message := &schema.Message{Role: schema.Assistant, Content: "prose-only", ReasoningContent: "hidden"}
+		if _, err := runtime.handleUnstructured(withBrainWorkflowState(context.Background(), state), message); err != nil {
+			t.Fatal(err)
+		}
+		if message.ReasoningContent != "" {
+			t.Fatal("structured guard retained hidden reasoning")
+		}
+	}
+	if state.Termination == nil || state.Termination.Reason != domain.TerminationBudgetExhausted {
+		t.Fatalf("structured correction budget did not terminate explicitly: %+v", state.Termination)
+	}
+	if state.BrainBudget.Usage.StructuredCorrections != budget.MaxStructuredCorrections || len(state.ToolExecutions) != budget.MaxStructuredCorrections || len(state.BrainMessages) != budget.MaxStructuredCorrections-1 {
+		t.Fatalf("structured correction accounting is inconsistent: usage=%+v executions=%d messages=%d", state.BrainBudget.Usage, len(state.ToolExecutions), len(state.BrainMessages))
+	}
+	for _, execution := range state.ToolExecutions {
+		if execution.Result.Class != domain.ToolResultConstraint || execution.Result.Status == "" || execution.Result.Provenance.ToolCallID == "" {
+			t.Fatalf("structured correction emitted an empty tool status: %+v", execution)
+		}
 	}
 }
 

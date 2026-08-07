@@ -47,12 +47,7 @@ type boundBrainModel struct {
 
 func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.Message, error) {
 	started := time.Now()
-	// Every Brain node is an action boundary: diagnosis, reflection, Skill
-	// selection and terminal decisions are all represented by typed tools. Force
-	// the provider to choose one of the category-scoped Eino tools so a
-	// reasoning/content-only response cannot consume correction budget without
-	// advancing state. The model still owns which exposed tool it selects.
-	options = append(options, model.WithTools(m.tools), model.WithToolChoice(schema.ToolChoiceForced), model.WithMaxTokens(8192), model.WithTemperature(0))
+	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
 	message, err := m.base.Generate(ctx, normalizeBrainModelMessages(messages), options...)
 	if err != nil {
 		return nil, err
@@ -88,7 +83,7 @@ func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Messag
 }
 
 func (m boundBrainModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	options = append(options, model.WithTools(m.tools), model.WithToolChoice(schema.ToolChoiceForced), model.WithMaxTokens(8192), model.WithTemperature(0))
+	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
 	return m.base.Stream(ctx, normalizeBrainModelMessages(messages), options...)
 }
 

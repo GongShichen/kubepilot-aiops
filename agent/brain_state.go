@@ -388,8 +388,23 @@ func (r *brainGraphRuntime) handleUnstructured(ctx context.Context, message *sch
 		termination, _ := brainruntime.NewTermination(domain.TerminationBudgetExhausted, currentBrainTurnID(state), finalHypothesisID(state), state.EvidenceSnapshotHash, &state.ExecutionSnapshot, []string{"structured action correction budget exhausted"}, state.BrainBudget)
 		state.Termination = &termination
 	} else {
-		trigger := domain.ReflectionConstraintFailure
-		state.PendingReflection = &trigger
+		// A provider-format failure is not an Incident observation or a change in
+		// belief. Retry the same phase/category with the same Skill authority and
+		// an explicit non-empty Runtime status. Routing through cognitive
+		// Reflection here used to drop the active Evidence Skill and trap the
+		// Brain in category-denial loops.
+		correction, _ := json.Marshal(map[string]any{
+			"type":                             "runtime_structured_correction",
+			"class":                            result.Class,
+			"status":                           result.Status,
+			"constraint_code":                  result.ConstraintCode,
+			"summary":                          result.Summary,
+			"active_phase":                     state.BrainPhase,
+			"active_tool_category":             effectiveToolCategory(state),
+			"required_next_action":             "invoke one native tool exposed in the current category; do not return prose or a textual JSON rendering of a tool call",
+			"structured_corrections_remaining": state.BrainBudget.Limits.MaxStructuredCorrections - state.BrainBudget.Usage.StructuredCorrections,
+		})
+		state.BrainMessages = append(state.BrainMessages, schema.UserMessage(string(correction)))
 	}
 	if message != nil {
 		message.ReasoningContent = ""
