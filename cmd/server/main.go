@@ -181,10 +181,6 @@ func main() {
 	}
 	manager := &service.IncidentManager{Store: pg, Supervisor: supervisor, Executor: executor, Hub: service.NewHub(), ModelSnapshotter: chat, Checkpoints: checkpointStore, AllowedNamespaces: cfg.AllowedNamespaces, CorrelationFallback: correlator, Learner: learner}
 	supervisor.SetEventSink(manager.ObserveWorkflowEvent)
-	if err = manager.ReconcileLegacyWorkflows(ctx); err != nil {
-		slog.Error("reconcile legacy workflows", "error", err)
-		os.Exit(1)
-	}
 	benchmarkManager := service.NewBenchmarkManager("/usr/local/bin/kubepilot-benchmark", "http://127.0.0.1"+cfg.HTTPAddr, cfg.APIToken, cfg.WebhookToken, cfg.Kubeconfig, "artifacts/benchmark", manager.Hub, pg)
 	srvAPI := &api.Server{Manager: manager, Benchmarks: benchmarkManager, Knowledge: pg, APIToken: cfg.APIToken, WebhookToken: cfg.WebhookToken, Readiness: func(readinessCtx context.Context) map[string]string {
 		components := map[string]string{"postgres": "ready", "redis": "ready", "agent_registry": "ready"}

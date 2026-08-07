@@ -89,10 +89,9 @@ func ObserveAgent(incident *domain.Incident) AgentObservation {
 		if investigation.Architecture == "eino-native-self-reflective-brain" {
 			observeBrainAudit(&observation, incident, investigation)
 		}
-		// Hierarchical workers call their scoped collectors through the server,
-		// not through the legacy Diagnosis ReAct decision ledger. Count each
-		// completed worker query so evidence-efficiency ablations do not collapse
-		// to zero for the hierarchical strategy.
+		// Baseline workers call their scoped collectors through the server. Count
+		// each completed query so evidence-efficiency ablations do not collapse to
+		// zero.
 		observation.EvidenceQueries += len(investigation.Findings)
 		observation.IndependentEvidenceRequests += len(investigation.Findings)
 		seenEvidence := map[string]bool{}

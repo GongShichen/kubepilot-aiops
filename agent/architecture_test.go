@@ -56,6 +56,39 @@ func TestAgentProductionCodeHasNoManualEinoToolCallOrBenchmarkDependency(t *test
 	}
 }
 
+func TestKubePilotBrainHasNoDeterministicPipelineDependency(t *testing.T) {
+	_, current, _, _ := runtime.Caller(0)
+	root := filepath.Dir(current)
+	for _, name := range []string{"brain_graph.go", "brain_state.go", "brain_tools.go", "brain_recovery.go", "brain_context.go", "supervisor.go"} {
+		raw, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(raw)
+		for _, forbidden := range []string{"runCognitiveDiagnosis(", "candidateGenerationNode(", "causalFalsificationNode(", "objectiveArbitrationNode(", "runConstrainedAgents(", "RunBaseline("} {
+			if strings.Contains(text, forbidden) {
+				t.Fatalf("KubePilot production path %s references deterministic baseline entry %q", name, forbidden)
+			}
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasSuffix(entry.Name(), "_test.go") || !strings.HasSuffix(entry.Name(), ".go") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(root, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "runCognitiveDiagnosis(") {
+			t.Fatalf("deleted monolithic diagnosis entry remains in %s", entry.Name())
+		}
+	}
+}
+
 func TestSkillsArePinnedAndDoNotEncodeHiddenWorkflow(t *testing.T) {
 	cases := []struct{ agent, path string }{
 		{SupervisorAgentName, "internal/agent/skills/supervisor/SKILL.md"},

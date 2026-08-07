@@ -14,12 +14,6 @@ import (
 // cognitiveModeForMethod identifies the frozen deterministic-diagnosis
 // strategies. Direct, RAG, and ReAct retain their existing execution paths.
 func cognitiveModeForMethod(method string) (cognitiveDiagnosisMode, bool) {
-	// An empty method is a legacy low-level call path whose established
-	// behavior is the constrained ReAct runtime. Production ingress persists a
-	// canonical method before it reaches this graph.
-	if strings.TrimSpace(method) == "" {
-		return cognitiveDiagnosisMode{}, false
-	}
 	normalized, ok := domain.NormalizeDiagnosisMethod(method)
 	if !ok {
 		return cognitiveDiagnosisMode{}, false
@@ -47,7 +41,7 @@ func (r *AgentRegistry) initializeCognitiveDiagnosis(state *WorkflowState) error
 	}
 	mode, ok := cognitiveModeForMethod(state.Incident.DiagnosisMethod)
 	if !ok {
-		return nil
+		return fmt.Errorf("method %q is not a deterministic baseline", state.Incident.DiagnosisMethod)
 	}
 	plan := serverInvestigationPlan(state.Incident)
 	maxRounds := 1

@@ -52,7 +52,7 @@ func (r *brainGraphRuntime) classifyToolResults(ctx context.Context, messages []
 		// Persist the server-classified result, not the raw adapter payload. This
 		// makes Class, Status, failure semantics, complete Provenance and Evidence
 		// IDs visible to the next Brain turn as one auditable Tool result.
-		classified, marshalErr := json.Marshal(output)
+		classified, marshalErr := json.Marshal(modelFacingBrainCapabilityOutput(state, output))
 		if marshalErr != nil {
 			return nil, fmt.Errorf("encode classified Brain Tool result: %w", marshalErr)
 		}
@@ -119,11 +119,6 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 	}
 	if output.BeliefDelta != nil {
 		state.BeliefDeltas = append(state.BeliefDeltas, *output.BeliefDelta)
-		for index := range state.AgentHypotheses {
-			if state.AgentHypotheses[index].ID == output.BeliefDelta.HypothesisRevisionID && output.BeliefDelta.Committed {
-				state.AgentHypotheses[index].ModelConfidence = output.BeliefDelta.NewConfidence
-			}
-		}
 	}
 	if output.Understanding != nil {
 		state.IncidentUnderstanding = output.Understanding
@@ -300,6 +295,40 @@ func (r *brainGraphRuntime) beliefUpdate(_ context.Context, state *WorkflowState
 			state.PendingReflection = &trigger
 		}
 	}
+	return state, nil
+}
+
+// beliefCommit is the sole boundary allowed to update subjective model
+// confidence. Grounding and generic Tool-result application remain objective
+// and cannot mutate the Brain's belief state.
+func (r *brainGraphRuntime) beliefCommit(_ context.Context, state *WorkflowState) (*WorkflowState, error) {
+	for state.BeliefDeltaCursor < len(state.BeliefDeltas) {
+		delta := state.BeliefDeltas[state.BeliefDeltaCursor]
+		if !delta.Committed {
+			state.BeliefDeltaCursor++
+			continue
+		}
+		index := -1
+		for candidate := range state.AgentHypotheses {
+			if state.AgentHypotheses[candidate].ID == delta.HypothesisRevisionID {
+				index = candidate
+				break
+			}
+		}
+		if index < 0 {
+			return state, fmt.Errorf("belief commit references unknown hypothesis revision %q", delta.HypothesisRevisionID)
+		}
+		if state.AgentHypotheses[index].ModelConfidence != delta.PreviousConfidence {
+			return state, fmt.Errorf("belief commit previous confidence does not match current revision %q", delta.HypothesisRevisionID)
+		}
+		updated, err := brainruntime.CommitBelief(state.AgentHypotheses[index], delta)
+		if err != nil {
+			return state, fmt.Errorf("commit Brain belief: %w", err)
+		}
+		state.AgentHypotheses[index] = updated
+		state.BeliefDeltaCursor++
+	}
+	r.syncInvestigation(state)
 	return state, nil
 }
 

@@ -550,38 +550,6 @@ func isTransientWorkflowError(err error) bool {
 	return false
 }
 
-func (m *IncidentManager) ReconcileLegacyWorkflows(ctx context.Context) error {
-	items, err := m.Store.List(ctx, 1000, 0)
-	if err != nil {
-		return err
-	}
-	for index := range items {
-		incident := &items[index]
-		if terminal(incident.Status) || incident.Status == domain.StatusNeedsAttention {
-			continue
-		}
-		keepInterrupted := false
-		if incident.Status == domain.StatusAwaitingApproval && incident.WorkflowInterruptID != "" && m.Checkpoints != nil {
-			_, keepInterrupted, _ = m.Checkpoints.Get(ctx, "incident:"+incident.ID)
-			if identities, ok := m.Store.(store.WorkflowIdentityStore); ok {
-				identity, identityErr := identities.WorkflowIdentity(ctx, incident.ID)
-				keepInterrupted = keepInterrupted && identityErr == nil && identity == agent.WorkflowName
-			}
-		}
-		if keepInterrupted {
-			continue
-		}
-		_ = domain.Transition(incident, domain.StatusNeedsAttention)
-		incident.DiagnosisError = "incomplete workflow from a different architecture requires explicit retry"
-		incident.UpdatedAt = time.Now().UTC()
-		if err = m.Store.Update(ctx, incident); err != nil {
-			return err
-		}
-		m.audit(ctx, incident.ID, "workflow_reconciled", incident.DiagnosisError, nil)
-	}
-	return nil
-}
-
 func (m *IncidentManager) Get(ctx context.Context, id string) (*domain.Incident, error) {
 	return m.Store.Get(ctx, id)
 }

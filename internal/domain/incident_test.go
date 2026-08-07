@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func TestDiagnosisMethodAliasesNormalizeBeforePersistence(t *testing.T) {
-	cases := map[string]string{"": DiagnosisMethodKubePilot, DiagnosisMethodLLMOnly: DiagnosisMethodDirect, DiagnosisMethodVectorRAG: DiagnosisMethodRAG, DiagnosisMethodReAct: DiagnosisMethodReAct}
+func TestDiagnosisMethodsAreCanonicalBeforePersistence(t *testing.T) {
+	cases := map[string]string{"": DiagnosisMethodKubePilot, DiagnosisMethodDirect: DiagnosisMethodDirect, DiagnosisMethodRAG: DiagnosisMethodRAG, DiagnosisMethodReAct: DiagnosisMethodReAct}
 	for input, expected := range cases {
 		actual, ok := NormalizeDiagnosisMethod(input)
 		if !ok || actual != expected {
@@ -15,6 +15,11 @@ func TestDiagnosisMethodAliasesNormalizeBeforePersistence(t *testing.T) {
 	}
 	if _, ok := NormalizeDiagnosisMethod("invented"); ok {
 		t.Fatal("unknown diagnosis strategy was accepted")
+	}
+	for _, removed := range []string{"llm-only", "vector-rag"} {
+		if _, ok := NormalizeDiagnosisMethod(removed); ok {
+			t.Fatalf("removed compatibility method %q was accepted", removed)
+		}
 	}
 }
 

@@ -54,21 +54,25 @@ func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Messag
 	}
 	now := time.Now().UTC()
 	sanitized, record, persist := normalizeBrainAssistantOutput(message, "", now)
-	if state, stateErr := brainWorkflowState(ctx); stateErr == nil {
-		record.TurnID = currentBrainTurnID(state)
-		recordBrainAssistantTurn(state, record)
-		if persist {
-			state.BrainMessages = append(state.BrainMessages, sanitized)
-		}
-		if len(state.BrainTurns) > 0 {
-			index := len(state.BrainTurns) - 1
-			usage := m.agents.modelUsage(state.Incident.ID, m.label, message, time.Since(started))
-			state.BrainTurns[index].ModelUsage = &usage
-			state.BrainTurns[index].CompletedAt = now
-			if state.Incident.Investigation != nil {
-				state.Incident.Investigation.ModelUsage = append(state.Incident.Investigation.ModelUsage, usage)
-				state.Incident.Investigation.AssistantTurns = append([]domain.AssistantTurnRecord(nil), state.AssistantTurns...)
-			}
+	state, stateErr := brainWorkflowState(ctx)
+	if stateErr != nil {
+		return nil, stateErr
+	}
+	record.TurnID = currentBrainTurnID(state)
+	if err = recordBrainAssistantTurn(state, record); err != nil {
+		return nil, err
+	}
+	if persist {
+		state.BrainMessages = append(state.BrainMessages, sanitized)
+	}
+	if len(state.BrainTurns) > 0 {
+		index := len(state.BrainTurns) - 1
+		usage := m.agents.modelUsage(state.Incident.ID, m.label, message, time.Since(started))
+		state.BrainTurns[index].ModelUsage = &usage
+		state.BrainTurns[index].CompletedAt = now
+		if state.Incident.Investigation != nil {
+			state.Incident.Investigation.ModelUsage = append(state.Incident.Investigation.ModelUsage, usage)
+			state.Incident.Investigation.AssistantTurns = append([]domain.AssistantTurnRecord(nil), state.AssistantTurns...)
 		}
 	}
 	// The graph router receives a provider-neutral message. For a
@@ -181,6 +185,9 @@ func buildBrainGraph(ctx context.Context, runtime *brainGraphRuntime) (compose.A
 	if err = addState("belief_update", runtime.beliefUpdate); err != nil {
 		return nil, err
 	}
+	if err = addState("belief_commit", runtime.beliefCommit); err != nil {
+		return nil, err
+	}
 	if err = addState("reflection_router", func(_ context.Context, state *WorkflowState) (*WorkflowState, error) { return state, nil }); err != nil {
 		return nil, err
 	}
@@ -230,7 +237,7 @@ func buildBrainGraph(ctx context.Context, runtime *brainGraphRuntime) (compose.A
 	}, destinations)); err != nil {
 		return nil, err
 	}
-	for _, edge := range [][2]string{{"tool_result_classifier", "observation_update"}, {"observation_update", "belief_update"}, {"belief_update", "reflection_router"}, {"structured_output_guard", "reflection_router"}} {
+	for _, edge := range [][2]string{{"tool_result_classifier", "observation_update"}, {"observation_update", "belief_update"}, {"belief_update", "belief_commit"}, {"belief_commit", "reflection_router"}, {"structured_output_guard", "reflection_router"}} {
 		if err = graph.AddEdge(edge[0], edge[1]); err != nil {
 			return nil, err
 		}
@@ -245,10 +252,9 @@ func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowSta
 	if state == nil || state.Incident == nil {
 		return nil, fmt.Errorf("Brain context requires WorkflowState and Incident")
 	}
-	// Checkpoint/resume may load conversation state produced by an older
-	// provider adapter. Normalize it before any new checkpoint or model call so
-	// a stripped reasoning-only Assistant turn can never re-enter Chat API
-	// input. Tool-call Assistants retain a visible structured projection.
+	// Normalize the current Workflow Attempt before every model call so hidden
+	// reasoning and empty messages can never enter Chat API or checkpoint state.
+	// Snapshot migration is handled separately and never reuses an old attempt.
 	state.BrainMessages = normalizeBrainModelMessages(state.BrainMessages)
 	if r.states != nil {
 		r.states.Store(state.Incident.ID, state)
@@ -316,7 +322,7 @@ func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowSta
 	state.Incident.ExecutionSnapshot = &state.ExecutionSnapshot
 	state.Incident.WorkflowAttempt = state.WorkflowAttempt
 	state.Incident.SkillSnapshotHash = r.resolver.SnapshotHash()
-	payload := map[string]any{"incident": safeIncident(state.Incident), "understanding": state.IncidentUnderstanding, "plan": state.Incident.Investigation.Plan, "phase": state.BrainPhase, "evidence_snapshot_hash": state.EvidenceSnapshotHash, "evidence": compactToolEvidence(state.Incident.Evidence, 48<<10), "hypotheses": state.AgentHypotheses, "admissions": state.HypothesisAdmissions, "groundings": state.HypothesisGroundings, "grounding_deltas": tailGroundingDeltas(state.GroundingDeltas, 5), "recent_tool_results": tailBrainToolExecutions(state.ToolExecutions, 5), "memory_reads": state.Incident.Investigation.MemoryReads, "causal_patterns": tailCausalPatterns(state.CausalPatterns, 10), "loaded_skill_references": state.LoadedSkillReferences, "diagnosis": state.AgentDiagnosis, "recovery_plan": state.AgentRecoveryPlan, "budget": state.BrainBudget, "active_tool_category": effectiveToolCategory(state), "execution_snapshot": state.ExecutionSnapshot}
+	payload := map[string]any{"incident": safeIncident(state.Incident), "understanding": state.IncidentUnderstanding, "plan": state.Incident.Investigation.Plan, "phase": state.BrainPhase, "evidence_snapshot_hash": state.EvidenceSnapshotHash, "evidence_view": brainEvidenceViews(state, state.Incident.Evidence, 48<<10, 12), "hypotheses": state.AgentHypotheses, "admissions": state.HypothesisAdmissions, "groundings": state.HypothesisGroundings, "grounding_deltas": tailGroundingDeltas(state.GroundingDeltas, 5), "recent_tool_results": tailBrainToolExecutions(state.ToolExecutions, 5), "memory_reads": state.Incident.Investigation.MemoryReads, "causal_patterns": tailCausalPatterns(state.CausalPatterns, 10), "loaded_skill_references": state.LoadedSkillReferences, "diagnosis": state.AgentDiagnosis, "recovery_plan": state.AgentRecoveryPlan, "budget": state.BrainBudget, "active_tool_category": effectiveToolCategory(state), "execution_snapshot": state.ExecutionSnapshot}
 	raw, _ := json.Marshal(payload)
 	system := "You are KubePilot's LLM Brain. You own investigation, open-world hypotheses, subjective belief revision, diagnosis selection, and recovery planning. The Runtime owns facts, grounding, constraints, authorization, execution, and verification. Follow the injected Skills exactly. Use only an exposed structured tool; do not answer in prose or reveal hidden chain-of-thought. Constraint or tool errors are not Incident evidence.\n\n" + resolved.Prompt
 	if state.BrainBudget.ToolCallsExhausted {
@@ -571,20 +577,17 @@ func normalizeBrainAssistantOutput(message *schema.Message, turnID string, obser
 	return &sanitized, record, record.Persisted
 }
 
-func recordBrainAssistantTurn(state *WorkflowState, record domain.AssistantTurnRecord) {
+func recordBrainAssistantTurn(state *WorkflowState, record domain.AssistantTurnRecord) error {
 	if state == nil {
-		return
+		return fmt.Errorf("Assistant turn audit requires WorkflowState")
 	}
 	for index := len(state.AssistantTurns) - 1; index >= 0; index-- {
 		if state.AssistantTurns[index].TurnID == record.TurnID {
 			state.AssistantTurns[index] = record
-			return
+			return nil
 		}
 	}
-	// Defensive fallback for direct adapter tests or a future model node that
-	// does not pass through contextBuilder. Production graph turns always have
-	// a preallocated slot.
-	state.AssistantTurns = append(state.AssistantTurns, record)
+	return fmt.Errorf("Assistant turn audit slot %q was not allocated by the Brain context builder", record.TurnID)
 }
 
 func ensureBrainAssistantToolCallContent(message *schema.Message) {

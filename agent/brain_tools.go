@@ -197,6 +197,7 @@ type brainCapabilityOutput struct {
 	ConstraintCode    string                        `json:"constraint_code,omitempty"`
 	Infrastructure    bool                          `json:"infrastructure_failure,omitempty"`
 	Evidence          []domain.Evidence             `json:"evidence,omitempty"`
+	EvidenceView      []domain.BrainEvidenceView    `json:"evidence_view,omitempty"`
 	Candidates        []domain.RetrievalCandidate   `json:"candidates,omitempty"`
 	Patterns          []domain.CausalPattern        `json:"patterns,omitempty"`
 	Hypotheses        []domain.AgentHypothesis      `json:"hypotheses,omitempty"`

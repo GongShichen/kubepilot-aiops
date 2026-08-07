@@ -60,6 +60,7 @@ type WorkflowState struct {
 	GroundingDeltas       []domain.GroundingDelta                `json:"grounding_deltas,omitempty"`
 	GroundingDeltaCursor  int                                    `json:"grounding_delta_cursor,omitempty"`
 	BeliefDeltas          []domain.BeliefDelta                   `json:"belief_deltas,omitempty"`
+	BeliefDeltaCursor     int                                    `json:"belief_delta_cursor,omitempty"`
 	Reflections           []domain.ReflectionRecord              `json:"reflections,omitempty"`
 	AgentDiagnosis        *domain.AgentDiagnosis                 `json:"agent_diagnosis,omitempty"`
 	AgentRecoveryPlan     *domain.AgentRecoveryPlan              `json:"agent_recovery_plan,omitempty"`

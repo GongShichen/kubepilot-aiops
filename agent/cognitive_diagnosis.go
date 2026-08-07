@@ -17,62 +17,6 @@ type cognitiveDiagnosisMode struct {
 	Active    bool
 }
 
-// runCognitiveDiagnosis owns the KubePilot diagnosis loop. Collection,
-// signals, candidates, falsification and arbitration remain deterministic;
-// CognitiveRuntime can only propose interpretation and next observations.
-func (r *AgentRegistry) runCognitiveDiagnosis(ctx context.Context, incident *domain.Incident, deps constrainedToolDeps, mode cognitiveDiagnosisMode) (DiagnosisResult, error) {
-	if incident == nil || deps.Reasoning == nil {
-		return DiagnosisResult{}, fmt.Errorf("incident and reasoning engine are required")
-	}
-	state := &WorkflowState{Workflow: WorkflowName, Incident: incident}
-	plan := serverInvestigationPlan(incident)
-	maxRounds := 1
-	if mode.Active {
-		maxRounds = 2
-	}
-	plan.RoundLimit = maxRounds
-	state.DiagnosisRuntime = &CognitiveDiagnosisState{
-		Method:                  incident.DiagnosisMethod,
-		RuleOnly:                mode.RuleOnly,
-		Cognitive:               mode.Cognitive,
-		Active:                  mode.Active,
-		Round:                   1,
-		MaxRounds:               maxRounds,
-		Plan:                    plan,
-		PendingRequests:         planRequests(plan, incident),
-		SeenRequestFingerprints: map[string]bool{},
-		Evidence:                normalizeCollectedEvidence(incident, incident.Evidence),
-		Investigation:           &domain.Investigation{Architecture: diagnosisArchitecture(incident.DiagnosisMethod), Plan: plan, StartedAt: time.Now().UTC()},
-	}
-	if err := r.cognitiveIntentNode(ctx, state); err != nil {
-		return DiagnosisResult{}, err
-	}
-	for !state.DiagnosisRuntime.Completed {
-		if err := r.queryCompilerNode(state); err != nil {
-			return DiagnosisResult{}, err
-		}
-		if err := r.evidenceCollectionNode(ctx, state, deps); err != nil {
-			return DiagnosisResult{}, err
-		}
-		if err := r.signalAssertionBuilderNode(state, deps); err != nil {
-			return DiagnosisResult{}, err
-		}
-		if err := r.candidateGenerationNode(ctx, state, deps); err != nil {
-			return DiagnosisResult{}, err
-		}
-		if err := r.cognitiveReasoningNode(ctx, state); err != nil {
-			return DiagnosisResult{}, err
-		}
-		if err := r.causalFalsificationNode(state); err != nil {
-			return DiagnosisResult{}, err
-		}
-		if err := r.objectiveArbitrationNode(state); err != nil {
-			return DiagnosisResult{}, err
-		}
-	}
-	return cognitiveDiagnosisResult(state)
-}
-
 func diagnosisArchitecture(method string) string {
 	normalized, ok := domain.NormalizeDiagnosisMethod(method)
 	if !ok {
@@ -369,8 +313,8 @@ func evidenceTargetsForObservation(incident *domain.Incident, evidence []domain.
 	return targets
 }
 
-// serverDependencyExplorationRequests is the deterministic no-answer
-// fallback for Active Diagnosis. When the incident workload has current
+// serverDependencyExplorationRequests is the deterministic bounded supplement
+// for the Active Diagnosis baseline. When the incident workload has current
 // request-failure observations but no observation of the availability of a
 // topology-discovered dependency, the most discriminating safe next step is
 // to inspect that dependency's Kubernetes endpoint state. This is not a

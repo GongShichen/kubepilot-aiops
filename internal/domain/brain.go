@@ -68,6 +68,30 @@ type ToolResultRecord struct {
 	OccurredAt     time.Time            `json:"occurred_at"`
 }
 
+// BrainEvidenceView is the only evidence projection admitted to LLM context.
+// Canonical Facts, Content, Data, and raw collector artifacts remain in the
+// Runtime evidence store and are addressable through the provenance links.
+type BrainEvidenceView struct {
+	ID                    string           `json:"id"`
+	Source                string           `json:"source"`
+	Kind                  string           `json:"kind"`
+	Namespace             string           `json:"namespace,omitempty"`
+	Service               string           `json:"service,omitempty"`
+	Resource              string           `json:"resource,omitempty"`
+	WindowStart           time.Time        `json:"window_start,omitempty"`
+	WindowEnd             time.Time        `json:"window_end,omitempty"`
+	ObservedAt            time.Time        `json:"observed_at,omitempty"`
+	Summary               string           `json:"summary"`
+	Signals               []EvidenceSignal `json:"signals,omitempty"`
+	CausalNodeIDs         []string         `json:"causal_node_ids,omitempty"`
+	ContextRelevance      float64          `json:"context_relevance,omitempty"`
+	AnomalyScore          float64          `json:"anomaly_score,omitempty"`
+	QualityScore          float64          `json:"quality_score,omitempty"`
+	HypothesisRevisionIDs []string         `json:"hypothesis_revision_ids,omitempty"`
+	ToolCallIDs           []string         `json:"tool_call_ids,omitempty"`
+	RawArtifactHashes     []string         `json:"raw_artifact_hashes,omitempty"`
+}
+
 // AssistantTurnRecord is the audit projection of one provider Assistant
 // response. Hidden reasoning is represented only by its presence bit; its
 // content is never copied into conversation state, checkpoints, or the API.

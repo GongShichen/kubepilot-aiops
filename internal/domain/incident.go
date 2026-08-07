@@ -84,10 +84,6 @@ const (
 	DiagnosisMethodKubePilot                 = "kubepilot"
 	DiagnosisMethodKubePilotNoReflection     = "kubepilot-no-reflection"
 	DiagnosisMethodKubePilotNoOptionalSkills = "kubepilot-no-optional-skills"
-	// Deprecated request aliases are accepted at the API boundary only. All
-	// persisted state and benchmark artifacts use the canonical identifiers.
-	DiagnosisMethodLLMOnly   = "llm-only"
-	DiagnosisMethodVectorRAG = "vector-rag"
 )
 
 const (
@@ -117,10 +113,6 @@ func NormalizeDiagnosisMethod(value string) (string, bool) {
 	switch value {
 	case "":
 		return DiagnosisMethodKubePilot, true
-	case DiagnosisMethodLLMOnly:
-		return DiagnosisMethodDirect, true
-	case DiagnosisMethodVectorRAG:
-		return DiagnosisMethodRAG, true
 	case DiagnosisMethodDirect, DiagnosisMethodRAG, DiagnosisMethodReAct, DiagnosisMethodRuleOnly, DiagnosisMethodEvidence, DiagnosisMethodCognitive, DiagnosisMethodActive, DiagnosisMethodKubePilot, DiagnosisMethodKubePilotNoReflection, DiagnosisMethodKubePilotNoOptionalSkills:
 		return value, true
 	default:
@@ -730,8 +722,8 @@ type HypothesisDraft struct {
 	ExpectedCausalNodeIDs    []string `json:"expected_causal_node_ids,omitempty" jsonschema:"required,minItems=1"`
 	// RequireCausalMechanism is set only by the deterministic candidate engine.
 	// It prevents a symptom/observation-only path from becoming an accepted
-	// root-cause diagnosis while preserving compatibility for non-KubePilot
-	// baseline strategies that use the legacy verification contract.
+	// root-cause diagnosis in deterministic baselines. KubePilot Brain does not
+	// use this contract.
 	RequireCausalMechanism  bool     `json:"require_causal_mechanism,omitempty"`
 	FalsificationConditions []string `json:"falsification_conditions,omitempty"`
 }

@@ -1123,7 +1123,7 @@ func submitConstrainedDiagnosis(ctx context.Context, in hypothesisSelection) (co
 	incident.RootCauseResource = selected.Draft.Resource
 	incident.RootCauseEvidenceIDs = append([]string(nil), selected.VerifiedEvidenceIDs...)
 	incident.Confidence = selected.FinalScore
-	incident.Hypotheses = legacyHypotheses(runtime.state.HypothesisDrafts)
+	incident.Hypotheses = baselineHypotheses(runtime.state.HypothesisDrafts)
 	_ = runtime.transitionIncident(ctx, domain.StatusProposing)
 	runtime.markDoneLocked(DiagnosisAgentName)
 	return constrainedToolOutput{OK: true, Message: "evidence-driven diagnosis accepted"}, nil

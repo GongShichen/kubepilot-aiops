@@ -147,7 +147,7 @@ components:
         namespace: {type: string}
         resource: {type: string}
         summary: {type: string}
-        diagnosis_method: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills, llm-only, vector-rag], default: kubepilot, description: Legacy llm-only and vector-rag values are normalized before persistence}
+        diagnosis_method: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills], default: kubepilot}
         causal_mode: {type: string, enum: [no-causal, static-causal, learned-causal, full], default: full, description: Runtime causal knowledge policy used for controlled ablations and deployments}
         evidence_start_at: {type: string, format: date-time, description: Optional start of the incident observation window}
     Approval:
@@ -284,7 +284,7 @@ components:
       type: object
       required: [architecture, plan, started_at]
       properties:
-        architecture: {type: string, enum: [single-pass, single-pass-episodic, single-react, hierarchical-causal-react, eino-rule-diagnosis-runtime, eino-evidence-diagnosis-runtime, eino-cognitive-diagnosis-runtime, eino-native-self-reflective-brain]}
+        architecture: {type: string, enum: [single-pass, single-pass-episodic, single-react, eino-rule-diagnosis-runtime, eino-evidence-diagnosis-runtime, eino-cognitive-diagnosis-runtime, eino-native-self-reflective-brain]}
         plan: {$ref: '#/components/schemas/InvestigationPlan'}
         findings: {type: array, items: {$ref: '#/components/schemas/WorkerFinding'}}
         debate: {type: array, maxItems: 2, items: {$ref: '#/components/schemas/DebateRound'}}

@@ -76,9 +76,9 @@ func perform(router http.Handler, method, path, body string, headers map[string]
 	return response
 }
 
-func TestIncidentAPIMapsLegacyStrategyAndExposesInvestigationLedger(t *testing.T) {
+func TestIncidentAPIExposesCanonicalInvestigationLedger(t *testing.T) {
 	router, memoryStore, _ := testRouter()
-	response := perform(router, http.MethodPost, "/api/v1/incidents", `{"service":"payment","namespace":"kubepilot-demo","summary":"latency","diagnosis_method":"llm-only"}`, nil)
+	response := perform(router, http.MethodPost, "/api/v1/incidents", `{"service":"payment","namespace":"kubepilot-demo","summary":"latency","diagnosis_method":"direct"}`, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -87,10 +87,10 @@ func TestIncidentAPIMapsLegacyStrategyAndExposesInvestigationLedger(t *testing.T
 		t.Fatal(err)
 	}
 	if incident.DiagnosisMethod != domain.DiagnosisMethodDirect || incident.CausalMode != domain.CausalModeFull {
-		t.Fatalf("legacy strategy was not normalized: %+v", incident)
+		t.Fatalf("canonical strategy was not persisted: %+v", incident)
 	}
 	incident.Investigation = &domain.Investigation{
-		Architecture: "hierarchical-causal-react",
+		Architecture: "single-pass",
 		Plan:         domain.InvestigationPlan{Objective: "diagnose"},
 		Findings:     []domain.WorkerFinding{{Worker: "metric_worker", EvidenceIDs: []string{"metric"}}},
 		Debate:       []domain.DebateRound{{Round: 1}},

@@ -86,8 +86,8 @@ func (s singlePassStrategy) Diagnose(ctx context.Context, input DiagnosisInput) 
 	if err = decodeModelJSON(message.Content, &output); err != nil {
 		return DiagnosisResult{}, fmt.Errorf("decode %s diagnosis: %w", s.id, err)
 	}
-	// A baseline receives the same server-owned causal-ID contract as the
-	// hierarchical strategy. This prevents a provider response from turning a
+	// A baseline receives the server-owned causal-ID contract. This prevents a
+	// provider response from turning a
 	// list of unrelated observations into an implicit causal path.
 	output.Hypotheses = filterGroundedHypothesisDrafts(output.Hypotheses, input.InitialEvidence)
 	result := DiagnosisResult{Method: s.id, Hypotheses: output.Hypotheses, SelectedHypothesisID: output.SelectedHypothesisID, Evidence: input.InitialEvidence, Candidates: input.Candidates}
@@ -104,22 +104,19 @@ func (s singlePassStrategy) Diagnose(ctx context.Context, input DiagnosisInput) 
 	return result, nil
 }
 
-func (r *AgentRegistry) RunConstrained(ctx context.Context, state *WorkflowState, deps constrainedToolDeps) error {
+// RunBaseline executes only the explicitly selected Direct, RAG, or ReAct
+// baseline. KubePilot is accepted exclusively by the Brain graph and has no
+// fallback into this runtime.
+func (r *AgentRegistry) RunBaseline(ctx context.Context, state *WorkflowState, deps constrainedToolDeps) error {
 	if state == nil || state.Incident == nil {
 		return fmt.Errorf("workflow state and Incident are required")
 	}
-	method := state.Incident.DiagnosisMethod
-	// Low-level callers created before strategy selection intentionally retain
-	// the original single-agent behavior. Production ingress always persists a
-	// canonical method before invoking the workflow.
-	if method == "" {
-		return r.runConstrainedAgents(ctx, state, deps)
-	} else {
-		var ok bool
-		method, ok = domain.NormalizeDiagnosisMethod(method)
-		if !ok {
-			return fmt.Errorf("unsupported diagnosis method %q", state.Incident.DiagnosisMethod)
-		}
+	method, ok := domain.NormalizeDiagnosisMethod(state.Incident.DiagnosisMethod)
+	if !ok {
+		return fmt.Errorf("unsupported baseline method %q", state.Incident.DiagnosisMethod)
+	}
+	if domain.IsKubePilotBrainMethod(method) {
+		return fmt.Errorf("KubePilot method %q is executable only by the Brain graph", method)
 	}
 	state.Incident.DiagnosisMethod = method
 	switch method {
@@ -146,23 +143,8 @@ func (r *AgentRegistry) RunConstrained(ctx context.Context, state *WorkflowState
 		if err = r.applyDiagnosisResult(ctx, state, deps, result); err != nil {
 			return err
 		}
-	case domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive:
-		mode := cognitiveDiagnosisMode{}
-		switch method {
-		case domain.DiagnosisMethodRuleOnly:
-			mode.RuleOnly = true
-		case domain.DiagnosisMethodCognitive:
-			mode.Cognitive = true
-		case domain.DiagnosisMethodActive:
-			mode.Cognitive, mode.Active = true, true
-		}
-		result, err := r.runCognitiveDiagnosis(ctx, state.Incident, deps, mode)
-		if err != nil {
-			return err
-		}
-		if err = r.applyDiagnosisResult(ctx, state, deps, result); err != nil {
-			return err
-		}
+	default:
+		return fmt.Errorf("method %q is not a single-pass or ReAct baseline", method)
 	}
 	if state.Incident.Status == domain.StatusNeedsAttention {
 		return nil

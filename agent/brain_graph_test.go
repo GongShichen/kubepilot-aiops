@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -32,8 +33,8 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 		available[info.Name] = true
 	}
 	var payload struct {
-		Phase      domain.BrainPhase `json:"phase"`
-		Evidence   []domain.Evidence `json:"evidence"`
+		Phase      domain.BrainPhase          `json:"phase"`
+		Evidence   []domain.BrainEvidenceView `json:"evidence_view"`
 		Hypotheses []struct {
 			ID              string  `json:"id"`
 			ModelConfidence float64 `json:"model_confidence"`
@@ -67,7 +68,11 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 		hypothesisIDs = append(hypothesisIDs, hypothesis.ID)
 		confidence[hypothesis.ID] = hypothesis.ModelConfidence
 	}
-	evidenceIDs := evidenceIDs(payload.Evidence)
+	evidenceIDs := make([]string, 0, len(payload.Evidence))
+	for _, item := range payload.Evidence {
+		evidenceIDs = append(evidenceIDs, item.ID)
+	}
+	sort.Strings(evidenceIDs)
 	causalNodeIDs := []string{}
 	for _, item := range payload.Evidence {
 		causalNodeIDs = append(causalNodeIDs, item.CausalNodeIDs...)
@@ -194,6 +199,9 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 	if incident.Investigation == nil || incident.Investigation.Architecture != "eino-native-self-reflective-brain" {
 		t.Fatalf("kubepilot did not persist the Brain architecture audit: %+v", incident.Investigation)
 	}
+	if incident.Investigation.Arbitration != nil {
+		t.Fatalf("KubePilot persisted deterministic baseline arbitration: %+v", incident.Investigation.Arbitration)
+	}
 	inv := incident.Investigation
 	if len(inv.AgentHypotheses) != 2 || len(inv.HypothesisGroundings) != 2 || len(inv.Reflections) == 0 || inv.AgentDiagnosis == nil || inv.AgentDiagnosis.Provisional {
 		t.Fatalf("incomplete Brain audit chain: hypotheses=%d groundings=%d reflections=%d diagnosis=%+v", len(inv.AgentHypotheses), len(inv.HypothesisGroundings), len(inv.Reflections), inv.AgentDiagnosis)
@@ -221,6 +229,9 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 	}
 	if final.Incident.Status != domain.StatusResolved || final.Termination == nil || final.Termination.Reason != domain.TerminationRecoverySucceeded || final.WorkflowAttempt.Status != domain.WorkflowAttemptCompleted {
 		t.Fatalf("unexpected final Brain state: status=%s termination=%+v attempt=%+v", final.Incident.Status, final.Termination, final.WorkflowAttempt)
+	}
+	if final.DiagnosisRuntime != nil || len(final.Candidates) != 0 || len(final.HypothesisDrafts) != 0 || len(final.VerifiedHypotheses) != 0 || final.Incident.Investigation.Arbitration != nil {
+		t.Fatalf("KubePilot entered a deterministic baseline path: runtime=%+v candidates=%d drafts=%d verified=%d arbitration=%+v", final.DiagnosisRuntime, len(final.Candidates), len(final.HypothesisDrafts), len(final.VerifiedHypotheses), final.Incident.Investigation.Arbitration)
 	}
 }
 
@@ -266,6 +277,7 @@ func TestVerificationFailureSchedulesOneBudgetedBrainReflection(t *testing.T) {
 	executor := &sequenceVerificationExecutor{samples: []bool{false}}
 	state := &WorkflowState{
 		Incident:          &domain.Incident{ID: "verification-reflection", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Status: domain.StatusVerifying, Investigation: &domain.Investigation{Architecture: "eino-native-self-reflective-brain"}},
+		AgentHypotheses:   []domain.AgentHypothesis{{ID: "h1", ModelConfidence: .8}},
 		BrainBudget:       domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
 		Termination:       &domain.TerminationEvent{Reason: domain.TerminationDiagnosisConfident},
 		VerificationState: VerificationState{StartedAt: time.Now().UTC().Add(-time.Second)},
@@ -283,6 +295,12 @@ func TestVerificationFailureSchedulesOneBudgetedBrainReflection(t *testing.T) {
 	result.BrainPhase = domain.BrainPhaseReflection
 	result.Reflections = append(result.Reflections, domain.ReflectionRecord{ID: "reflection-1", Trigger: domain.ReflectionVerificationFail})
 	(&brainGraphRuntime{}).applyCapabilityOutput(result, brainCapabilityOutput{Class: domain.ToolResultValidation, Summary: "belief updated after confirmed recovery failure", BeliefDelta: &domain.BeliefDelta{HypothesisRevisionID: "h1", PreviousConfidence: .8, NewConfidence: .2, Committed: true}})
+	if _, err = (&brainGraphRuntime{}).beliefCommit(context.Background(), result); err != nil {
+		t.Fatal(err)
+	}
+	if result.AgentHypotheses[0].ModelConfidence != .2 {
+		t.Fatalf("explicit belief_commit did not update model confidence: %+v", result.AgentHypotheses[0])
+	}
 	if result.Termination == nil || result.Termination.Reason != domain.TerminationRecoveryFailed || result.PendingTermination != "" {
 		t.Fatalf("post-failure reflection did not terminate safely: %+v", result.Termination)
 	}
@@ -436,6 +454,63 @@ func TestToolCallBudgetFinalizationContextUsesExistingState(t *testing.T) {
 	}
 	if len(messages) < 2 || !strings.Contains(messages[0].Content, "ToolCall budget is exhausted") || !strings.Contains(messages[len(messages)-1].Content, `"tool_calls_exhausted":true`) {
 		t.Fatalf("model was not told to conclude from existing state: %+v", messages)
+	}
+}
+
+func TestBrainContextUsesEvidenceViewWithoutCanonicalFacts(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	evidence := domain.Evidence{
+		ID: "evidence-1", Source: "kubernetes", Type: "kubernetes_evidence", Namespace: "team-a", Service: "api", Resource: "api",
+		ObservedAt: now, Summary: "api workload is not ready",
+		Content: map[string]any{"raw_secret_fact": "must-not-enter-model-context"},
+		Facts:   map[string]any{"canonical_internal_fact": "runtime-only"},
+		Signals: []domain.EvidenceSignal{{ID: "signal-1", EvidenceID: "evidence-1", Source: "kubernetes", Signal: "workload_unavailable", Direction: "abnormal", ObservedAt: now}},
+	}
+	state := &WorkflowState{
+		Incident:             &domain.Incident{ID: "evidence-view-context", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Namespace: "team-a", Service: "api", Resource: "api", Evidence: []domain.Evidence{evidence}, Investigation: &domain.Investigation{Architecture: "eino-native-self-reflective-brain"}},
+		BrainBudget:          domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		ToolExecutions:       []domain.BrainToolExecution{{Result: domain.ToolResultRecord{Provenance: domain.ToolResultProvenance{ToolCallID: "call-1", RawArtifactHash: "artifact-1", EvidenceIDs: []string{"evidence-1"}}}}},
+		HypothesisGroundings: []domain.HypothesisGrounding{{HypothesisRevisionID: "hypothesis-1", Evidence: domain.GroundingEvidence{SupportingEvidenceIDs: []string{"evidence-1"}}}},
+	}
+	runtime := &brainGraphRuntime{resolver: resolver, toolHash: "tool-schema", policyHash: "policy"}
+	messages, err := runtime.contextBuilder(context.Background(), state, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) < 2 {
+		t.Fatalf("Brain context is incomplete: %+v", messages)
+	}
+	payload := messages[len(messages)-1].Content
+	if strings.Contains(payload, "must-not-enter-model-context") || strings.Contains(payload, "runtime-only") || strings.Contains(payload, `"facts"`) || strings.Contains(payload, `"content"`) || strings.Contains(payload, `"data"`) {
+		t.Fatalf("canonical or raw evidence leaked into Brain context: %s", payload)
+	}
+	if !strings.Contains(payload, `"evidence_view"`) || !strings.Contains(payload, `"tool_call_ids":["call-1"]`) || !strings.Contains(payload, `"hypothesis_revision_ids":["hypothesis-1"]`) || !strings.Contains(payload, "workload_unavailable") {
+		t.Fatalf("Evidence View omitted required grounding/provenance links: %s", payload)
+	}
+}
+
+func TestClassifiedEvidenceToolResultPersistsOnlyEvidenceView(t *testing.T) {
+	now := time.Now().UTC()
+	output := brainCapabilityOutput{
+		Class: domain.ToolResultEvidence, Status: "SUCCEEDED", NewInformation: true,
+		Evidence:   []domain.Evidence{{ID: "evidence-1", Source: "metric", Type: "metric_evidence", ObservedAt: now, Summary: "current CPU pressure", Facts: map[string]any{"raw_runtime_fact": "private"}, Signals: []domain.EvidenceSignal{{ID: "signal-1", EvidenceID: "evidence-1", Signal: "cpu_pressure", Direction: "abnormal"}}}},
+		Provenance: domain.ToolResultProvenance{ToolCallID: "call-1", ToolName: "query_prometheus_evidence", EvidenceIDs: []string{"evidence-1"}, RawArtifactHash: "artifact-1", ObservedAt: now},
+	}
+	projection := modelFacingBrainCapabilityOutput(&WorkflowState{}, output)
+	if len(projection.Evidence) != 0 || len(projection.EvidenceView) != 1 {
+		t.Fatalf("model-facing Tool result retained canonical Evidence: %+v", projection)
+	}
+	raw, err := json.Marshal(projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := string(raw)
+	if strings.Contains(encoded, "private") || strings.Contains(encoded, `"facts"`) || !strings.Contains(encoded, "cpu_pressure") || !strings.Contains(encoded, `"evidence_view"`) {
+		t.Fatalf("classified Tool result projection is unsafe or incomplete: %s", encoded)
 	}
 }
 

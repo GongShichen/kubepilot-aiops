@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/compose"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/safety"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
@@ -47,6 +48,28 @@ func (c cognitiveFixtureCollector) Collect(_ context.Context, incident *domain.I
 	return []domain.Evidence{item}, nil
 }
 
+func runDeterministicBaselineGraphForTest(t *testing.T, registry *AgentRegistry, incident *domain.Incident, deps constrainedToolDeps) *WorkflowState {
+	t.Helper()
+	transition := func(_ context.Context, value *domain.Incident, status domain.IncidentStatus) error {
+		value.Status = status
+		return nil
+	}
+	deps.Transition = transition
+	graph, err := buildBaselineGraph(SupervisorDeps{Agents: registry}, deps, transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnable, err := graph.Compile(context.Background(), compose.WithMaxRunSteps(GraphMaxSteps))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := runnable.Invoke(context.Background(), &WorkflowState{Workflow: WorkflowName, Incident: incident})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
 func TestEvidenceOnlyDiagnosisBuildsObjectiveServerState(t *testing.T) {
 	registry, err := NewAgentRegistry(context.Background(), scriptedEinoModel{})
 	if err != nil {
@@ -57,17 +80,14 @@ func TestEvidenceOnlyDiagnosisBuildsObjectiveServerState(t *testing.T) {
 		"metric": cognitiveFixtureCollector{source: "prometheus"}, "log": cognitiveFixtureCollector{source: "loki"},
 		"trace": cognitiveFixtureCollector{source: "jaeger"}, "topology": cognitiveFixtureCollector{source: "kubernetes"},
 	}, Reasoning: reasoning.New(reasoning.DefaultConfig()), Knowledge: cognitivePatternReader{patterns: []domain.CausalPattern{incompleteCPUPattern()}}}
-	result, err := registry.runCognitiveDiagnosis(context.Background(), incident, deps, cognitiveDiagnosisMode{})
-	if err != nil {
-		t.Fatal(err)
+	state := runDeterministicBaselineGraphForTest(t, registry, incident, deps)
+	if incident.Investigation == nil || len(incident.Investigation.Signals) < 4 || len(state.StateAssertions) < 3 || len(state.VerifiedHypotheses) == 0 || len(incident.Investigation.Candidates) == 0 || len(incident.Investigation.Verified) == 0 || len(incident.Investigation.Findings) != 4 {
+		t.Fatalf("deterministic baseline did not produce a complete evidence chain: %+v", incident.Investigation)
 	}
-	if result.Investigation == nil || len(result.Investigation.Signals) < 4 || len(result.Assertions) < 3 || len(result.Verified) == 0 || len(result.Investigation.Candidates) == 0 || len(result.Investigation.Verified) == 0 || len(result.Investigation.Findings) != 4 {
-		t.Fatalf("deterministic runtime did not produce a complete evidence chain: %+v", result.Investigation)
+	if incident.Investigation.Arbitration == nil || incident.Investigation.Arbitration.Accepted {
+		t.Fatalf("symptom-only candidate bypassed the deterministic causal gate: %+v", incident.Investigation.Arbitration)
 	}
-	if result.Investigation.Arbitration == nil || result.Investigation.Arbitration.Accepted {
-		t.Fatalf("symptom-only candidate bypassed the deterministic causal gate: %+v", result.Investigation.Arbitration)
-	}
-	for _, item := range result.Evidence {
+	for _, item := range incident.Evidence {
 		if item.ID == "" || len(item.Facts) == 0 || item.Data != nil {
 			t.Fatalf("evidence contract was not normalized: %+v", item)
 		}
@@ -89,22 +109,19 @@ func TestEvidenceOnlyRuntimeUsesActiveCausalPatternsForCandidatesAndCoverage(t *
 		"metric": cognitiveFixtureCollector{source: "prometheus"}, "log": cognitiveFixtureCollector{source: "loki"},
 		"trace": cognitiveFixtureCollector{source: "jaeger"}, "topology": cognitiveFixtureCollector{source: "kubernetes"},
 	}, Reasoning: reasoning.New(reasoning.DefaultConfig()), Knowledge: cognitivePatternReader{patterns: []domain.CausalPattern{pattern}}}
-	result, err := registry.runCognitiveDiagnosis(context.Background(), incident, deps, cognitiveDiagnosisMode{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.CausalPatterns) != 1 {
-		t.Fatalf("active causal pattern was not loaded: %+v", result.CausalPatterns)
+	state := runDeterministicBaselineGraphForTest(t, registry, incident, deps)
+	if len(state.CausalPatterns) != 1 {
+		t.Fatalf("active causal pattern was not loaded: %+v", state.CausalPatterns)
 	}
 	var cpu *domain.VerifiedHypothesis
-	for index := range result.Verified {
-		if result.Verified[index].Draft.Category == "cpu" {
-			cpu = &result.Verified[index]
+	for index := range state.VerifiedHypotheses {
+		if state.VerifiedHypotheses[index].Draft.Category == "cpu" {
+			cpu = &state.VerifiedHypotheses[index]
 			break
 		}
 	}
 	if cpu == nil || cpu.CausalPathCoverage != 1 {
-		t.Fatalf("active causal pattern was not shared by candidate and verifier: verified=%+v", result.Verified)
+		t.Fatalf("active causal pattern was not shared by candidate and verifier: verified=%+v", state.VerifiedHypotheses)
 	}
 	if got := cpu.Draft.ExpectedCausalNodeIDs; !reflect.DeepEqual(got, []string{"cpu_demand", "request_failure"}) {
 		t.Fatalf("candidate did not retain canonical graph path: %v", got)
@@ -123,19 +140,13 @@ func TestRuleOnlyAndEvidenceOnlyHaveDifferentCausalFootprints(t *testing.T) {
 	newIncident := func(id, method string) *domain.Incident {
 		return &domain.Incident{ID: id, DiagnosisMethod: method, Namespace: "team-a", Service: "checkout", Resource: "checkout", CreatedAt: time.Now().Add(-time.Minute)}
 	}
-	rule, err := registry.runCognitiveDiagnosis(context.Background(), newIncident("rule", domain.DiagnosisMethodRuleOnly), deps, cognitiveDiagnosisMode{RuleOnly: true})
-	if err != nil {
-		t.Fatal(err)
+	rule := runDeterministicBaselineGraphForTest(t, registry, newIncident("rule", domain.DiagnosisMethodRuleOnly), deps)
+	evidence := runDeterministicBaselineGraphForTest(t, registry, newIncident("evidence", domain.DiagnosisMethodEvidence), deps)
+	if rule.Incident.Investigation.Architecture != "eino-rule-diagnosis-runtime" || len(rule.Incident.Investigation.Falsification) != 0 || len(rule.Incident.Investigation.Pairwise) != 0 {
+		t.Fatalf("rule-only executed deterministic causal/falsification services: %+v", rule.Incident.Investigation)
 	}
-	evidence, err := registry.runCognitiveDiagnosis(context.Background(), newIncident("evidence", domain.DiagnosisMethodEvidence), deps, cognitiveDiagnosisMode{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rule.Investigation.Architecture != "eino-rule-diagnosis-runtime" || len(rule.Investigation.Falsification) != 0 || len(rule.Investigation.Pairwise) != 0 {
-		t.Fatalf("rule-only executed deterministic causal/falsification services: %+v", rule.Investigation)
-	}
-	if evidence.Investigation.Architecture != "eino-evidence-diagnosis-runtime" || len(evidence.Investigation.Falsification) == 0 {
-		t.Fatalf("evidence-only did not execute its deterministic causal/falsification services: %+v", evidence.Investigation)
+	if evidence.Incident.Investigation.Architecture != "eino-evidence-diagnosis-runtime" || len(evidence.Incident.Investigation.Falsification) == 0 {
+		t.Fatalf("evidence-only did not execute its deterministic causal/falsification services: %+v", evidence.Incident.Investigation)
 	}
 }
 

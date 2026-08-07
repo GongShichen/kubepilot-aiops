@@ -61,9 +61,8 @@ func (s *Supervisor) RuntimeHashes() (string, string, string) {
 	return s.skillSnapshotHash, s.rankingPolicyHash, rerankerHash
 }
 
-// RuntimeHashesForMethod preserves the frozen legacy Skill snapshot for every
-// baseline while selecting the versioned Brain Skill bundle only for the
-// KubePilot Brain strategies.
+// RuntimeHashesForMethod preserves the frozen baseline Skill snapshot while
+// selecting the versioned Brain bundle only for KubePilot.
 func (s *Supervisor) RuntimeHashesForMethod(method string) (string, string, string) {
 	skill, ranking, reranker := s.RuntimeHashes()
 	if domain.IsKubePilotBrainMethod(method) {
@@ -156,8 +155,8 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	if err != nil {
 		return nil, err
 	}
-	brainDeps := constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory, Transition: transition}
-	brainTools, err := buildBrainCapabilities(brainDeps, brainResolver)
+	runtimeDeps := constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory, Transition: transition}
+	brainTools, err := buildBrainCapabilities(runtimeDeps, brainResolver)
 	if err != nil {
 		return nil, err
 	}
@@ -166,18 +165,18 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 		return nil, err
 	}
 	brainStates := &sync.Map{}
-	brainRuntime := &brainGraphRuntime{resolver: brainResolver, tools: brainTools, toolHash: brainToolHash, policyHash: brainruntime.Hash(brainResolver.ToolPolicy()), agents: deps.Agents, deps: brainDeps, states: brainStates}
+	brainRuntime := &brainGraphRuntime{resolver: brainResolver, tools: brainTools, toolHash: brainToolHash, policyHash: brainruntime.Hash(brainResolver.ToolPolicy()), agents: deps.Agents, deps: runtimeDeps, states: brainStates}
 	brainGraph, err := buildBrainGraph(ctx, brainRuntime)
 	if err != nil {
 		return nil, err
 	}
-	// WorkflowState is the graph payload: every node returns the same
-	// per-invocation state pointer and every branch receives that output. Do
-	// not maintain a second Eino local state copy here. A local copy and the
-	// edge payload can diverge across checkpointed concurrent invocations,
-	// allowing an evidence-only request to fall through to the legacy ReAct
-	// branch. The graph payload itself remains checkpointed and resumed by
-	// Eino, while avoiding a second source of truth for routing.
+	baselineGraph, err := buildBaselineGraph(deps, runtimeDeps, transition)
+	if err != nil {
+		return nil, err
+	}
+	// WorkflowState is the only state source. KubePilot and the frozen
+	// baselines are compiled as separate Eino subgraphs so no checkpoint,
+	// branch, or payload can fall through between the two runtimes.
 	g := compose.NewGraph[*WorkflowState, *WorkflowState]()
 	add := func(name string, fn func(context.Context, *WorkflowState) (*WorkflowState, error)) error {
 		return g.AddLambdaNode(name, compose.InvokableLambda(fn), compose.WithNodeName(name))
@@ -191,9 +190,22 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	); err != nil {
 		return nil, err
 	}
+	if err := g.AddGraphNode("baseline_runtime", baselineGraph,
+		compose.WithGraphCompileOptions(
+			compose.WithGraphName("baseline_diagnosis_runtime"),
+			compose.WithMaxRunSteps(GraphMaxSteps),
+		),
+		compose.WithNodeName("baseline_diagnosis_runtime"),
+	); err != nil {
+		return nil, err
+	}
 	if err := add("incident_intake", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
 		s.Workflow = WorkflowName
-		method, _ := domain.NormalizeDiagnosisMethod(s.Incident.DiagnosisMethod)
+		method, valid := domain.NormalizeDiagnosisMethod(s.Incident.DiagnosisMethod)
+		if !valid {
+			return s, fmt.Errorf("invalid diagnosis method %q", s.Incident.DiagnosisMethod)
+		}
+		s.Incident.DiagnosisMethod = method
 		if domain.IsKubePilotBrainMethod(method) {
 			s.Incident.SkillSnapshotHash = brainResolver.SnapshotHash()
 		} else {
@@ -225,117 +237,12 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	}); err != nil {
 		return nil, err
 	}
-	if err := add("cognitive_intent", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.cognitiveIntentNode(ctx, s); err != nil {
-			return s, err
-		}
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := add("query_compiler", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.queryCompilerNode(s); err != nil {
-			return s, err
-		}
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := add("evidence_collection", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.evidenceCollectionNode(ctx, s, constrainedToolDeps{Collectors: deps.Collectors, Reasoning: deps.Reasoning}); err != nil {
-			return s, err
-		}
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := add("signal_assertion_builder", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.signalAssertionBuilderNode(s, constrainedToolDeps{Reasoning: deps.Reasoning}); err != nil {
-			return s, err
-		}
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := add("candidate_generation", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.candidateGenerationNode(ctx, s, constrainedToolDeps{Reasoning: deps.Reasoning, Knowledge: deps.Knowledge}); err != nil {
-			return s, err
-		}
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := add("cognitive_reasoning", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.cognitiveReasoningNode(ctx, s); err != nil {
-			return s, err
-		}
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := add("causal_falsification", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.causalFalsificationNode(s); err != nil {
-			return s, err
-		}
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := add("objective_arbitration", func(_ context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.objectiveArbitrationNode(s); err != nil {
-			return s, err
-		}
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := add("recovery_permission", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if s.DiagnosisRuntime == nil {
-			return s, nil
-		}
-		if !s.DiagnosisRuntime.Completed {
-			return s, fmt.Errorf("recovery permission reached before deterministic diagnosis completed")
-		}
-		result, err := cognitiveDiagnosisResult(s)
-		if err != nil {
-			return s, err
-		}
-		if err = deps.Agents.applyDiagnosisResult(ctx, s, constrainedToolDeps{Reasoning: deps.Reasoning, Transition: transition}, result); err != nil {
-			return s, err
-		}
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := add("constrained_recovery_agents", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if s.DiagnosisRuntime == nil || s.Incident.Status == domain.StatusNeedsAttention {
-			return s, nil
-		}
-		if err := deps.Agents.runConstrainedAgents(ctx, s, constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Transition: transition, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory}); err != nil {
-			return s, err
-		}
-		s.Incident.DiagnosisLedger = &s.DiagnosisLedger
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	// Existing baselines retain their original strategies and ADK ReAct
-	// footprint. The deterministic subgraph above is a no-op for them.
-	if err := add("constrained_react_agents", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.RunConstrained(ctx, s, constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Transition: transition, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory}); err != nil {
-			return s, err
-		}
-		s.Incident.DiagnosisLedger = &s.DiagnosisLedger
-		return s, nil
-	}); err != nil {
-		return nil, err
-	}
-	if err := add("deterministic_proposal_validator", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+	if err := add("recovery_proposal_validator", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
 		if s.Incident.Status == domain.StatusNeedsAttention {
 			return s, nil
 		}
 		if s.Incident.Status != domain.StatusProposing || s.Incident.Proposal == nil || s.DryRun == nil || !s.DryRun.Success || s.Incident.DryRun == nil || s.Incident.DryRun.MutationSpecHash != s.DryRun.MutationSpecHash {
-			s.Errors = append(s.Errors, "constrained Agent handoff did not contain a matching accepted proposal and dry-run")
+			s.Errors = append(s.Errors, "diagnosis handoff did not contain a matching accepted proposal and dry-run")
 			if err := transition(ctx, s.Incident, domain.StatusNeedsAttention); err != nil {
 				return s, err
 			}
@@ -349,7 +256,7 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	}); err != nil {
 		return nil, err
 	}
-	if err := add("deterministic_action_executor", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+	if err := add("safety_action_executor", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
 		if err := validateExecutionContext(s); err != nil {
 			s.Errors = append(s.Errors, err.Error())
 			_ = transition(ctx, s.Incident, domain.StatusNeedsAttention)
@@ -404,7 +311,7 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	}); err != nil {
 		return nil, err
 	}
-	if err := add("deterministic_verification_controller", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
+	if err := add("verification_controller", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
 		return runVerificationController(ctx, s, deps, transition)
 	}); err != nil {
 		return nil, err
@@ -426,33 +333,21 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	}
 	for _, edge := range [][2]string{
 		{compose.START, "incident_intake"},
-		{"cognitive_intent", "query_compiler"},
-		{"query_compiler", "evidence_collection"},
-		{"evidence_collection", "signal_assertion_builder"},
-		{"signal_assertion_builder", "candidate_generation"},
-		{"candidate_generation", "cognitive_reasoning"},
-		{"cognitive_reasoning", "causal_falsification"},
-		{"causal_falsification", "objective_arbitration"},
-		{"constrained_react_agents", "deterministic_proposal_validator"},
-		{"constrained_recovery_agents", "deterministic_proposal_validator"},
+		{"baseline_runtime", "recovery_proposal_validator"},
 	} {
 		if err := g.AddEdge(edge[0], edge[1]); err != nil {
 			return nil, err
 		}
 	}
-	if err := g.AddBranch("incident_intake", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
-		if s == nil || s.Incident == nil {
+	if err := g.AddBranch("incident_intake", compose.NewGraphBranch(func(_ context.Context, state *WorkflowState) (string, error) {
+		if state == nil || state.Incident == nil {
 			return "", fmt.Errorf("incident intake is missing workflow state")
 		}
-		method, valid := domain.NormalizeDiagnosisMethod(s.Incident.DiagnosisMethod)
-		if !valid {
-			return "", fmt.Errorf("invalid diagnosis method %q", s.Incident.DiagnosisMethod)
-		}
-		if domain.IsKubePilotBrainMethod(method) {
+		if domain.IsKubePilotBrainMethod(state.Incident.DiagnosisMethod) {
 			return "kubepilot_brain", nil
 		}
-		return "cognitive_intent", nil
-	}, map[string]bool{"kubepilot_brain": true, "cognitive_intent": true})); err != nil {
+		return "baseline_runtime", nil
+	}, map[string]bool{"kubepilot_brain": true, "baseline_runtime": true})); err != nil {
 		return nil, err
 	}
 	if err := g.AddEdge("kubepilot_brain", "brain_recovery_permission"); err != nil {
@@ -471,38 +366,13 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	}
 	if err := g.AddBranch("brain_dry_run", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
 		if s != nil && s.DryRun != nil && s.DryRun.Success && s.Incident != nil && s.Incident.Proposal != nil {
-			return "deterministic_proposal_validator", nil
+			return "recovery_proposal_validator", nil
 		}
 		return "kubepilot_brain", nil
-	}, map[string]bool{"deterministic_proposal_validator": true, "kubepilot_brain": true})); err != nil {
+	}, map[string]bool{"recovery_proposal_validator": true, "kubepilot_brain": true})); err != nil {
 		return nil, err
 	}
-	if err := g.AddBranch("objective_arbitration", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
-		if s == nil || s.Incident == nil {
-			return "", fmt.Errorf("objective arbitration is missing workflow state")
-		}
-		if _, deterministic := cognitiveModeForMethod(s.Incident.DiagnosisMethod); deterministic && s.DiagnosisRuntime == nil {
-			return "", fmt.Errorf("deterministic diagnosis runtime state was lost before arbitration")
-		}
-		if s.DiagnosisRuntime == nil {
-			return "constrained_react_agents", nil
-		}
-		if !s.DiagnosisRuntime.Completed {
-			return "query_compiler", nil
-		}
-		return "recovery_permission", nil
-	}, map[string]bool{"constrained_react_agents": true, "query_compiler": true, "recovery_permission": true})); err != nil {
-		return nil, err
-	}
-	if err := g.AddBranch("recovery_permission", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
-		if s.Incident.Status == domain.StatusNeedsAttention {
-			return "incident_finalizer", nil
-		}
-		return "constrained_recovery_agents", nil
-	}, map[string]bool{"incident_finalizer": true, "constrained_recovery_agents": true})); err != nil {
-		return nil, err
-	}
-	if err := g.AddBranch("deterministic_proposal_validator", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+	if err := g.AddBranch("recovery_proposal_validator", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
 		if s.Incident.Status == domain.StatusNeedsAttention {
 			return "incident_finalizer", nil
 		}
@@ -514,22 +384,22 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 		if s.Incident.Status == domain.StatusRejected {
 			return "incident_finalizer", nil
 		}
-		return "deterministic_action_executor", nil
-	}, map[string]bool{"incident_finalizer": true, "deterministic_action_executor": true})); err != nil {
+		return "safety_action_executor", nil
+	}, map[string]bool{"incident_finalizer": true, "safety_action_executor": true})); err != nil {
 		return nil, err
 	}
-	if err := g.AddBranch("deterministic_action_executor", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+	if err := g.AddBranch("safety_action_executor", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
 		if s.PendingReflection != nil && domain.IsKubePilotBrainMethod(s.Incident.DiagnosisMethod) {
 			return "kubepilot_brain", nil
 		}
 		if s.Incident.Status != domain.StatusVerifying {
 			return "incident_finalizer", nil
 		}
-		return "deterministic_verification_controller", nil
-	}, map[string]bool{"incident_finalizer": true, "deterministic_verification_controller": true, "kubepilot_brain": true})); err != nil {
+		return "verification_controller", nil
+	}, map[string]bool{"incident_finalizer": true, "verification_controller": true, "kubepilot_brain": true})); err != nil {
 		return nil, err
 	}
-	if err := g.AddBranch("deterministic_verification_controller", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
+	if err := g.AddBranch("verification_controller", compose.NewGraphBranch(func(_ context.Context, s *WorkflowState) (string, error) {
 		if s.PendingReflection != nil && domain.IsKubePilotBrainMethod(s.Incident.DiagnosisMethod) {
 			return "kubepilot_brain", nil
 		}
@@ -885,7 +755,7 @@ type evidenceToolResult struct {
 	Error    string            `json:"error,omitempty"`
 }
 
-func legacyHypotheses(drafts []domain.HypothesisDraft) []domain.Hypothesis {
+func baselineHypotheses(drafts []domain.HypothesisDraft) []domain.Hypothesis {
 	out := make([]domain.Hypothesis, 0, len(drafts))
 	for _, draft := range drafts {
 		out = append(out, domain.Hypothesis{ID: draft.ID, Cause: draft.Cause, Probability: draft.PriorProbability, SupportingEvidence: append([]string(nil), draft.SupportingEvidenceIDs...), ContradictingEvidence: append([]string(nil), draft.ContradictingEvidenceIDs...), FalsificationConditions: append([]string(nil), draft.FalsificationConditions...)})

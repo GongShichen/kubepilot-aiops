@@ -14,6 +14,18 @@ import (
 
 type singlePassDiagnosisModel struct{}
 
+func modelPayloadEvidenceIDs(raw string) []string {
+	var payload struct {
+		Evidence []domain.Evidence `json:"evidence"`
+	}
+	_ = json.Unmarshal([]byte(raw), &payload)
+	ids := make([]string, 0, len(payload.Evidence))
+	for _, item := range payload.Evidence {
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
+
 func (singlePassDiagnosisModel) Generate(_ context.Context, messages []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	ids := modelPayloadEvidenceIDs(messages[len(messages)-1].Content)
 	nodeIDs := []string(nil)
@@ -139,11 +151,17 @@ func TestApplySinglePassDiagnosisUsesCommonDeterministicHandoff(t *testing.T) {
 
 func TestStrategyDispatchRejectsInvalidStateAndReactRemovesEnhancements(t *testing.T) {
 	registry := &AgentRegistry{}
-	if err := registry.RunConstrained(context.Background(), nil, constrainedToolDeps{}); err == nil {
+	if err := registry.RunBaseline(context.Background(), nil, constrainedToolDeps{}); err == nil {
 		t.Fatal("nil workflow state was accepted")
 	}
+	for _, method := range []string{"", domain.DiagnosisMethodKubePilot, domain.DiagnosisMethodKubePilotNoReflection, domain.DiagnosisMethodKubePilotNoOptionalSkills} {
+		state := &WorkflowState{Incident: &domain.Incident{DiagnosisMethod: method}}
+		if err := registry.RunBaseline(context.Background(), state, constrainedToolDeps{}); err == nil {
+			t.Fatalf("non-baseline method %q entered the baseline runtime", method)
+		}
+	}
 	state := &WorkflowState{Incident: &domain.Incident{DiagnosisMethod: "unsupported"}}
-	if err := registry.RunConstrained(context.Background(), state, constrainedToolDeps{}); err == nil {
+	if err := registry.RunBaseline(context.Background(), state, constrainedToolDeps{}); err == nil {
 		t.Fatal("unsupported strategy was accepted")
 	}
 	memory := &strategyMemoryRecorder{}
@@ -169,7 +187,7 @@ func TestDirectStrategyDispatchContinuesThroughSharedRecoveryBoundary(t *testing
 	state := &WorkflowState{Workflow: WorkflowName, Incident: incident}
 	executor := &graphExecutor{}
 	deps := constrainedToolDeps{Collectors: collectors, Reasoning: reasoning.New(reasoning.DefaultConfig()), Executor: executor}
-	if err = registry.RunConstrained(context.Background(), state, deps); err != nil {
+	if err = registry.RunBaseline(context.Background(), state, deps); err != nil {
 		t.Fatal(err)
 	}
 	if incident.DiagnosisMethod != domain.DiagnosisMethodDirect || incident.Investigation == nil || incident.Investigation.Architecture != "single-pass" || incident.Proposal == nil || state.DryRun == nil || !state.DryRun.Success {
