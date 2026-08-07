@@ -15,7 +15,7 @@ import (
 
 // DefaultMaxTurns is scoped to one LLM Brain Agent Workflow Attempt. It is
 // neither an Incident wall-clock timeout nor a shared limit across agents.
-const DefaultMaxTurns = 30
+const DefaultMaxTurns = 50
 
 func DefaultBudget() domain.BrainBudget {
 	return domain.BrainBudget{
