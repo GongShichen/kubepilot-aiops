@@ -38,7 +38,7 @@ type brainGraphRuntime struct {
 	toolHash   string
 	policyHash string
 	agents     *AgentRegistry
-	deps       constrainedToolDeps
+	deps       brainRuntimeDeps
 	states     *sync.Map
 }
 
@@ -262,7 +262,7 @@ func buildBrainGraph(ctx context.Context, runtime *brainGraphRuntime) (compose.A
 	return graph, nil
 }
 
-func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowState, reflection bool) ([]*schema.Message, error) {
+func (r *brainGraphRuntime) contextBuilder(ctx context.Context, state *WorkflowState, reflection bool) ([]*schema.Message, error) {
 	if state == nil || state.Incident == nil {
 		return nil, fmt.Errorf("Brain context requires WorkflowState and Incident")
 	}
@@ -345,18 +345,24 @@ func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowSta
 	if state.BrainPhase == domain.BrainPhaseReflection && state.ResumeBrainPhase != "" {
 		skillSelectionPhase = state.ResumeBrainPhase
 	}
-	availableOptionalSkills := []brainSkillCatalogEntry(nil)
-	if maxOptional > 0 {
-		availableOptionalSkills = r.resolver.OptionalCatalog(skillSelectionPhase)
+	availableOptionalSkills := []domain.SkillSearchResult(nil)
+	if maxOptional > 0 && r.deps.SkillRetrieval != nil {
+		search, searchErr := r.deps.SkillRetrieval.Search(ctx, domain.SkillRetrievalQuery{IncidentID: state.Incident.ID, Phase: skillSelectionPhase, Text: brainSkillRetrievalText(state), Documents: r.resolver.SkillDocuments(skillSelectionPhase), Limit: maxOptional * 3})
+		if searchErr != nil {
+			state.Errors = append(state.Errors, "skill retrieval unavailable")
+		} else {
+			state.SkillRetrievals = append(state.SkillRetrievals, search)
+			availableOptionalSkills = search.Results
+		}
 	}
-	payload := map[string]any{"incident": safeIncident(state.Incident), "understanding": state.IncidentUnderstanding, "plan": state.InvestigationPlan, "phase": state.BrainPhase, "evidence_snapshot_hash": state.EvidenceSnapshotHash, "evidence_view": brainEvidenceViews(state, state.Incident.Evidence, 48<<10, 12), "hypotheses": state.AgentHypotheses, "admissions": state.HypothesisAdmissions, "groundings": state.HypothesisGroundings, "grounding_deltas": tailGroundingDeltas(state.GroundingDeltas, 5), "recent_tool_results": tailBrainToolExecutions(state.ToolExecutions, 5), "memory_reads": state.Incident.Investigation.MemoryReads, "causal_patterns": tailCausalPatterns(state.BrainCausalPatterns, 10), "loaded_skill_references": state.LoadedSkillReferences, "available_optional_skills": availableOptionalSkills, "optional_skill_selection_phase": skillSelectionPhase, "max_optional_skills_this_turn": maxOptional, "diagnosis": state.AgentDiagnosis, "recovery_plan": state.AgentRecoveryPlan, "budget": state.BrainBudget, "active_tool_category": effectiveToolCategory(state), "execution_snapshot": state.ExecutionSnapshot}
+	payload := map[string]any{"incident": safeIncident(state.Incident), "world_model": brainWorldModelView(state.WorldModel), "understanding": state.IncidentUnderstanding, "plan": state.InvestigationPlan, "phase": state.BrainPhase, "evidence_snapshot_hash": state.EvidenceSnapshotHash, "evidence_view": brainEvidenceViews(state, state.Incident.Evidence, 24<<10, 8), "hypotheses": state.AgentHypotheses, "admissions": state.HypothesisAdmissions, "groundings": state.HypothesisGroundings, "grounding_deltas": tailGroundingDeltas(state.GroundingDeltas, 5), "recent_tool_results": tailBrainToolExecutions(state.ToolExecutions, 5), "memory_reads": tailMemoryReads(state.Incident.Investigation.MemoryReads, 5), "hybrid_retrievals": brainHybridRetrievalViews(state.HybridRetrievals, 1), "causal_patterns": tailCausalPatterns(state.BrainCausalPatterns, 6), "loaded_skill_references": state.LoadedSkillReferences, "available_optional_skills": availableOptionalSkills, "optional_skill_selection_phase": skillSelectionPhase, "max_optional_skills_this_turn": maxOptional, "diagnosis": state.AgentDiagnosis, "recovery_plan": state.AgentRecoveryPlan, "budget": state.BrainBudget, "active_tool_category": effectiveToolCategory(state), "execution_snapshot": state.ExecutionSnapshot}
 	raw, _ := json.Marshal(payload)
 	system := "You are KubePilot's LLM Brain. You own investigation, open-world hypotheses, subjective belief revision, diagnosis selection, and recovery planning. The Runtime owns facts, grounding, constraints, authorization, execution, and verification. Follow the injected Skills exactly. Use only an exposed native structured tool call; do not answer in prose or reveal hidden chain-of-thought. JSON Output Examples in Skills describe native tool calls and must never be emitted as Assistant text. Request optional Skills only by an exact ID listed in available_optional_skills; the Runtime never guesses or auto-selects a Skill for you. Constraint or tool errors are not Incident evidence.\n\n" + resolved.Prompt
 	if state.BrainBudget.ToolCallsExhausted {
 		system += "\n\nThe investigation ToolCall budget is exhausted. Do not request more evidence, retrieval, hypothesis validation, Skill loading, reflection, or recovery. Use only the existing structured Evidence, Hypotheses, Grounding, and provenance. If no Diagnosis is persisted, call submit_diagnosis with the best supported existing revision or call finish_investigation with HUMAN_ESCALATION when the existing state cannot support one. A persisted Diagnosis must then be passed through validate_diagnosis before finish_investigation. These closing actions do not reopen the ToolCall budget."
 	}
 	messages := []*schema.Message{schema.SystemMessage(system)}
-	messages = append(messages, boundedBrainMessageHistory(state.BrainMessages, 8, 64<<10)...)
+	messages = append(messages, boundedBrainMessageHistory(state.BrainMessages, 6, 24<<10)...)
 	messages = append(messages, schema.UserMessage(string(raw)))
 	return messages, nil
 }
@@ -522,6 +528,34 @@ func tailBrainToolExecutions(values []domain.BrainToolExecution, limit int) []do
 		return values
 	}
 	return values[len(values)-limit:]
+}
+
+func tailMemoryReads(values []domain.MemoryAccessEvent, limit int) []domain.MemoryAccessEvent {
+	if limit <= 0 || len(values) <= limit {
+		return append([]domain.MemoryAccessEvent(nil), values...)
+	}
+	return append([]domain.MemoryAccessEvent(nil), values[len(values)-limit:]...)
+}
+
+func brainSkillRetrievalText(state *WorkflowState) string {
+	if state == nil || state.Incident == nil {
+		return ""
+	}
+	parts := []string{state.Incident.Summary, state.Incident.Service, state.Incident.Resource, string(state.BrainPhase)}
+	if state.InvestigationPlan != nil {
+		parts = append(parts, state.InvestigationPlan.Objective)
+	}
+	for _, hypothesis := range state.AgentHypotheses {
+		if hypothesis.Status != domain.HypothesisRefuted {
+			parts = append(parts, hypothesis.Statement, hypothesis.Mechanism)
+		}
+	}
+	if state.WorldModel != nil {
+		for _, signal := range state.WorldModel.AbnormalSignals {
+			parts = append(parts, signal.Category, signal.Signal, signal.Direction)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 func tailCausalPatterns(values []domain.CausalPattern, limit int) []domain.CausalPattern {

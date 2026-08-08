@@ -11,6 +11,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/brainruntime"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/topology"
+	"github.com/kubepilot-aiops/kubepilot/internal/worldmodel"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
 	captools "github.com/kubepilot-aiops/kubepilot/tools"
 )
@@ -63,7 +64,18 @@ func (r *brainGraphRuntime) classifyToolResults(ctx context.Context, messages []
 		}
 		toolMessage.Content = string(classified)
 		state.BrainMessages = append(state.BrainMessages, &toolMessage)
+		memoryCursor := 0
+		if state.Incident.Investigation != nil {
+			memoryCursor = len(state.Incident.Investigation.MemoryReads)
+		}
 		r.applyCapabilityOutput(state, output)
+		if r.deps.Memory != nil && state.Incident.Investigation != nil {
+			for _, event := range state.Incident.Investigation.MemoryReads[memoryCursor:] {
+				if recordErr := r.deps.Memory.RecordAccess(ctx, event); recordErr != nil {
+					state.Errors = append(state.Errors, "memory access audit persistence unavailable")
+				}
+			}
+		}
 	}
 	r.syncInvestigation(state)
 	return state, nil
@@ -78,6 +90,9 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 	}
 	if len(output.HistoricalIncidents) > 0 || len(output.Patterns) > 0 || len(output.Memory) > 0 {
 		r.auditRetrieval(state, output)
+	}
+	if output.HybridRetrieval != nil {
+		state.HybridRetrievals = append(state.HybridRetrievals, *output.HybridRetrieval)
 	}
 	for _, hypothesis := range output.Hypotheses {
 		if hypothesis.Relation != domain.HypothesisRoot {
@@ -296,6 +311,12 @@ func (r *brainGraphRuntime) observationUpdate(ctx context.Context, state *Workfl
 			}
 		}
 	}
+	worldEvidence := state.RankedEvidence
+	if len(worldEvidence) == 0 {
+		worldEvidence = state.Incident.Evidence
+	}
+	model := worldmodel.Build(state.Incident, worldEvidence, graph)
+	state.WorldModel = &model
 	state.EvidenceSnapshotHash = brainruntime.EvidenceSnapshotHash(state.Incident.Evidence)
 	if previous != "" && previous != state.EvidenceSnapshotHash {
 		state.AgentHypotheses = brainruntime.InvalidateStaleHypotheses(state.AgentHypotheses, state.EvidenceSnapshotHash)
@@ -588,6 +609,9 @@ func (r *brainGraphRuntime) syncInvestigation(state *WorkflowState) {
 	inv.BrainTurns = append([]domain.BrainTurn(nil), state.BrainTurns...)
 	inv.AssistantTurns = append([]domain.AssistantTurnRecord(nil), state.AssistantTurns...)
 	inv.IncidentUnderstanding = state.IncidentUnderstanding
+	inv.WorldModel = state.WorldModel
+	inv.HybridRetrievals = append([]domain.HybridRetrievalResult(nil), state.HybridRetrievals...)
+	inv.SkillRetrievals = append([]domain.SkillRetrievalResult(nil), state.SkillRetrievals...)
 	inv.SkillActivations = append([]domain.SkillActivation(nil), state.SkillActivations...)
 	inv.ToolExecutions = append([]domain.BrainToolExecution(nil), state.ToolExecutions...)
 	inv.AgentHypotheses = append([]domain.AgentHypothesis(nil), state.AgentHypotheses...)

@@ -18,6 +18,12 @@ func (engineKnowledge) SearchLexicalIncidents(context.Context, domain.IncidentFe
 func (engineKnowledge) SearchTopologyIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error) {
 	return []domain.RetrievalCandidate{{IncidentID: "shared-db", Namespace: "kubepilot-demo", Service: "order-service", Features: domain.IncidentFeatures{TopologyServices: []string{"mysql"}}, SourceScores: map[string]float64{"topology": .95}}}, nil
 }
+func (engineKnowledge) SearchTemporalIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error) {
+	return []domain.RetrievalCandidate{{IncidentID: "temporal-only", Namespace: "kubepilot-demo", Service: "order-service", SourceScores: map[string]float64{"temporal": .92}}}, nil
+}
+func (engineKnowledge) SearchMetricIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error) {
+	return []domain.RetrievalCandidate{{IncidentID: "metric-only", Namespace: "kubepilot-demo", Service: "order-service", SourceScores: map[string]float64{"metric": .94}}}, nil
+}
 
 type engineEmbedder struct{}
 

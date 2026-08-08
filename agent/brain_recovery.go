@@ -83,8 +83,8 @@ func brainRecoveryPermissionNode(ctx context.Context, state *WorkflowState, tran
 	return state, nil
 }
 
-func brainDryRunNode(ctx context.Context, state *WorkflowState, deps SupervisorDeps) (*WorkflowState, error) {
-	result, err := dryRunProposal(ctx, deps.Executor, state.Incident)
+func brainDryRunNode(ctx context.Context, state *WorkflowState, executor Executor) (*WorkflowState, error) {
+	result, err := dryRunProposal(ctx, executor, state.Incident)
 	state.DryRun, state.Incident.DryRun = result, result
 	now := time.Now().UTC()
 	provenance := domain.ToolResultProvenance{ToolCallID: "dry-run:" + ulid.Make().String(), ToolName: "dry_run_recovery", ToolSchemaHash: state.ExecutionSnapshot.ToolSchemaHash, Collector: "safety-kernel", WindowStart: now, WindowEnd: now, ObservedAt: now, ParserVersion: "dry-run-v1"}

@@ -24,6 +24,40 @@ type brainGraphModel struct {
 	history []string
 }
 
+type staticBrainSkillRetriever struct{}
+
+func (staticBrainSkillRetriever) Search(_ context.Context, query domain.SkillRetrievalQuery) (domain.SkillRetrievalResult, error) {
+	result := domain.SkillRetrievalResult{QueryHash: "query", SnapshotHash: "snapshot", RetrievedAt: time.Now().UTC()}
+	for _, document := range query.Documents {
+		result.Results = append(result.Results, domain.SkillSearchResult{ID: document.ID, Version: document.Version, ContentHash: document.ContentHash, Description: document.Description, PhaseScore: 1, FinalScore: 1})
+	}
+	return result, nil
+}
+
+func seedRetrievedBrainSkills(state *WorkflowState, ids ...string) {
+	result := domain.SkillRetrievalResult{
+		QueryHash:    "test-query",
+		SnapshotHash: "test-snapshot",
+		RetrievedAt:  time.Now().UTC(),
+	}
+	for _, id := range ids {
+		result.Results = append(result.Results, domain.SkillSearchResult{
+			ID:          id,
+			Version:     "test",
+			ContentHash: "test:" + id,
+			FinalScore:  1,
+		})
+	}
+	state.SkillRetrievals = []domain.SkillRetrievalResult{result}
+}
+
+type recordingBrainHybridRetriever struct{ calls int }
+
+func (r *recordingBrainHybridRetriever) Retrieve(_ context.Context, query domain.HybridRetrievalQuery) (domain.HybridRetrievalResult, error) {
+	r.calls++
+	return domain.HybridRetrievalResult{Channels: []domain.HybridRetrievalChannelResult{{Channel: domain.RetrievalBM25, Available: true}}, Final: []domain.RetrievalCandidate{{IncidentID: "history-a", Summary: "bounded historical context"}}, SnapshotHash: "hybrid-snapshot", RetrievedAt: time.Now().UTC()}, nil
+}
+
 // brainTurnBudgetModel deliberately keeps issuing valid native tool calls so
 // the domain MaxTurns boundary, rather than an Eino graph-step guard or the
 // structured-output correction budget, must end the Workflow Attempt.
@@ -409,6 +443,33 @@ func TestNoReflectionAblationBypassesPendingReflection(t *testing.T) {
 	}
 	if next != "brain_termination_router" || state.PendingReflection != nil || len(state.Reflections) != 0 || state.BrainBudget.Usage.ReflectionCostUnits != 0 {
 		t.Fatalf("no-reflection ablation executed reflection: next=%s state=%+v", next, state)
+	}
+}
+
+func TestGroundingConflictSchedulesReflectionWithoutChangingModelBelief(t *testing.T) {
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "grounding-conflict", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			AgentHypotheses: []domain.AgentHypothesis{{ID: "h1", ModelConfidence: .8}},
+			GroundingDeltas: []domain.GroundingDelta{{HypothesisRevisionID: "h1", PreviousLevel: domain.GroundingSupported, CurrentLevel: domain.GroundingPartial, ConflictDetected: true}},
+			BrainBudget:     domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+		},
+	}
+	if _, err := (&brainGraphRuntime{}).beliefUpdate(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if state.PendingReflection == nil || *state.PendingReflection != domain.ReflectionCandidateConflict {
+		t.Fatalf("objective grounding conflict did not schedule reflection: %+v", state.PendingReflection)
+	}
+	if state.AgentHypotheses[0].ModelConfidence != .8 {
+		t.Fatalf("Runtime grounding changed subjective model confidence: %+v", state.AgentHypotheses[0])
+	}
+	next, err := (&brainGraphRuntime{}).reflectionRoute(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != "reflection_context_builder" || len(state.Reflections) != 1 || state.Reflections[0].Trigger != domain.ReflectionCandidateConflict {
+		t.Fatalf("grounding conflict did not enter the explicit reflection boundary: next=%s records=%+v", next, state.Reflections)
 	}
 }
 
@@ -845,7 +906,7 @@ func TestBrainContextAdvertisesResumePhaseOptionalSkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := &brainGraphRuntime{resolver: resolver, toolHash: "tool-hash", policyHash: "policy-hash"}
+	runtime := &brainGraphRuntime{resolver: resolver, toolHash: "tool-hash", policyHash: "policy-hash", deps: brainRuntimeDeps{SkillRetrieval: staticBrainSkillRetriever{}}}
 	state := &WorkflowState{
 		Incident: &domain.Incident{ID: "skill-catalog-context", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
 		BrainState: BrainState{
@@ -863,9 +924,9 @@ func TestBrainContextAdvertisesResumePhaseOptionalSkills(t *testing.T) {
 		t.Fatalf("Brain system contract did not explain native Skill selection: %+v", messages)
 	}
 	var payload struct {
-		Phase          domain.BrainPhase        `json:"phase"`
-		SelectionPhase domain.BrainPhase        `json:"optional_skill_selection_phase"`
-		Skills         []brainSkillCatalogEntry `json:"available_optional_skills"`
+		Phase          domain.BrainPhase          `json:"phase"`
+		SelectionPhase domain.BrainPhase          `json:"optional_skill_selection_phase"`
+		Skills         []domain.SkillSearchResult `json:"available_optional_skills"`
 	}
 	if err = json.Unmarshal([]byte(messages[len(messages)-1].Content), &payload); err != nil {
 		t.Fatal(err)
@@ -971,7 +1032,7 @@ func TestStructuredOutputGuardStopsAfterCorrectionBudget(t *testing.T) {
 }
 
 func TestToolArgumentGuardReturnsOneNonEmptyStatusPerCall(t *testing.T) {
-	registry, err := buildBrainCapabilities(constrainedToolDeps{}, nil)
+	registry, err := buildBrainCapabilities(brainRuntimeDeps{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1084,7 +1145,7 @@ func TestReflectionCanCorrectPreHypothesisConstraintBySubmittingHypotheses(t *te
 			ModelConfidence:         .5,
 		}},
 	}
-	output, err := runBrainSubmitHypotheses(withBrainWorkflowState(context.Background(), state), constrainedToolDeps{}, input)
+	output, err := runBrainSubmitHypotheses(withBrainWorkflowState(context.Background(), state), brainRuntimeDeps{}, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1111,6 +1172,7 @@ func TestReflectionSkillRequestResolvesAgainstResumePhase(t *testing.T) {
 			Reflections:           []domain.ReflectionRecord{{ID: "reflection:constraint", Trigger: domain.ReflectionConstraintFailure}},
 		},
 	}
+	seedRetrievedBrainSkills(state, "investigate-metrics")
 	output, err := runBrainRequestSkills(withBrainWorkflowState(context.Background(), state), resolver, requestBrainSkillsInput{
 		Intent:              "load the bounded metric procedure after a denied evidence category",
 		ExpectedObservation: []string{"phase-compatible Skill activation"},
@@ -1160,6 +1222,7 @@ func TestToolCategorySelectionAtomicallyActivatesBrainChosenSkill(t *testing.T) 
 			ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
 		},
 	}
+	seedRetrievedBrainSkills(state, "investigate-metrics")
 	output, err := runBrainSelectCategory(withBrainWorkflowState(context.Background(), state), resolver, selectBrainCategoryInput{
 		Intent: "select bounded metric evidence", ExpectedObservation: []string{"metric Skill activation and category decision"}, Category: domain.BrainToolEvidence,
 		SkillIDs: []string{"investigate-metrics"}, Reason: "metrics distinguish admitted hypotheses", Trigger: "HYPOTHESIS_CONFLICT",
@@ -1196,6 +1259,7 @@ func TestToolCategorySelectionRejectsSkillCategoryMismatch(t *testing.T) {
 			ActiveToolCategory: domain.BrainToolReasoning, ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
 		},
 	}
+	seedRetrievedBrainSkills(state, "investigate-metrics")
 	output, err := runBrainSelectCategory(withBrainWorkflowState(context.Background(), state), resolver, selectBrainCategoryInput{
 		Intent: "select retrieval with a metric-only Skill", ExpectedObservation: []string{"explicit category mismatch"}, Category: domain.BrainToolRetrieval,
 		SkillIDs: []string{"investigate-metrics"}, Reason: "test mismatch", Trigger: "HYPOTHESIS_CONFLICT",
@@ -1251,7 +1315,7 @@ func TestExploreResourcesSkillRoutesOnlyToEvidenceToolsNode(t *testing.T) {
 	if pkg.Spec.Version != "2" || len(pkg.Spec.AllowedToolCategories) != 1 || pkg.Spec.AllowedToolCategories[0] != domain.BrainToolEvidence {
 		t.Fatalf("resource exploration grants a Tool Category without a current-resource tool: %+v", pkg.Spec)
 	}
-	registry, err := buildBrainCapabilities(constrainedToolDeps{}, resolver)
+	registry, err := buildBrainCapabilities(brainRuntimeDeps{}, resolver)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1273,7 +1337,7 @@ func TestExploreResourcesSkillRoutesOnlyToEvidenceToolsNode(t *testing.T) {
 	assertNodeContains(captools.NodeBrainRetrieval, "discover_resources", false)
 
 	newState := func(id string) *WorkflowState {
-		return &WorkflowState{
+		state := &WorkflowState{
 			Incident: &domain.Incident{ID: id, Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
 			BrainState: BrainState{
 				BrainPhase: domain.BrainPhaseInvestigation, BrainTurns: []domain.BrainTurn{{ID: "turn:" + id, Sequence: 1, ToolCategory: domain.BrainToolReasoning}},
@@ -1281,6 +1345,8 @@ func TestExploreResourcesSkillRoutesOnlyToEvidenceToolsNode(t *testing.T) {
 				ActiveToolCategory: domain.BrainToolReasoning, ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning},
 			},
 		}
+		seedRetrievedBrainSkills(state, "explore-resources")
+		return state
 	}
 	retrieval, err := runBrainSelectCategory(withBrainWorkflowState(context.Background(), newState("resource-retrieval")), resolver, selectBrainCategoryInput{
 		Intent: "resolve current resources", ExpectedObservation: []string{"typed resource identities"}, Category: domain.BrainToolRetrieval,
@@ -1341,6 +1407,7 @@ func TestRejectedSkillRequestReturnsExplicitConstraintAndAudit(t *testing.T) {
 			ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolReasoning, domain.BrainToolControl},
 		},
 	}
+	seedRetrievedBrainSkills(state, "plan-recovery")
 	output, err := runBrainRequestSkills(withBrainWorkflowState(context.Background(), state), resolver, requestBrainSkillsInput{
 		Intent: "request a phase-incompatible capability", ExpectedObservation: []string{"explicit rejection decision"}, SkillIDs: []string{"plan-recovery"}, Reason: "attempt recovery during investigation", Trigger: "CONSTRAINT_FAILURE",
 	})
@@ -1373,6 +1440,21 @@ func (brainRunbookMemory) WriteVerifiedIncident(context.Context, domain.Incident
 
 func (brainRunbookMemory) RecordAccess(context.Context, domain.MemoryAccessEvent) error { return nil }
 
+type recordingBrainMemory struct {
+	events []domain.MemoryAccessEvent
+}
+
+func (*recordingBrainMemory) Read(context.Context, domain.MemoryQuery) ([]domain.MemoryResult, error) {
+	return nil, nil
+}
+func (*recordingBrainMemory) WriteVerifiedIncident(context.Context, domain.IncidentLearningInput) error {
+	return nil
+}
+func (m *recordingBrainMemory) RecordAccess(_ context.Context, event domain.MemoryAccessEvent) error {
+	m.events = append(m.events, event)
+	return nil
+}
+
 type brainResourceCollector struct{}
 
 func (brainResourceCollector) Collect(_ context.Context, incident *domain.Incident, _ domain.EvidenceRequest) ([]domain.Evidence, error) {
@@ -1387,7 +1469,7 @@ func TestBrainCapabilitySurfaceHasNoRemovedToolAliases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := buildBrainCapabilities(constrainedToolDeps{}, resolver)
+	registry, err := buildBrainCapabilities(brainRuntimeDeps{}, resolver)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1426,7 +1508,7 @@ func TestDiscoverResourcesReturnsOnlyServerResolvedScope(t *testing.T) {
 			ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolEvidence}, BrainToolPolicy: brainruntime.DefaultToolCallingPolicy(), BrainBudget: domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
 		},
 	}
-	output, err := runBrainDiscoverResources(withBrainWorkflowState(context.Background(), state), constrainedToolDeps{Collectors: map[string]Collector{"kubernetes": brainResourceCollector{}}}, brainEvidenceToolInput{
+	output, err := runBrainDiscoverResources(withBrainWorkflowState(context.Background(), state), brainRuntimeDeps{Collectors: map[string]Collector{"kubernetes": brainResourceCollector{}}}, brainEvidenceToolInput{
 		Intent: "resolve observed one-hop dependencies", ExpectedObservation: []string{"typed resource identities"}, Targets: []domain.ResourceRef{{Namespace: "team-a", Service: "api", Resource: "api", Kind: "Service"}},
 	})
 	if err != nil {
@@ -1444,6 +1526,38 @@ func TestDiscoverResourcesReturnsOnlyServerResolvedScope(t *testing.T) {
 	}
 }
 
+func TestBrainIncidentRetrievalUsesOnlyHybridBoundary(t *testing.T) {
+	state := &WorkflowState{
+		Incident:   &domain.Incident{ID: "hybrid-tool", Cluster: "cluster-a", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{BrainPhase: domain.BrainPhaseInvestigation, ActiveToolCategory: domain.BrainToolRetrieval, ActiveSkillCategories: []domain.BrainToolCategory{domain.BrainToolRetrieval}, BrainToolPolicy: brainruntime.DefaultToolCallingPolicy(), BrainBudget: domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()}},
+	}
+	retriever := &recordingBrainHybridRetriever{}
+	output, err := runBrainIncidentRetrieval(withBrainWorkflowState(context.Background(), state), brainRuntimeDeps{BrainRetrieval: retriever}, brainRetrievalToolInput{Intent: "retrieve comparable incidents", ExpectedObservation: []string{"fused historical evidence"}, Terms: []string{"timeout"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retriever.calls != 1 || output.HybridRetrieval == nil || len(output.HistoricalIncidents) != 1 || output.Provenance.Collector != "hybrid-retrieval-v2" {
+		t.Fatalf("Brain did not use its exclusive hybrid retrieval boundary: calls=%d output=%+v", retriever.calls, output)
+	}
+}
+
+func TestBrainRuntimeAuditProjectionIncludesWorldAndRetrievalState(t *testing.T) {
+	now := time.Now().UTC()
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "brain-audit", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			WorldModel:       &domain.OperationalWorldModel{IncidentID: "brain-audit", BuiltAt: now, EvidenceSnapshotHash: "world-snapshot"},
+			HybridRetrievals: []domain.HybridRetrievalResult{{SnapshotHash: "hybrid-snapshot", RetrievedAt: now}},
+			SkillRetrievals:  []domain.SkillRetrievalResult{{SnapshotHash: "skill-snapshot", RetrievedAt: now}},
+		},
+	}
+	(&brainGraphRuntime{}).syncInvestigation(state)
+	inv := state.Incident.Investigation
+	if inv.WorldModel == nil || inv.WorldModel.EvidenceSnapshotHash != "world-snapshot" || len(inv.HybridRetrievals) != 1 || inv.HybridRetrievals[0].SnapshotHash != "hybrid-snapshot" || len(inv.SkillRetrievals) != 1 || inv.SkillRetrievals[0].SnapshotHash != "skill-snapshot" {
+		t.Fatalf("new Brain runtime state is missing from the Investigation audit projection: %+v", inv)
+	}
+}
+
 func TestRunbookRetrievalIsProceduralContextNotEvidence(t *testing.T) {
 	state := &WorkflowState{
 		Incident: &domain.Incident{ID: "runbook", Cluster: "cluster-a", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
@@ -1453,12 +1567,37 @@ func TestRunbookRetrievalIsProceduralContextNotEvidence(t *testing.T) {
 		},
 	}
 	memory := brainRunbookMemory{items: []domain.MemoryResult{{ID: "runbook-1", Summary: "restart only after approval", Kind: domain.MemoryProcedural}}}
-	output, err := runBrainRunbookRetrieval(withBrainWorkflowState(context.Background(), state), constrainedToolDeps{Memory: memory}, brainRetrievalToolInput{Intent: "retrieve bounded recovery procedure", ExpectedObservation: []string{"procedural context"}, Terms: []string{"api"}})
+	output, err := runBrainRunbookRetrieval(withBrainWorkflowState(context.Background(), state), brainRuntimeDeps{Memory: memory}, brainRetrievalToolInput{Intent: "retrieve bounded recovery procedure", ExpectedObservation: []string{"procedural context"}, Terms: []string{"api"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if output.Class != domain.ToolResultValidation || len(output.Memory) != 1 || len(output.Evidence) != 0 || output.Provenance.Collector != "procedural-memory" {
 		t.Fatalf("runbook retrieval was promoted to Incident evidence: %+v", output)
+	}
+}
+
+func TestBrainRetrievalAuditIsPersistedThroughMemoryBoundary(t *testing.T) {
+	memory := &recordingBrainMemory{}
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "memory-audit", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainTurns:        []domain.BrainTurn{{ID: "turn:memory", Sequence: 1, Phase: domain.BrainPhaseInvestigation}},
+			ExecutionSnapshot: domain.ExecutionSnapshot{ToolSchemaHash: "tools", PolicyHash: "policy"},
+			BrainMessages:     []*schema.Message{{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call:memory", Type: "function", Function: schema.FunctionCall{Name: "retrieve_runbooks", Arguments: `{"intent":"load procedure","expected_observation":["bounded runbook"]}`}}}}},
+		},
+	}
+	output := brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "procedural memory retrieved", NewInformation: true, Memory: []domain.MemoryResult{{ID: "runbook-1", Kind: domain.MemoryProcedural, Summary: "bounded recovery procedure"}}, Provenance: domain.ToolResultProvenance{Collector: "procedural-memory", RawArtifactHash: "artifact", ParserVersion: "memory-v1"}}
+	raw, err := json.Marshal(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &brainGraphRuntime{deps: brainRuntimeDeps{Memory: memory}}
+	_, err = runtime.classifyToolResults(withBrainWorkflowState(context.Background(), state), []*schema.Message{{Role: schema.Tool, ToolCallID: "call:memory", ToolName: "retrieve_runbooks", Content: string(raw)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incident.Investigation.MemoryReads) != 1 || len(memory.events) != 1 || memory.events[0].Kind != domain.MemoryProcedural || len(memory.events[0].ResultIDs) != 1 || memory.events[0].ResultIDs[0] != "runbook-1" {
+		t.Fatalf("Brain memory read was not durably audited: investigation=%+v recorder=%+v", state.Incident.Investigation.MemoryReads, memory.events)
 	}
 }
 

@@ -303,6 +303,9 @@ components:
         brain_turns: {type: array, items: {$ref: '#/components/schemas/BrainTurn'}}
         assistant_turns: {type: array, items: {$ref: '#/components/schemas/AssistantTurnRecord'}}
         incident_understanding: {$ref: '#/components/schemas/IncidentUnderstanding'}
+        world_model: {$ref: '#/components/schemas/OperationalWorldModel'}
+        hybrid_retrievals: {type: array, items: {$ref: '#/components/schemas/HybridRetrievalResult'}}
+        skill_retrievals: {type: array, items: {$ref: '#/components/schemas/SkillRetrievalResult'}}
         skill_activations: {type: array, items: {$ref: '#/components/schemas/SkillActivation'}}
         tool_executions: {type: array, items: {$ref: '#/components/schemas/BrainToolExecution'}}
         agent_hypotheses: {type: array, items: {$ref: '#/components/schemas/AgentHypothesis'}}
@@ -322,6 +325,137 @@ components:
         diagnosis_rounds: {type: integer, minimum: 1, maximum: 2}
         started_at: {type: string, format: date-time}
         completed_at: {type: string, format: date-time}
+    OperationalWorldModel:
+      type: object
+      required: [incident_id, namespace, entities, relations, abnormal_signals, timeline, metric_signatures, evidence_snapshot_hash, built_at]
+      description: Server-owned observation graph; it never contains an LLM hypothesis or selected root cause.
+      properties:
+        incident_id: {type: string}
+        cluster: {type: string}
+        namespace: {type: string}
+        root_entity_id: {type: string}
+        entities: {type: array, items: {$ref: '#/components/schemas/OperationalEntity'}}
+        relations: {type: array, items: {$ref: '#/components/schemas/OperationalRelation'}}
+        abnormal_signals: {type: array, items: {$ref: '#/components/schemas/OperationalSignal'}}
+        timeline: {type: array, items: {$ref: '#/components/schemas/OperationalEvent'}}
+        metric_signatures: {type: array, items: {$ref: '#/components/schemas/MetricSignature'}}
+        evidence_snapshot_hash: {type: string}
+        built_at: {type: string, format: date-time}
+    OperationalEntity:
+      type: object
+      required: [id, kind, evidence_ids]
+      properties:
+        id: {type: string}
+        kind: {type: string}
+        namespace: {type: string}
+        service: {type: string}
+        resource: {type: string}
+        state: {type: string}
+        observed_at: {type: string, format: date-time}
+        evidence_ids: {type: array, items: {type: string}}
+        attributes: {type: object, additionalProperties: {type: string}}
+    OperationalRelation:
+      type: object
+      required: [from, to, kind, evidence_ids]
+      properties:
+        from: {type: string}
+        to: {type: string}
+        kind: {type: string}
+        evidence_ids: {type: array, items: {type: string}}
+    OperationalSignal:
+      type: object
+      required: [id, entity_id, category, signal, strength, reliability, temporal_alignment, evidence_id]
+      properties:
+        id: {type: string}
+        entity_id: {type: string}
+        category: {type: string}
+        signal: {type: string}
+        direction: {type: string}
+        value: {type: number}
+        strength: {type: number}
+        reliability: {type: number}
+        temporal_alignment: {type: number}
+        evidence_id: {type: string}
+        observed_at: {type: string, format: date-time}
+    OperationalEvent:
+      type: object
+      required: [id, entity_id, kind, summary, evidence_id]
+      properties:
+        id: {type: string}
+        entity_id: {type: string}
+        kind: {type: string}
+        summary: {type: string}
+        evidence_id: {type: string}
+        occurred_at: {type: string, format: date-time}
+    MetricSignature:
+      type: object
+      required: [name, entity_id, strength, evidence_id]
+      properties:
+        name: {type: string}
+        entity_id: {type: string}
+        direction: {type: string}
+        value: {type: number}
+        strength: {type: number}
+        evidence_id: {type: string}
+        observed_at: {type: string, format: date-time}
+    RetrievalCandidate:
+      type: object
+      required: [incident_id, namespace, service, resource, category, root_cause]
+      properties:
+        incident_id: {type: string}
+        cluster: {type: string}
+        namespace: {type: string}
+        service: {type: string}
+        resource: {type: string}
+        category: {type: string}
+        root_cause: {type: string}
+        summary: {type: string}
+        revision: {type: string}
+        source_ranks: {type: object, additionalProperties: {type: integer}}
+        source_scores: {type: object, additionalProperties: {type: number}}
+        rrf_score: {type: number}
+        ranking_reasons: {type: array, items: {type: string}}
+    HybridRetrievalChannelResult:
+      type: object
+      required: [channel, candidates, available]
+      properties:
+        channel: {type: string, enum: [BM25, VECTOR, GRAPH, TEMPORAL, METRIC]}
+        candidates: {type: array, items: {$ref: '#/components/schemas/RetrievalCandidate'}}
+        available: {type: boolean}
+        error: {type: string}
+    HybridRetrievalResult:
+      type: object
+      required: [channels, fused, final, reranker_used, snapshot_hash, retrieved_at]
+      properties:
+        channels: {type: array, items: {$ref: '#/components/schemas/HybridRetrievalChannelResult'}}
+        fused: {type: array, items: {$ref: '#/components/schemas/RetrievalCandidate'}}
+        final: {type: array, items: {$ref: '#/components/schemas/RetrievalCandidate'}}
+        reranker_used: {type: boolean}
+        snapshot_hash: {type: string}
+        retrieved_at: {type: string, format: date-time}
+    SkillSearchResult:
+      type: object
+      required: [id, version, content_hash, description, bm25_score, vector_score, phase_score, final_score]
+      properties:
+        id: {type: string}
+        version: {type: string}
+        content_hash: {type: string}
+        description: {type: string}
+        bm25_score: {type: number}
+        vector_score: {type: number}
+        phase_score: {type: number}
+        neural_score: {type: number}
+        final_score: {type: number}
+    SkillRetrievalResult:
+      type: object
+      required: [query_hash, results, vector_used, reranker_used, snapshot_hash, retrieved_at]
+      properties:
+        query_hash: {type: string}
+        results: {type: array, items: {$ref: '#/components/schemas/SkillSearchResult'}}
+        vector_used: {type: boolean}
+        reranker_used: {type: boolean}
+        snapshot_hash: {type: string}
+        retrieved_at: {type: string, format: date-time}
     ExecutionSnapshot:
       type: object
       required: [skill_snapshot_hash, model_config_hash, tool_schema_hash, policy_hash]

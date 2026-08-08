@@ -174,7 +174,8 @@ func main() {
 	discoveryEngine.Explainer = causaldiscovery.NewChatExplainer(chat)
 	learner := service.CausalLearner{Store: pg, ConfidenceThreshold: cfg.Reasoning.CausalAutoActivateConfidence, Namespaces: cfg.Reasoning.CausalLearningNamespaces, EmbeddingVersion: cfg.Embedding.Model, Embedder: learnerEmbedder, Vectors: learnerVectors, TopologyPatterns: topologyPatterns, CausalPatterns: causalPatterns, Discovery: discoveryEngine, IncidentHistory: pg}
 	agentMemory := &memory.Service{Historical: historical, Causal: pg, Reasoning: reasoningEngine, Recorder: pg, Writer: learner, Procedures: agents.ProceduralMemories()}
-	supervisor, err := agent.NewSupervisor(ctx, agent.SupervisorDeps{Collectors: collectors, HistoricalCandidates: historical, Knowledge: pg, Reasoning: reasoningEngine, Agents: agents, Executor: executor, Checkpoints: checkpointStore, Reranker: neuralReranker, RankingPolicy: &rankingPolicy, Causal: causalMatcher, GraphStore: store.NewPostgresGraphStore(pg), TopologyPatterns: topologyPatterns, CausalPatterns: causalPatterns, DiscoveredPatterns: discoveredCandidates, Memory: agentMemory})
+	skillRetrieval := retrieval.NewSkillHybridRetriever(learnerEmbedder, neuralReranker)
+	supervisor, err := agent.NewSupervisor(ctx, agent.SupervisorDeps{Collectors: collectors, HistoricalCandidates: historical, BrainRetrieval: historical, SkillRetrieval: skillRetrieval, Knowledge: pg, Reasoning: reasoningEngine, Agents: agents, Executor: executor, Checkpoints: checkpointStore, Reranker: neuralReranker, RankingPolicy: &rankingPolicy, Causal: causalMatcher, GraphStore: store.NewPostgresGraphStore(pg), TopologyPatterns: topologyPatterns, CausalPatterns: causalPatterns, DiscoveredPatterns: discoveredCandidates, Memory: agentMemory})
 	if err != nil {
 		slog.Error("compile Eino graph", "error", err)
 		os.Exit(1)

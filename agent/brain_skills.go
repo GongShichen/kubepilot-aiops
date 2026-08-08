@@ -58,20 +58,6 @@ type ResolvedBrainSkills struct {
 	active            map[string]brainSkillPackage
 }
 
-// brainSkillCatalogEntry is the bounded, model-facing description of one
-// optional capability. It deliberately exposes only frozen catalog metadata:
-// the Brain can choose an exact Skill ID, while the Runtime still owns phase,
-// dependency, conflict, budget, and authority validation.
-type brainSkillCatalogEntry struct {
-	ID                    string                     `json:"id"`
-	Version               string                     `json:"version"`
-	Description           string                     `json:"description"`
-	Requires              []string                   `json:"requires,omitempty"`
-	AllowedToolCategories []domain.BrainToolCategory `json:"allowed_tool_categories"`
-	OutputContract        string                     `json:"output_contract"`
-	References            []string                   `json:"references,omitempty"`
-}
-
 type BrainSkillResolver struct {
 	version    int
 	root       string
@@ -120,31 +106,26 @@ func (r *BrainSkillResolver) SnapshotHash() string {
 	return r.hash
 }
 
-// OptionalCatalog returns exact phase-compatible Skill IDs without activating
-// anything or expanding authority. The returned metadata is sufficient for the
-// LLM to make an informed request_skills call; Resolve remains the sole
-// admission boundary.
-func (r *BrainSkillResolver) OptionalCatalog(phase domain.BrainPhase) []brainSkillCatalogEntry {
+// SkillDocuments exposes the phase-compatible optional Skill corpus to the
+// retrieval layer. Returning documents does not activate a Skill or grant its
+// Tool categories.
+func (r *BrainSkillResolver) SkillDocuments(phase domain.BrainPhase) []domain.SkillSearchDocument {
 	if r == nil {
 		return nil
 	}
-	entries := make([]brainSkillCatalogEntry, 0, len(r.packages))
+	documents := make([]domain.SkillSearchDocument, 0, len(r.packages))
 	for _, pkg := range r.packages {
 		if pkg.Spec.Mandatory || !supportsPhase(pkg.Spec, phase) {
 			continue
 		}
-		entries = append(entries, brainSkillCatalogEntry{
-			ID:                    pkg.Spec.ID,
-			Version:               pkg.Spec.Version,
-			Description:           pkg.Description,
-			Requires:              append([]string(nil), pkg.Spec.Requires...),
-			AllowedToolCategories: append([]domain.BrainToolCategory(nil), pkg.Spec.AllowedToolCategories...),
-			OutputContract:        pkg.Spec.OutputContract,
-			References:            append([]string(nil), pkg.Spec.References...),
-		})
+		procedure := pkg.Content
+		if len(procedure) > 4096 {
+			procedure = procedure[:4096]
+		}
+		documents = append(documents, domain.SkillSearchDocument{ID: pkg.Spec.ID, Version: pkg.Spec.Version, ContentHash: pkg.Hash, Description: pkg.Description, Procedure: procedure, OutputContract: pkg.Spec.OutputContract, CompatiblePhases: append([]domain.BrainPhase(nil), pkg.Spec.CompatiblePhases...), AllowedToolCategories: append([]domain.BrainToolCategory(nil), pkg.Spec.AllowedToolCategories...)})
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
-	return entries
+	sort.Slice(documents, func(i, j int) bool { return documents[i].ID < documents[j].ID })
+	return documents
 }
 
 func (r *BrainSkillResolver) ReadActiveReference(active []domain.SkillRef, skillID, name string) (string, error) {

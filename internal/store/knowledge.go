@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -116,6 +117,130 @@ func (s *PostgresStore) SearchTopologyIncidents(ctx context.Context, features do
 		candidates = candidates[:limit]
 	}
 	return candidates, nil
+}
+
+// SearchTemporalIncidents is an independent candidate source for the Brain v2
+// hybrid retriever. It searches the scoped incident index directly instead of
+// rescoring candidates produced by text or topology retrieval.
+func (s *PostgresStore) SearchTemporalIncidents(ctx context.Context, features domain.IncidentFeatures, limit int) ([]domain.RetrievalCandidate, error) {
+	if limit <= 0 || features.WindowStart.IsZero() || features.WindowEnd.IsZero() || !features.WindowEnd.After(features.WindowStart) {
+		return []domain.RetrievalCandidate{}, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT incident_id,cluster_scope,namespace,service,resource,category,root_cause,features,topology_graph,0::double precision
+		FROM incident_knowledge
+		WHERE cluster_scope=$1 AND namespace=$2
+		  AND COALESCE(features->>'window_start','') <> '' AND COALESCE(features->>'window_end','') <> ''
+		ORDER BY resolved_at DESC, incident_id ASC LIMIT $3`, features.Cluster, features.Namespace, knowledgeCandidateQueryLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	candidates, err := scanKnowledgeCandidates(rows, "temporal")
+	if err != nil {
+		return nil, err
+	}
+	return rankKnowledgeCandidates(candidates, "temporal", limit, func(candidate domain.RetrievalCandidate) float64 {
+		return temporalKnowledgeSimilarity(features, candidate.Features)
+	}), nil
+}
+
+// SearchMetricIncidents is an independent metric-shape candidate source. It
+// queries all scoped historical observations with numeric signatures before
+// computing cosine similarity; lexical or graph recall cannot hide a metric
+// analogue from this channel.
+func (s *PostgresStore) SearchMetricIncidents(ctx context.Context, features domain.IncidentFeatures, limit int) ([]domain.RetrievalCandidate, error) {
+	if limit <= 0 || len(features.Observed) == 0 {
+		return []domain.RetrievalCandidate{}, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT incident_id,cluster_scope,namespace,service,resource,category,root_cause,features,topology_graph,0::double precision
+		FROM incident_knowledge
+		WHERE cluster_scope=$1 AND namespace=$2 AND observations <> '{}'::jsonb
+		ORDER BY resolved_at DESC, incident_id ASC LIMIT $3`, features.Cluster, features.Namespace, knowledgeCandidateQueryLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	candidates, err := scanKnowledgeCandidates(rows, "metric")
+	if err != nil {
+		return nil, err
+	}
+	return rankKnowledgeCandidates(candidates, "metric", limit, func(candidate domain.RetrievalCandidate) float64 {
+		return metricKnowledgeSimilarity(features.Observed, candidate.Features.Observed)
+	}), nil
+}
+
+func knowledgeCandidateQueryLimit(limit int) int {
+	if limit < 50 {
+		return 50
+	}
+	if limit > 500 {
+		return 500
+	}
+	return limit
+}
+
+func rankKnowledgeCandidates(candidates []domain.RetrievalCandidate, source string, limit int, score func(domain.RetrievalCandidate) float64) []domain.RetrievalCandidate {
+	out := make([]domain.RetrievalCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		value := score(candidate)
+		if value <= 0 {
+			continue
+		}
+		candidate.SourceScores[source] = value
+		out = append(out, candidate)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left, right := out[i].SourceScores[source], out[j].SourceScores[source]
+		if left == right {
+			return out[i].IncidentID < out[j].IncidentID
+		}
+		return left > right
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func temporalKnowledgeSimilarity(current, historical domain.IncidentFeatures) float64 {
+	if current.WindowStart.IsZero() || current.WindowEnd.IsZero() || historical.WindowStart.IsZero() || historical.WindowEnd.IsZero() {
+		return 0
+	}
+	currentDuration := current.WindowEnd.Sub(current.WindowStart)
+	historicalDuration := historical.WindowEnd.Sub(historical.WindowStart)
+	if currentDuration <= 0 || historicalDuration <= 0 {
+		return 0
+	}
+	shorter, longer := currentDuration, historicalDuration
+	if shorter > longer {
+		shorter, longer = longer, shorter
+	}
+	durationSimilarity := float64(shorter) / float64(longer)
+	revisionSimilarity := 0.0
+	if current.Revision != "" && current.Revision == historical.Revision {
+		revisionSimilarity = 1
+	}
+	return math.Min(1, .8*durationSimilarity+.2*revisionSimilarity)
+}
+
+func metricKnowledgeSimilarity(current, historical map[string]float64) float64 {
+	if len(current) == 0 || len(historical) == 0 {
+		return 0
+	}
+	dot, left, right := 0.0, 0.0, 0.0
+	for key, value := range current {
+		other, ok := historical[key]
+		if !ok {
+			continue
+		}
+		dot += value * other
+		left += value * value
+		right += other * other
+	}
+	if left == 0 || right == 0 {
+		return 0
+	}
+	return math.Min(1, math.Max(0, dot/(math.Sqrt(left)*math.Sqrt(right))))
 }
 
 type knowledgeRows interface {

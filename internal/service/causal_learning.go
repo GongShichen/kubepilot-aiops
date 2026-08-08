@@ -82,19 +82,22 @@ func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
 	if len(sources) < 2 {
 		return nil
 	}
+	brainDiagnosis, brainGrounding, brainLearning := validatedBrainLearningContext(in)
 	ledger := in.DiagnosisLedger
-	if ledger == nil || len(ledger.InfrastructureErrors) > 0 {
-		return nil
-	}
 	var selected *domain.VerifiedHypothesis
-	for i := range ledger.Verified {
-		if ledger.Verified[i].Draft.ID == ledger.SelectedHypothesisID {
-			selected = &ledger.Verified[i]
-			break
+	if !brainLearning {
+		if ledger == nil || len(ledger.InfrastructureErrors) > 0 {
+			return nil
 		}
-	}
-	if selected == nil || selected.ContradictionScore > .10 {
-		return nil
+		for i := range ledger.Verified {
+			if ledger.Verified[i].Draft.ID == ledger.SelectedHypothesisID {
+				selected = &ledger.Verified[i]
+				break
+			}
+		}
+		if selected == nil || selected.ContradictionScore > .10 {
+			return nil
+		}
 	}
 	// Knowledge evolution is deliberately outside the Agent runtime. Agents
 	// can read patterns and submit proposals, but only this resolved-Incident
@@ -112,9 +115,9 @@ func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
 		}
 	}
 	managedCausalKnowledge := l.CausalPatterns != nil
+	proposal, proposalOK := learningCausalProposal(in, brainDiagnosis, brainGrounding, brainLearning)
 	if l.CausalPatterns != nil {
-		proposal, ok := causalextractor.Propose(in)
-		if ok {
+		if proposalOK {
 			validator := causalvalidator.New(l.CausalPatterns)
 			validation, err := validator.Validate(ctx, in, proposal)
 			if err != nil {
@@ -143,6 +146,9 @@ func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
 		}
 	}
 	features := featuresFromLedger(in)
+	if brainLearning {
+		features = featuresFromBrain(in)
+	}
 	if err := l.Store.UpsertIncidentKnowledge(ctx, in, features, l.EmbeddingVersion); err != nil {
 		return err
 	}
@@ -166,12 +172,21 @@ func (l CausalLearner) Learn(ctx context.Context, in *domain.Incident) error {
 	if managedCausalKnowledge {
 		return nil
 	}
-	pattern := selectLearnedPattern(in, ledger, selected)
+	var pattern domain.CausalPattern
+	if brainLearning {
+		if !proposalOK {
+			return nil
+		}
+		pattern = proposal.Pattern
+	} else {
+		pattern = selectLearnedPattern(in, ledger, selected)
+	}
 	pattern.Status = "candidate"
 	if err := l.Store.SeedCausalPatterns(ctx, []domain.CausalPattern{pattern}); err != nil {
 		return err
 	}
-	if err := l.Store.RecordCausalPatternEvent(ctx, pattern.ID, in.ID, "incident_support", "resolved incident met high-confidence causal learning gates", map[string]any{"confidence": in.Confidence, "evidence_sources": len(sources), "contradiction_score": selected.ContradictionScore}); err != nil {
+	contradiction := selectedContradiction(selected, brainGrounding)
+	if err := l.Store.RecordCausalPatternEvent(ctx, pattern.ID, in.ID, "incident_support", "resolved incident met high-confidence causal learning gates", map[string]any{"confidence": in.Confidence, "evidence_sources": len(sources), "contradiction_score": contradiction}); err != nil {
 		return err
 	}
 	count, err := l.Store.CountCausalPatternSupport(ctx, pattern.ID)
@@ -219,6 +234,89 @@ func evaluationIncident(in *domain.Incident) bool {
 	}
 	return false
 }
+
+// validatedBrainLearningContext accepts only the new Brain audit contract.
+// It deliberately does not reconstruct a deterministic DiagnosisLedger or
+// call the deleted Candidate/Arbitration path. Resolved recovery, immutable
+// diagnosis validation, current grounding and snapshot identity are the
+// authority for long-term episodic learning.
+func validatedBrainLearningContext(in *domain.Incident) (*domain.AgentDiagnosis, *domain.HypothesisGrounding, bool) {
+	if in == nil || in.Investigation == nil || in.Investigation.Architecture != "eino-native-self-reflective-brain" || in.Investigation.AgentDiagnosis == nil {
+		return nil, nil, false
+	}
+	inv, diagnosis := in.Investigation, in.Investigation.AgentDiagnosis
+	if inv.Termination == nil || inv.Termination.Reason != domain.TerminationRecoverySucceeded || diagnosis.Provisional || diagnosis.GroundingLevel != domain.GroundingSupported || in.ExecutionSnapshot == nil || diagnosis.ExecutionSnapshot != *in.ExecutionSnapshot {
+		return nil, nil, false
+	}
+	validated := false
+	for _, item := range inv.DiagnosisValidations {
+		if item.DiagnosisID == diagnosis.ID && item.HypothesisRevisionID == diagnosis.HypothesisRevisionID && item.Valid && !item.Provisional && item.GroundingLevel == domain.GroundingSupported && item.EvidenceSnapshotHash == diagnosis.EvidenceSnapshotHash && item.ExecutionSnapshot == diagnosis.ExecutionSnapshot {
+			validated = true
+			break
+		}
+	}
+	if !validated {
+		return nil, nil, false
+	}
+	admitted, supported := false, false
+	for _, item := range inv.HypothesisAdmissions {
+		if item.HypothesisRevisionID == diagnosis.HypothesisRevisionID && item.Decision == "ADMITTED" && item.GroundingLevel != domain.AdmissionUnresolved {
+			admitted = true
+			break
+		}
+	}
+	for _, item := range inv.AgentHypotheses {
+		if item.ID == diagnosis.HypothesisRevisionID && item.Status == domain.HypothesisSupported && item.LastValidatedSnapshotHash == diagnosis.EvidenceSnapshotHash {
+			supported = true
+			break
+		}
+	}
+	if !admitted || !supported {
+		return nil, nil, false
+	}
+	var grounding *domain.HypothesisGrounding
+	for index := range inv.HypothesisGroundings {
+		item := &inv.HypothesisGroundings[index]
+		if item.HypothesisRevisionID == diagnosis.HypothesisRevisionID && item.Level == domain.GroundingSupported && item.EvidenceSnapshotHash == diagnosis.EvidenceSnapshotHash {
+			grounding = item
+			break
+		}
+	}
+	if grounding == nil || grounding.Evidence.EvidenceSupport < .65 || grounding.Evidence.ContradictionRatio > .10 || grounding.Coverage.EvidenceNeedCoverage < .80 || grounding.Coverage.TargetScopeCoverage < 1 || grounding.Coverage.TemporalCoverage < .80 {
+		return nil, nil, false
+	}
+	for _, execution := range inv.ToolExecutions {
+		if execution.Result.Infrastructure {
+			return nil, nil, false
+		}
+	}
+	return diagnosis, grounding, true
+}
+
+func learningCausalProposal(in *domain.Incident, diagnosis *domain.AgentDiagnosis, grounding *domain.HypothesisGrounding, brain bool) (causalknowledge.Proposal, bool) {
+	if !brain {
+		return causalextractor.Propose(in)
+	}
+	if diagnosis == nil || grounding == nil {
+		return causalknowledge.Proposal{}, false
+	}
+	path := uniqueLearningStrings([]string{diagnosis.Mechanism, diagnosis.Statement, diagnosis.Category})
+	if len(path) < 2 {
+		return causalknowledge.Proposal{}, false
+	}
+	return causalknowledge.ProposalFromDraft(in, path[0], path, grounding.Evidence.SupportingEvidenceIDs, grounding.Evidence.EvidenceSupport)
+}
+
+func selectedContradiction(selected *domain.VerifiedHypothesis, grounding *domain.HypothesisGrounding) float64 {
+	if grounding != nil {
+		return grounding.Evidence.ContradictionRatio
+	}
+	if selected != nil {
+		return selected.ContradictionScore
+	}
+	return 1
+}
+
 func featuresFromLedger(in *domain.Incident) domain.IncidentFeatures {
 	features := domain.IncidentFeatures{IncidentID: in.ID, Cluster: in.Cluster, Namespace: in.Namespace, Service: in.Service, Resource: in.Resource}
 	if in.DiagnosisLedger != nil && len(in.DiagnosisLedger.Candidates) > 0 {
@@ -233,6 +331,62 @@ func featuresFromLedger(in *domain.Incident) domain.IncidentFeatures {
 		features.CausalNodeIDs = append(features.CausalNodeIDs, e.CausalNodeIDs...)
 	}
 	return features
+}
+
+func featuresFromBrain(in *domain.Incident) domain.IncidentFeatures {
+	features := featuresFromLedger(in)
+	features.Observed = map[string]float64{}
+	if in == nil || in.Investigation == nil {
+		return features
+	}
+	if model := in.Investigation.WorldModel; model != nil {
+		features.WindowStart, features.WindowEnd = model.BuiltAt, model.BuiltAt
+		for _, event := range model.Timeline {
+			if event.OccurredAt.IsZero() {
+				continue
+			}
+			if features.WindowStart.IsZero() || event.OccurredAt.Before(features.WindowStart) {
+				features.WindowStart = event.OccurredAt
+			}
+			if features.WindowEnd.IsZero() || event.OccurredAt.After(features.WindowEnd) {
+				features.WindowEnd = event.OccurredAt
+			}
+		}
+		for _, entity := range model.Entities {
+			features.TopologyServices = append(features.TopologyServices, entity.Service)
+			features.TopologyServices = append(features.TopologyServices, entity.Resource)
+		}
+		for _, signal := range model.AbnormalSignals {
+			features.Terms = append(features.Terms, strings.Fields(strings.ToLower(signal.Category+" "+signal.Signal+" "+signal.Direction))...)
+		}
+		for _, metric := range model.MetricSignatures {
+			value := metric.Value
+			if value == 0 {
+				value = metric.Strength
+			}
+			features.Observed[metric.Name] = value
+		}
+	}
+	graph := topology.Build(in, in.Evidence)
+	features.TopologyGraph = graph.ToDependencyGraph(in.Service)
+	features.TopologyServices = uniqueLearningStrings(features.TopologyServices)
+	features.Terms = uniqueLearningStrings(features.Terms)
+	return features
+}
+
+func uniqueLearningStrings(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		key := strings.ToLower(value)
+		if value == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	return out
 }
 func selectLearnedPattern(in *domain.Incident, ledger *domain.DiagnosisLedger, selected *domain.VerifiedHypothesis) domain.CausalPattern {
 	for _, pattern := range ledger.CausalPatterns {

@@ -145,6 +145,9 @@ type Investigation struct {
 	BrainTurns            []BrainTurn                 `json:"brain_turns,omitempty"`
 	AssistantTurns        []AssistantTurnRecord       `json:"assistant_turns,omitempty"`
 	IncidentUnderstanding *IncidentUnderstanding      `json:"incident_understanding,omitempty"`
+	WorldModel            *OperationalWorldModel      `json:"world_model,omitempty"`
+	HybridRetrievals      []HybridRetrievalResult     `json:"hybrid_retrievals,omitempty"`
+	SkillRetrievals       []SkillRetrievalResult      `json:"skill_retrievals,omitempty"`
 	SkillActivations      []SkillActivation           `json:"skill_activations,omitempty"`
 	ToolExecutions        []BrainToolExecution        `json:"tool_executions,omitempty"`
 	AgentHypotheses       []AgentHypothesis           `json:"agent_hypotheses,omitempty"`
@@ -574,6 +577,8 @@ type RankBreakdown struct {
 	SemanticScore            float64                `json:"semantic_score,omitempty"`
 	LexicalScore             float64                `json:"lexical_score,omitempty"`
 	TopologyScore            float64                `json:"topology_score,omitempty"`
+	TemporalScore            float64                `json:"temporal_score,omitempty"`
+	MetricScore              float64                `json:"metric_score,omitempty"`
 	CausalScore              float64                `json:"causal_score,omitempty"`
 	MetadataScore            float64                `json:"metadata_score,omitempty"`
 	ReasoningScore           float64                `json:"reasoning_score,omitempty"`

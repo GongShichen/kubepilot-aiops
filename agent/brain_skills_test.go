@@ -100,12 +100,12 @@ func TestBrainSkillResolverPinsCompleteBundlesAndDependencies(t *testing.T) {
 	}
 }
 
-func TestBrainSkillResolverExposesExactOptionalCatalogWithoutActivation(t *testing.T) {
+func TestBrainSkillResolverExposesFrozenRetrievalDocumentsWithoutActivation(t *testing.T) {
 	resolver, err := LoadDefaultBrainSkillResolver()
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog := resolver.OptionalCatalog(domain.BrainPhaseInvestigation)
+	catalog := resolver.SkillDocuments(domain.BrainPhaseInvestigation)
 	wanted := map[string]bool{"investigate-metrics": false, "investigate-logs": false, "investigate-traces": false, "inspect-kubernetes": false, "select-tools": false}
 	for _, entry := range catalog {
 		if entry.ID == "" || entry.Version == "" || entry.Description == "" || entry.OutputContract == "" || len(entry.AllowedToolCategories) == 0 {
@@ -120,7 +120,7 @@ func TestBrainSkillResolverExposesExactOptionalCatalogWithoutActivation(t *testi
 			t.Fatalf("phase-compatible optional Skill %s is undiscoverable: %+v", id, catalog)
 		}
 	}
-	if len(resolver.OptionalCatalog(domain.BrainPhaseIntake)) != 0 {
+	if len(resolver.SkillDocuments(domain.BrainPhaseIntake)) != 0 {
 		t.Fatal("INTAKE unexpectedly advertised optional Skills")
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/topology"
 	topologyknowledge "github.com/kubepilot-aiops/kubepilot/internal/topology/knowledge"
 	"github.com/kubepilot-aiops/kubepilot/reasoning"
+	retrievalpipeline "github.com/kubepilot-aiops/kubepilot/retrieval"
 	captools "github.com/kubepilot-aiops/kubepilot/tools"
 	"github.com/oklog/ulid/v2"
 )
@@ -81,6 +82,8 @@ func (s *Supervisor) BrainExecutionSnapshot(modelConfigHash string) domain.Execu
 type SupervisorDeps struct {
 	Collectors           map[string]Collector
 	HistoricalCandidates HistoricalCandidateRetriever
+	BrainRetrieval       BrainHybridRetriever
+	SkillRetrieval       BrainSkillRetriever
 	Knowledge            CausalPatternReader
 	Reasoning            *reasoning.Engine
 	Agents               *AgentRegistry
@@ -157,8 +160,16 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 	if err != nil {
 		return nil, err
 	}
-	runtimeDeps := constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory, ExternalInventory: append([]domain.ResourceRef(nil), deps.ExternalInventory...), Transition: transition}
-	brainTools, err := buildBrainCapabilities(runtimeDeps, brainResolver)
+	if deps.SkillRetrieval == nil {
+		// Skill retrieval is a mandatory part of the new Brain path. A local
+		// BM25 index remains available when an embedding provider is absent; this
+		// is the same retrieval architecture with one unavailable channel, never
+		// direct catalog injection.
+		deps.SkillRetrieval = retrievalpipeline.NewSkillHybridRetriever(nil, deps.Reranker)
+	}
+	baselineDeps := constrainedToolDeps{Collectors: deps.Collectors, Historical: deps.HistoricalCandidates, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, Reranker: deps.Reranker, Policy: deps.RankingPolicy, Causal: deps.Causal, GraphStore: deps.GraphStore, TopologyPatterns: deps.TopologyPatterns, CausalPatterns: deps.CausalPatterns, DiscoveredPatterns: deps.DiscoveredPatterns, Memory: deps.Memory, ExternalInventory: append([]domain.ResourceRef(nil), deps.ExternalInventory...), Transition: transition}
+	brainDeps := brainRuntimeDeps{Collectors: deps.Collectors, BrainRetrieval: deps.BrainRetrieval, SkillRetrieval: deps.SkillRetrieval, Knowledge: deps.Knowledge, Reasoning: deps.Reasoning, Executor: deps.Executor, GraphStore: deps.GraphStore, Memory: deps.Memory, ExternalInventory: append([]domain.ResourceRef(nil), deps.ExternalInventory...), Transition: transition}
+	brainTools, err := buildBrainCapabilities(brainDeps, brainResolver)
 	if err != nil {
 		return nil, err
 	}
@@ -167,12 +178,12 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 		return nil, err
 	}
 	brainStates := &sync.Map{}
-	brainRuntime := &brainGraphRuntime{resolver: brainResolver, tools: brainTools, toolHash: brainToolHash, policyHash: brainruntime.Hash(brainResolver.ToolPolicy()), agents: deps.Agents, deps: runtimeDeps, states: brainStates}
+	brainRuntime := &brainGraphRuntime{resolver: brainResolver, tools: brainTools, toolHash: brainToolHash, policyHash: brainruntime.Hash(brainResolver.ToolPolicy()), agents: deps.Agents, deps: brainDeps, states: brainStates}
 	brainGraph, err := buildBrainGraph(ctx, brainRuntime)
 	if err != nil {
 		return nil, err
 	}
-	baselineGraph, err := buildBaselineGraph(deps, runtimeDeps, transition)
+	baselineGraph, err := buildBaselineGraph(deps, baselineDeps, transition)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +246,7 @@ func NewSupervisor(ctx context.Context, deps SupervisorDeps) (*Supervisor, error
 		return nil, err
 	}
 	if err := add("brain_dry_run", func(ctx context.Context, s *WorkflowState) (*WorkflowState, error) {
-		return brainDryRunNode(ctx, s, deps)
+		return brainDryRunNode(ctx, s, brainDeps.Executor)
 	}); err != nil {
 		return nil, err
 	}

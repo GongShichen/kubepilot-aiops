@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -86,6 +87,28 @@ func TestKubePilotBrainHasNoDeterministicPipelineDependency(t *testing.T) {
 		if strings.Contains(string(raw), "runCognitiveDiagnosis(") {
 			t.Fatalf("deleted monolithic diagnosis entry remains in %s", entry.Name())
 		}
+	}
+}
+
+func TestKubePilotBrainDependencySetCannotReachLegacyDiagnosisServices(t *testing.T) {
+	typeOf := reflect.TypeOf(brainRuntimeDeps{})
+	for _, forbidden := range []string{"Historical", "Reranker", "Causal", "TopologyPatterns", "CausalPatterns", "DiscoveredPatterns", "Policy"} {
+		if _, exists := typeOf.FieldByName(forbidden); exists {
+			t.Fatalf("KubePilot Brain dependency set exposes legacy diagnosis service %s", forbidden)
+		}
+	}
+	for _, required := range []string{"BrainRetrieval", "SkillRetrieval", "Reasoning", "Memory", "Collectors", "Executor"} {
+		if _, exists := typeOf.FieldByName(required); !exists {
+			t.Fatalf("KubePilot Brain dependency set is missing new runtime service %s", required)
+		}
+	}
+	_, current, _, _ := runtime.Caller(0)
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(current), "brain_recovery.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "SupervisorDeps") {
+		t.Fatal("KubePilot recovery path can reach the combined baseline dependency container")
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/kubepilot-aiops/kubepilot/internal/brainruntime"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/topology"
+	"github.com/kubepilot-aiops/kubepilot/reasoning"
 	captools "github.com/kubepilot-aiops/kubepilot/tools"
 	"github.com/oklog/ulid/v2"
 )
@@ -22,6 +23,24 @@ type brainStateRegistryContextKey struct{}
 type brainStateRegistryContext struct {
 	registry   *sync.Map
 	incidentID string
+}
+
+// brainRuntimeDeps is intentionally disjoint from constrainedToolDeps. The
+// KubePilot Brain cannot access baseline candidate generation, deterministic
+// causal matching, arbitration, or the legacy Historical retriever even by
+// accident; it receives only observation, hybrid retrieval, grounding, memory
+// and execution-kernel services.
+type brainRuntimeDeps struct {
+	Collectors        map[string]Collector
+	BrainRetrieval    BrainHybridRetriever
+	SkillRetrieval    BrainSkillRetriever
+	Knowledge         CausalPatternReader
+	Reasoning         *reasoning.Engine
+	Executor          Executor
+	GraphStore        topology.GraphStore
+	Memory            MemoryService
+	ExternalInventory []domain.ResourceRef
+	Transition        func(context.Context, *domain.Incident, domain.IncidentStatus) error
 }
 
 func withBrainWorkflowState(ctx context.Context, state *WorkflowState) context.Context {
@@ -218,6 +237,7 @@ type brainCapabilityOutput struct {
 	Resources           []domain.ResourceRef          `json:"resources,omitempty"`
 	Memory              []domain.MemoryResult         `json:"memory,omitempty"`
 	HistoricalIncidents []domain.RetrievalCandidate   `json:"historical_incidents,omitempty"`
+	HybridRetrieval     *domain.HybridRetrievalResult `json:"hybrid_retrieval,omitempty"`
 	Patterns            []domain.CausalPattern        `json:"patterns,omitempty"`
 	Hypotheses          []domain.AgentHypothesis      `json:"hypotheses,omitempty"`
 	Admissions          []domain.HypothesisAdmission  `json:"admissions,omitempty"`
@@ -240,7 +260,7 @@ type brainCapabilityOutput struct {
 	ReferenceID         string                        `json:"reference_id,omitempty"`
 }
 
-func buildBrainCapabilities(deps constrainedToolDeps, resolver *BrainSkillResolver) (*captools.Registry, error) {
+func buildBrainCapabilities(deps brainRuntimeDeps, resolver *BrainSkillResolver) (*captools.Registry, error) {
 	registry := captools.NewRegistry()
 	capabilities := []captools.Capability{}
 	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
@@ -415,7 +435,7 @@ func brainRegistration(category captools.ToolCategory, nodes ...string) captools
 	return captools.Registration{Category: category, AllowedNodes: nodes, Timeout: 90 * time.Second, MaxArgumentBytes: 128 << 10, MaxOutputBytes: 256 << 10}
 }
 
-func runBrainEvidenceTool(ctx context.Context, deps constrainedToolDeps, source, toolName string, input brainEvidenceToolInput) (brainCapabilityOutput, error) {
+func runBrainEvidenceTool(ctx context.Context, deps brainRuntimeDeps, source, toolName string, input brainEvidenceToolInput) (brainCapabilityOutput, error) {
 	state, err := brainWorkflowState(ctx)
 	if err != nil {
 		return brainCapabilityOutput{}, err
@@ -462,7 +482,7 @@ func runBrainEvidenceTool(ctx context.Context, deps constrainedToolDeps, source,
 	return brainCapabilityOutput{Class: class, Status: status, Summary: fmt.Sprintf("%s returned %d normalized evidence records", toolName, len(items)), NewInformation: hasNewEvidence(state.Incident.Evidence, items), Evidence: items, Provenance: domain.ToolResultProvenance{ToolName: toolName, Collector: source, TargetRefs: append([]domain.ResourceRef(nil), input.Targets...), WindowStart: start, WindowEnd: end, ObservedAt: end, RawArtifactHash: brainruntime.Hash(items), ParserVersion: "brain-evidence-v1", EvidenceIDs: ids}}, nil
 }
 
-func runBrainDiscoverResources(ctx context.Context, deps constrainedToolDeps, input brainEvidenceToolInput) (brainCapabilityOutput, error) {
+func runBrainDiscoverResources(ctx context.Context, deps brainRuntimeDeps, input brainEvidenceToolInput) (brainCapabilityOutput, error) {
 	output, err := runBrainEvidenceTool(ctx, deps, "kubernetes", "discover_resources", input)
 	if err != nil || output.Class == domain.ToolResultConstraint || output.Class == domain.ToolResultError {
 		return output, err
@@ -523,7 +543,7 @@ func resourceRefsFromGraph(incident *domain.Incident, graph topology.IncidentGra
 	return refs
 }
 
-func runBrainIncidentRetrieval(ctx context.Context, deps constrainedToolDeps, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
+func runBrainIncidentRetrieval(ctx context.Context, deps brainRuntimeDeps, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
 	state, err := brainWorkflowState(ctx)
 	if err != nil {
 		return brainCapabilityOutput{}, err
@@ -532,8 +552,8 @@ func runBrainIncidentRetrieval(ctx context.Context, deps constrainedToolDeps, in
 	if denied := authorizeBrainTool(state, envelope); denied != nil {
 		return *denied, nil
 	}
-	if deps.Historical == nil {
-		return errorBrainOutput(envelope, "historical retrieval unavailable", true), nil
+	if deps.BrainRetrieval == nil {
+		return errorBrainOutput(envelope, "KubePilot hybrid retrieval unavailable", true), nil
 	}
 	limit := input.Limit
 	if limit <= 0 || limit > 10 {
@@ -543,16 +563,18 @@ func runBrainIncidentRetrieval(ctx context.Context, deps constrainedToolDeps, in
 	if deps.Reasoning != nil && len(features.Terms) == 0 {
 		features = deps.Reasoning.BuildFeatures(state.Incident, state.Incident.Evidence)
 	}
-	semantic, _ := deps.Historical.Semantic(ctx, features, limit)
-	lexical, _ := deps.Historical.Lexical(ctx, features, limit)
-	candidates := append(semantic, lexical...)
-	if len(candidates) > limit {
-		candidates = candidates[:limit]
+	result, retrieveErr := deps.BrainRetrieval.Retrieve(ctx, domain.HybridRetrievalQuery{IncidentID: state.Incident.ID, Terms: uniqueBrainValues(input.Terms), Features: features, WorldModel: state.WorldModel, Limit: limit})
+	if retrieveErr != nil {
+		return errorBrainOutput(envelope, "hybrid historical retrieval failed", true), nil
 	}
-	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "historical context retrieved; it is not current incident evidence", HistoricalIncidents: candidates, NewInformation: len(candidates) > 0, Provenance: baseBrainProvenance(envelope, "historical-memory", candidates)}, nil
+	status := "OK"
+	if len(result.Final) == 0 {
+		status = "NO_RESULTS"
+	}
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: status, Summary: "BM25, vector, graph, temporal, and metric historical context retrieved and fused; it is not current incident evidence", HistoricalIncidents: result.Final, HybridRetrieval: &result, NewInformation: len(result.Final) > 0, Provenance: baseBrainProvenance(envelope, "hybrid-retrieval-v2", result)}, nil
 }
 
-func runBrainRunbookRetrieval(ctx context.Context, deps constrainedToolDeps, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
+func runBrainRunbookRetrieval(ctx context.Context, deps brainRuntimeDeps, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
 	state, err := brainWorkflowState(ctx)
 	if err != nil {
 		return brainCapabilityOutput{}, err
@@ -583,7 +605,7 @@ func runBrainRunbookRetrieval(ctx context.Context, deps constrainedToolDeps, inp
 	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: status, Summary: "procedural memory retrieved as non-factual context", Memory: items, NewInformation: len(items) > 0, Provenance: baseBrainProvenance(envelope, "procedural-memory", items)}, nil
 }
 
-func runBrainPatternRetrieval(ctx context.Context, deps constrainedToolDeps, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
+func runBrainPatternRetrieval(ctx context.Context, deps brainRuntimeDeps, input brainRetrievalToolInput) (brainCapabilityOutput, error) {
 	state, err := brainWorkflowState(ctx)
 	if err != nil {
 		return brainCapabilityOutput{}, err
@@ -603,7 +625,7 @@ func runBrainPatternRetrieval(ctx context.Context, deps constrainedToolDeps, inp
 	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "causal validation context retrieved; it is not current incident evidence", Patterns: patterns, NewInformation: len(patterns) > 0, Provenance: baseBrainProvenance(envelope, "causal-pattern-store", patterns)}, nil
 }
 
-func runBrainSubmitHypotheses(ctx context.Context, deps constrainedToolDeps, input submitBrainHypothesesInput) (brainCapabilityOutput, error) {
+func runBrainSubmitHypotheses(ctx context.Context, deps brainRuntimeDeps, input submitBrainHypothesesInput) (brainCapabilityOutput, error) {
 	state, err := brainWorkflowState(ctx)
 	if err != nil {
 		return brainCapabilityOutput{}, err
@@ -670,7 +692,7 @@ func runBrainSubmitPlan(ctx context.Context, input submitInvestigationPlanInput)
 	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "investigation plan persisted", InvestigationPlan: &plan, NewInformation: true, Provenance: baseBrainProvenance(envelope, "investigation-plan-v1", plan)}, nil
 }
 
-func runBrainReviseHypothesis(ctx context.Context, deps constrainedToolDeps, input reviseBrainHypothesisInput) (brainCapabilityOutput, error) {
+func runBrainReviseHypothesis(ctx context.Context, deps brainRuntimeDeps, input reviseBrainHypothesisInput) (brainCapabilityOutput, error) {
 	state, err := brainWorkflowState(ctx)
 	if err != nil {
 		return brainCapabilityOutput{}, err
@@ -1023,9 +1045,29 @@ func runBrainRequestSkills(ctx context.Context, resolver *BrainSkillResolver, in
 
 func resolveBrainSkillRequests(state *WorkflowState, resolver *BrainSkillResolver, input requestBrainSkillsInput) ([]SkillRequest, []domain.SkillActivation, ResolvedBrainSkills, error) {
 	requests := make([]SkillRequest, 0, len(input.SkillIDs))
-	for _, id := range input.SkillIDs {
-		requests = append(requests, SkillRequest{SkillID: id, Reason: input.Reason, Trigger: input.Trigger, RequestedBy: "BRAIN", RequestedTurn: currentBrainTurnID(state)})
+	rejected := []domain.SkillActivation{}
+	retrieved := map[string]bool{}
+	if len(state.SkillRetrievals) > 0 {
+		for _, item := range state.SkillRetrievals[len(state.SkillRetrievals)-1].Results {
+			retrieved[item.ID] = true
+		}
 	}
+	for _, id := range input.SkillIDs {
+		request := SkillRequest{SkillID: id, Reason: input.Reason, Trigger: input.Trigger, RequestedBy: "BRAIN", RequestedTurn: currentBrainTurnID(state)}
+		if !retrieved[id] {
+			resolutionPhase := state.BrainPhase
+			if resolutionPhase == domain.BrainPhaseReflection && state.ResumeBrainPhase != "" {
+				resolutionPhase = state.ResumeBrainPhase
+			}
+			rejected = append(rejected, rejectedActivationFor(resolver, request, resolutionPhase, "skill_not_retrieved_for_turn", time.Now().UTC()))
+			continue
+		}
+		requests = append(requests, request)
+	}
+	if len(requests) == 0 {
+		return nil, rejected, ResolvedBrainSkills{Activations: append([]domain.SkillActivation(nil), rejected...)}, nil
+	}
+	retrievalRejected := append([]domain.SkillActivation(nil), rejected...)
 	maxOptional := state.BrainBudget.Limits.MaxOptionalSkillsPerTurn
 	if method, _ := domain.NormalizeDiagnosisMethod(state.Incident.DiagnosisMethod); method == domain.DiagnosisMethodKubePilotNoOptionalSkills {
 		maxOptional = 0
@@ -1045,7 +1087,6 @@ func resolveBrainSkillRequests(state *WorkflowState, resolver *BrainSkillResolve
 		return nil, nil, ResolvedBrainSkills{}, err
 	}
 	accepted := []SkillRequest{}
-	rejected := []domain.SkillActivation{}
 	for _, request := range requests {
 		matched := false
 		for _, activation := range resolved.Activations {
@@ -1064,6 +1105,7 @@ func resolveBrainSkillRequests(state *WorkflowState, resolver *BrainSkillResolve
 			rejected = append(rejected, rejectedActivationFor(resolver, request, resolutionPhase, "activation_decision_missing", time.Now().UTC()))
 		}
 	}
+	resolved.Activations = append(resolved.Activations, retrievalRejected...)
 	return accepted, rejected, resolved, nil
 }
 

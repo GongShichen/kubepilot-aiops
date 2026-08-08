@@ -16,6 +16,18 @@ type StructuredKnowledge interface {
 	SearchTopologyIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error)
 }
 
+// TemporalIncidentSearcher and MetricIncidentSearcher are independent
+// candidate-source contracts for the Brain v2 hybrid retriever. They are kept
+// separate from StructuredKnowledge so frozen baseline implementations are not
+// silently upgraded or used as a fallback by the KubePilot path.
+type TemporalIncidentSearcher interface {
+	SearchTemporalIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error)
+}
+
+type MetricIncidentSearcher interface {
+	SearchMetricIncidents(context.Context, domain.IncidentFeatures, int) ([]domain.RetrievalCandidate, error)
+}
+
 type HistoricalRetriever struct {
 	Embedder  EmbeddingClient
 	Vectors   VectorStore

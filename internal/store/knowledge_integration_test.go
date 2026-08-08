@@ -10,7 +10,7 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-func TestPostgresLexicalAndCrossServiceTopologyRetrieval(t *testing.T) {
+func TestPostgresIndependentHybridRetrievalChannels(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
@@ -29,12 +29,14 @@ func TestPostgresLexicalAndCrossServiceTopologyRetrieval(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.DeleteIncidents(context.Background(), []string{incident.ID}) //nolint:errcheck
-	historicalFeatures := domain.IncidentFeatures{IncidentID: incident.ID, Namespace: namespace, Service: incident.Service, Resource: incident.Resource, Terms: []string{"mysql", "connection", "refused"}, TopologyServices: []string{"payment-service", "mysql"}, TopologyGraph: domain.IncidentDependencyGraph{RootService: "payment-service", Nodes: []domain.DependencyNode{{ID: "payment-service", Role: "root"}, {ID: "mysql", Role: "critical_dependency"}}, Edges: []domain.DependencyEdge{{From: "payment-service", To: "mysql", Kind: "observed_call"}}, SuspectedFailureNodes: []string{"mysql"}, ErrorPropagationPaths: [][]string{{"payment-service", "mysql"}}}}
+	historicalFeatures := domain.IncidentFeatures{IncidentID: incident.ID, Namespace: namespace, Service: incident.Service, Resource: incident.Resource, Terms: []string{"mysql", "connection", "refused"}, WindowStart: incident.CreatedAt, WindowEnd: incident.UpdatedAt, Observed: map[string]float64{"latency": .9, "errors": .6}, TopologyServices: []string{"payment-service", "mysql"}, TopologyGraph: domain.IncidentDependencyGraph{RootService: "payment-service", Nodes: []domain.DependencyNode{{ID: "payment-service", Role: "root"}, {ID: "mysql", Role: "critical_dependency"}}, Edges: []domain.DependencyEdge{{From: "payment-service", To: "mysql", Kind: "observed_call"}}, SuspectedFailureNodes: []string{"mysql"}, ErrorPropagationPaths: [][]string{{"payment-service", "mysql"}}}}
 	if err = database.UpsertIncidentKnowledge(ctx, incident, historicalFeatures, "integration-test"); err != nil {
 		t.Fatal(err)
 	}
 	lexicalQuery := domain.IncidentFeatures{Namespace: namespace, Service: "order-service", Resource: "deployment/order-service", Terms: []string{"mysql", "connection", "refused"}, TopologyServices: []string{"order-service", "mysql"}}
 	topologyQuery := domain.IncidentFeatures{Namespace: namespace, Service: "order-service", Resource: "deployment/order-service", Terms: []string{"mysql", "connection", "refused"}, TopologyServices: []string{"order-service", "mysql"}, TopologyGraph: domain.IncidentDependencyGraph{RootService: "order-service", Nodes: []domain.DependencyNode{{ID: "order-service", Role: "root"}, {ID: "mysql", Role: "critical_dependency"}}, Edges: []domain.DependencyEdge{{From: "order-service", To: "mysql", Kind: "observed_call"}}, SuspectedFailureNodes: []string{"mysql"}, ErrorPropagationPaths: [][]string{{"order-service", "mysql"}}}}
+	temporalQuery := domain.IncidentFeatures{Namespace: namespace, WindowStart: incident.CreatedAt.Add(-time.Minute), WindowEnd: incident.UpdatedAt, Revision: historicalFeatures.Revision}
+	metricQuery := domain.IncidentFeatures{Namespace: namespace, Observed: map[string]float64{"latency": .8, "errors": .5}}
 	lexical, err := database.SearchLexicalIncidents(ctx, lexicalQuery, 50)
 	if err != nil || len(lexical) != 1 || lexical[0].IncidentID != incident.ID {
 		t.Fatalf("lexical=%#v err=%v", lexical, err)
@@ -42,6 +44,14 @@ func TestPostgresLexicalAndCrossServiceTopologyRetrieval(t *testing.T) {
 	topology, err := database.SearchTopologyIncidents(ctx, topologyQuery, 50)
 	if err != nil || len(topology) != 1 || topology[0].IncidentID != incident.ID || topology[0].Service == topologyQuery.Service || topology[0].SourceScores["topology"] <= 0 {
 		t.Fatalf("cross-service topology=%#v err=%v", topology, err)
+	}
+	temporal, err := database.SearchTemporalIncidents(ctx, temporalQuery, 50)
+	if err != nil || len(temporal) != 1 || temporal[0].IncidentID != incident.ID || temporal[0].SourceScores["temporal"] <= 0 {
+		t.Fatalf("temporal=%#v err=%v", temporal, err)
+	}
+	metric, err := database.SearchMetricIncidents(ctx, metricQuery, 50)
+	if err != nil || len(metric) != 1 || metric[0].IncidentID != incident.ID || metric[0].SourceScores["metric"] <= 0 {
+		t.Fatalf("metric=%#v err=%v", metric, err)
 	}
 	topologyQuery.Namespace = "different-namespace"
 	topology, err = database.SearchTopologyIncidents(ctx, topologyQuery, 50)
