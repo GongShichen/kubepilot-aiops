@@ -1040,7 +1040,7 @@ func resolveBrainSkillRequests(state *WorkflowState, resolver *BrainSkillResolve
 	if resolutionPhase == domain.BrainPhaseReflection && state.ResumeBrainPhase != "" {
 		resolutionPhase = state.ResumeBrainPhase
 	}
-	resolved, err := resolver.Resolve(resolutionPhase, requests, maxOptional)
+	resolved, err := resolver.Resolve(resolutionPhase, requests, maxOptional, currentBrainTurnID(state))
 	if err != nil {
 		return nil, nil, ResolvedBrainSkills{}, err
 	}

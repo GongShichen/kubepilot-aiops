@@ -299,7 +299,12 @@ func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowSta
 	if method, _ := domain.NormalizeDiagnosisMethod(state.Incident.DiagnosisMethod); method == domain.DiagnosisMethodKubePilotNoOptionalSkills {
 		maxOptional = 0
 	}
-	resolved, err := r.resolver.Resolve(state.BrainPhase, state.RequestedSkills, maxOptional)
+	// Allocate the Turn identity before resolving Skills. Mandatory phase Skills
+	// are Runtime-selected for this exact model boundary, so their activation
+	// audit must reference the same immutable Turn later used by BrainTurn,
+	// AssistantTurn, Tool envelopes, and checkpoints.
+	turnID := "turn:" + ulid.Make().String()
+	resolved, err := r.resolver.Resolve(state.BrainPhase, state.RequestedSkills, maxOptional, turnID)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +318,7 @@ func (r *brainGraphRuntime) contextBuilder(_ context.Context, state *WorkflowSta
 		state.ActiveToolCategory = defaultCategoryForPhase(state.BrainPhase)
 	}
 	state.SkillActivations = append(state.SkillActivations, resolved.Activations...)
-	turn := domain.BrainTurn{ID: "turn:" + ulid.Make().String(), Sequence: len(state.BrainTurns) + 1, Phase: state.BrainPhase, SkillRefs: append([]domain.SkillRef(nil), resolved.Refs...), ToolCategory: effectiveToolCategory(state), StartedAt: time.Now().UTC()}
+	turn := domain.BrainTurn{ID: turnID, Sequence: len(state.BrainTurns) + 1, Phase: state.BrainPhase, SkillRefs: append([]domain.SkillRef(nil), resolved.Refs...), ToolCategory: effectiveToolCategory(state), StartedAt: time.Now().UTC()}
 	state.BrainTurns = append(state.BrainTurns, turn)
 	// Allocate the audit slot while WorkflowState is the graph payload. The
 	// ChatModel adapter later updates this existing element instead of appending

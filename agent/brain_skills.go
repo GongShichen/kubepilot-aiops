@@ -301,27 +301,33 @@ func (r *BrainSkillResolver) computeHash() string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (r *BrainSkillResolver) Resolve(phase domain.BrainPhase, requests []SkillRequest, maxOptional int) (ResolvedBrainSkills, error) {
+func (r *BrainSkillResolver) Resolve(phase domain.BrainPhase, requests []SkillRequest, maxOptional int, activationTurn string) (ResolvedBrainSkills, error) {
 	if r == nil {
 		return ResolvedBrainSkills{}, fmt.Errorf("brain skill resolver is required")
+	}
+	if strings.TrimSpace(activationTurn) == "" {
+		return ResolvedBrainSkills{}, fmt.Errorf("brain skill activation turn is required")
 	}
 	now := time.Now().UTC()
 	selected := map[string]SkillRequest{}
 	for id, pkg := range r.packages {
 		if pkg.Spec.Mandatory && supportsPhase(pkg.Spec, phase) {
-			selected[id] = SkillRequest{SkillID: id, Reason: "mandatory phase procedure", Trigger: "PHASE_ENTRY", RequestedBy: "RUNTIME"}
+			selected[id] = SkillRequest{SkillID: id, Reason: "mandatory phase procedure", Trigger: "PHASE_ENTRY", RequestedBy: "RUNTIME", RequestedTurn: activationTurn}
 		}
 	}
 	var rejected []domain.SkillActivation
 	optional := 0
-	for _, request := range requests {
+	for _, requested := range requests {
+		request := requested
+		if strings.TrimSpace(request.RequestedTurn) == "" {
+			request.RequestedTurn = activationTurn
+		}
 		pkg, ok := r.packages[request.SkillID]
-		activation := activationFor(pkg, request, phase, now)
 		if !ok {
-			activation.SkillID, activation.Status, activation.RejectedReason = request.SkillID, "REJECTED", "unknown_skill"
-			rejected = append(rejected, activation)
+			rejected = append(rejected, rejectedActivationFor(r, request, phase, "unknown_skill", now))
 			continue
 		}
+		activation := activationFor(pkg, request, phase, now)
 		if request.Reason == "" || request.Trigger == "" || request.RequestedBy != "BRAIN" {
 			activation.Status, activation.RejectedReason = "REJECTED", "invalid_selection_reason"
 			rejected = append(rejected, activation)
@@ -457,6 +463,13 @@ func rejectedActivationFor(resolver *BrainSkillResolver, request SkillRequest, p
 	if resolver != nil {
 		if pkg, ok := resolver.packages[request.SkillID]; ok {
 			activation = activationFor(pkg, request, phase, now)
+		} else {
+			// No package content exists for an unknown ID. Bind the rejection to
+			// the exact catalog version and snapshot that proved its absence so
+			// the decision remains complete and replayable without inventing a
+			// Skill package identity.
+			activation.Version = fmt.Sprintf("catalog-v%d-unresolved", resolver.version)
+			activation.ContentHash = resolver.SnapshotHash()
 		}
 	}
 	activation.Status = "REJECTED"

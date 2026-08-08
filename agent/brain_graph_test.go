@@ -630,6 +630,38 @@ func TestToolCallBudgetFinalizationContextUsesExistingState(t *testing.T) {
 	}
 }
 
+func TestBrainContextBindsMandatorySkillActivationsToAllocatedTurn(t *testing.T) {
+	resolver, err := LoadDefaultBrainSkillResolver()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &WorkflowState{
+		Incident:   &domain.Incident{ID: "mandatory-skill-turn", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{BrainBudget: domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()}},
+	}
+	runtime := &brainGraphRuntime{resolver: resolver, toolHash: "tool-schema", policyHash: "policy"}
+	if _, err = runtime.contextBuilder(context.Background(), state, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.BrainTurns) != 1 || state.BrainTurns[0].ID == "" {
+		t.Fatalf("context did not allocate exactly one Brain Turn: %+v", state.BrainTurns)
+	}
+	turnID := state.BrainTurns[0].ID
+	mandatory := 0
+	for _, activation := range state.SkillActivations {
+		if activation.RequestedBy != "RUNTIME" {
+			continue
+		}
+		mandatory++
+		if activation.RequestedTurn != turnID || activation.Version == "" || activation.ContentHash == "" || activation.Status != "ACTIVATED" {
+			t.Fatalf("mandatory Skill activation is not replayable from its Brain Turn: turn=%s activation=%+v", turnID, activation)
+		}
+	}
+	if mandatory == 0 {
+		t.Fatalf("context produced no mandatory Skill activation audit: %+v", state.SkillActivations)
+	}
+}
+
 func TestBrainContextUsesEvidenceViewWithoutCanonicalFacts(t *testing.T) {
 	resolver, err := LoadDefaultBrainSkillResolver()
 	if err != nil {
@@ -1032,6 +1064,7 @@ func TestReflectionCanCorrectPreHypothesisConstraintBySubmittingHypotheses(t *te
 		BrainState: BrainState{
 			BrainPhase:            domain.BrainPhaseReflection,
 			ResumeBrainPhase:      domain.BrainPhaseInvestigation,
+			BrainTurns:            []domain.BrainTurn{{ID: "turn:reflection-skill", Sequence: 1, Phase: domain.BrainPhaseReflection}},
 			BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
 			BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
 			ActiveToolCategory:    domain.BrainToolReasoning,
@@ -1070,6 +1103,7 @@ func TestReflectionSkillRequestResolvesAgainstResumePhase(t *testing.T) {
 		BrainState: BrainState{
 			BrainPhase:            domain.BrainPhaseReflection,
 			ResumeBrainPhase:      domain.BrainPhaseInvestigation,
+			BrainTurns:            []domain.BrainTurn{{ID: "turn:reflection-skill", Sequence: 1, Phase: domain.BrainPhaseReflection}},
 			BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
 			BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
 			ActiveToolCategory:    domain.BrainToolReasoning,
@@ -1097,7 +1131,7 @@ func TestReflectionSkillRequestResolvesAgainstResumePhase(t *testing.T) {
 	if !state.Reflections[0].Accepted {
 		t.Fatalf("corrective Skill request was not recorded as an accepted reflection: %+v", state.Reflections[0])
 	}
-	resolved, err := resolver.Resolve(state.BrainPhase, state.RequestedSkills, state.BrainBudget.Limits.MaxOptionalSkillsPerTurn)
+	resolved, err := resolver.Resolve(state.BrainPhase, state.RequestedSkills, state.BrainBudget.Limits.MaxOptionalSkillsPerTurn, currentBrainTurnID(state))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1140,7 +1174,7 @@ func TestToolCategorySelectionAtomicallyActivatesBrainChosenSkill(t *testing.T) 
 	if state.ActiveToolCategory != domain.BrainToolEvidence || len(state.RequestedSkills) != 1 || state.PendingReflection != nil {
 		t.Fatalf("atomic Skill/category decision did not update the next Brain boundary: %+v", state.BrainState)
 	}
-	resolved, err := resolver.Resolve(state.BrainPhase, state.RequestedSkills, state.BrainBudget.Limits.MaxOptionalSkillsPerTurn)
+	resolved, err := resolver.Resolve(state.BrainPhase, state.RequestedSkills, state.BrainBudget.Limits.MaxOptionalSkillsPerTurn, currentBrainTurnID(state))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1300,6 +1334,7 @@ func TestRejectedSkillRequestReturnsExplicitConstraintAndAudit(t *testing.T) {
 		BrainState: BrainState{
 			BrainPhase:            domain.BrainPhaseReflection,
 			ResumeBrainPhase:      domain.BrainPhaseInvestigation,
+			BrainTurns:            []domain.BrainTurn{{ID: "turn:rejected-skill", Sequence: 1, Phase: domain.BrainPhaseReflection}},
 			BrainToolPolicy:       brainruntime.DefaultToolCallingPolicy(),
 			BrainBudget:           domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
 			ActiveToolCategory:    domain.BrainToolReasoning,
