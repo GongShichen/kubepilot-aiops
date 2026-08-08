@@ -66,7 +66,7 @@ func TestKubePilotBrainHasNoDeterministicPipelineDependency(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(raw)
-		for _, forbidden := range []string{"runCognitiveDiagnosis(", "candidateGenerationNode(", "causalFalsificationNode(", "objectiveArbitrationNode(", "runConstrainedAgents(", "RunBaseline("} {
+		for _, forbidden := range []string{"runCognitiveDiagnosis(", "candidateGenerationNode(", "causalFalsificationNode(", "objectiveArbitrationNode(", "runConstrainedAgents(", "RunBaseline(", "baseline_runtime", "buildBaselineGraph("} {
 			if strings.Contains(text, forbidden) {
 				t.Fatalf("KubePilot production path %s references deterministic baseline entry %q", name, forbidden)
 			}
@@ -109,6 +109,39 @@ func TestKubePilotBrainDependencySetCannotReachLegacyDiagnosisServices(t *testin
 	}
 	if strings.Contains(string(raw), "SupervisorDeps") {
 		t.Fatal("KubePilot recovery path can reach the combined baseline dependency container")
+	}
+	graphRaw, err := os.ReadFile(filepath.Join(filepath.Dir(current), "brain_graph.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(graphRaw), ".agents") {
+		t.Fatal("KubePilot Brain still depends on the nested ADK Agent registry")
+	}
+	runtimeType := reflect.TypeOf(brainGraphRuntime{})
+	legacyRegistryType := reflect.TypeOf((*AgentRegistry)(nil))
+	for index := 0; index < runtimeType.NumField(); index++ {
+		if runtimeType.Field(index).Type == legacyRegistryType {
+			t.Fatal("KubePilot Brain runtime exposes the legacy Agent registry")
+		}
+	}
+}
+
+func TestProductionSupervisorHasNoLegacyRuntimeDependencyOrFallback(t *testing.T) {
+	depsType := reflect.TypeOf(SupervisorDeps{})
+	for _, removed := range []string{"Agents", "HistoricalCandidates", "RankingPolicy", "Causal", "TopologyPatterns", "CausalPatterns", "DiscoveredPatterns"} {
+		if _, exists := depsType.FieldByName(removed); exists {
+			t.Fatalf("production Supervisor still exposes removed legacy dependency %s", removed)
+		}
+	}
+	_, current, _, _ := runtime.Caller(0)
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(current), "supervisor.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, removed := range []string{"baseline_runtime", "buildBaselineGraph(", "RunBaseline(", "candidateGenerationNode(", "objectiveArbitrationNode(", "mergeEvidenceToolMessages(", "diagnosisCandidateContext(", "baselineHypotheses("} {
+		if strings.Contains(string(raw), removed) {
+			t.Fatalf("production Supervisor still contains removed legacy path %q", removed)
+		}
 	}
 }
 

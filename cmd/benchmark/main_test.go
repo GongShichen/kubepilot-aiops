@@ -22,6 +22,28 @@ func TestDiagnosisSkillSnapshotHashUsesVersionedBrainBundle(t *testing.T) {
 	if len(brain) != 64 {
 		t.Fatalf("invalid Brain Skill snapshot hash: %q", brain)
 	}
+	if _, err = diagnosisSkillSnapshotHash(domain.DiagnosisMethodActive); err == nil {
+		t.Fatal("removed Active Diagnosis compatibility path still has a benchmark Skill snapshot")
+	}
+}
+
+func TestBenchmarkArchitectureExposesOnlyBrainRuntime(t *testing.T) {
+	for _, method := range []string{domain.DiagnosisMethodKubePilot, domain.DiagnosisMethodKubePilotNoReflection, domain.DiagnosisMethodKubePilotNoOptionalSkills} {
+		if got := strategyArchitecture(method); got != "eino-native-self-reflective-brain" {
+			t.Fatalf("Brain strategy %q architecture=%q", method, got)
+		}
+	}
+	for _, method := range []string{domain.DiagnosisMethodDirect, domain.DiagnosisMethodRAG, domain.DiagnosisMethodReAct, domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive} {
+		if got := strategyArchitecture(method); got != "unknown" {
+			t.Fatalf("removed strategy %q still exposes architecture %q", method, got)
+		}
+	}
+}
+
+func TestDiagnosisBudgetHashUsesBrainAttemptBudget(t *testing.T) {
+	if got := diagnosisBudgetConfigHash(); len(got) != 64 {
+		t.Fatalf("invalid Brain budget hash: %q", got)
+	}
 }
 
 func TestSeparatedBenchmarkCommandsDoNotExposeLegacyRetrieval(t *testing.T) {
@@ -155,14 +177,14 @@ func TestCleanupFailureStopsFullPipeline(t *testing.T) {
 func TestStrategyOrderIsDeterministicPermutation(t *testing.T) {
 	first := comparisonStrategyOrder("comparison-run")
 	second := comparisonStrategyOrder("comparison-run")
-	if stableJSON(first) != stableJSON(second) || len(first) != 10 {
+	if stableJSON(first) != stableJSON(second) || len(first) != 3 {
 		t.Fatalf("strategy randomization is not reproducible: first=%v second=%v", first, second)
 	}
 	seen := map[string]bool{}
 	for _, strategy := range first {
 		seen[strategy] = true
 	}
-	for _, required := range []string{"direct", "rag", "react", "rule-only", "evidence-only", "cognitive", "active-diagnosis", "kubepilot", "kubepilot-no-reflection", "kubepilot-no-optional-skills"} {
+	for _, required := range []string{"kubepilot", "kubepilot-no-reflection", "kubepilot-no-optional-skills"} {
 		if !seen[required] {
 			t.Fatalf("randomized strategy order lost %s: %v", required, first)
 		}

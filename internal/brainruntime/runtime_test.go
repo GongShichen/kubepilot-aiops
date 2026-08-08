@@ -120,7 +120,11 @@ func TestGroundingUsesServerIDsAndDoesNotChangeModelConfidence(t *testing.T) {
 		{ID: "m", Source: "prometheus", QualityScore: .8, ObservedAt: now, CausalNodeIDs: []string{"pressure"}},
 		{ID: "k", Source: "kubernetes", QualityScore: .9, ObservedAt: now, CausalNodeIDs: []string{"impact"}},
 	}
-	grounding, delta := (Grounder{}).Validate(h, evidence, ValidationInput{SupportingEvidenceIDs: []string{"m", "k", "invented"}, FulfilledEvidenceNeeds: []string{"resource pressure", "request impact"}, ExpectedCausalNodeIDs: []string{"pressure", "impact"}, CausalClaim: true, TargetScopeDecisions: []domain.ResourceScopeDecision{{Allowed: true}}, WindowStart: now.Add(-time.Minute), WindowEnd: now.Add(time.Minute)}, nil)
+	attributions, err := ValidateEvidenceAttributions(h.ID, "turn-1", evidence, []domain.EvidenceAttributionIntent{{EvidenceID: "m", Relation: domain.EvidenceSupports, Weight: .8, Reason: "current resource pressure"}, {EvidenceID: "k", Relation: domain.EvidenceSupports, Weight: .9, Reason: "independent workload impact"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grounding, delta := (Grounder{}).Validate(h, evidence, ValidationInput{Attributions: attributions, FulfilledEvidenceNeeds: []string{"resource pressure", "request impact"}, ExpectedCausalNodeIDs: []string{"pressure", "impact"}, CausalClaim: true, TargetScopeDecisions: []domain.ResourceScopeDecision{{Allowed: true}}, WindowStart: now.Add(-time.Minute), WindowEnd: now.Add(time.Minute)}, nil)
 	if grounding.Level != domain.GroundingSupported || grounding.Evidence.IndependentSourceCount != 2 || len(grounding.Evidence.SupportingEvidenceIDs) != 2 {
 		t.Fatalf("unexpected grounding: %+v", grounding)
 	}
@@ -129,11 +133,26 @@ func TestGroundingUsesServerIDsAndDoesNotChangeModelConfidence(t *testing.T) {
 	}
 }
 
+func TestEvidenceAttributionRejectsUnknownIDsAndPreservesNeutralRelation(t *testing.T) {
+	evidence := []domain.Evidence{{ID: "e1", Source: "kubernetes", ObservedAt: time.Now().UTC()}}
+	if _, err := ValidateEvidenceAttributions("h1", "turn-1", evidence, []domain.EvidenceAttributionIntent{{EvidenceID: "invented", Relation: domain.EvidenceSupports, Weight: .8, Reason: "not current"}}); err == nil {
+		t.Fatal("unknown Evidence ID was admitted")
+	}
+	attributions, err := ValidateEvidenceAttributions("h1", "turn-1", evidence, []domain.EvidenceAttributionIntent{{EvidenceID: "e1", Relation: domain.EvidenceNeutral, Weight: .2, Reason: "observed but not discriminating"}})
+	if err != nil || len(attributions) != 1 || attributions[0].Relation != domain.EvidenceNeutral || attributions[0].EvidenceSnapshotHash == "" {
+		t.Fatalf("neutral attribution was not frozen with provenance: %+v %v", attributions, err)
+	}
+}
+
 func TestCausalClaimWithoutObservedPathCannotBeSupported(t *testing.T) {
 	hypothesis := domain.AgentHypothesis{ID: "h-causal", Mechanism: "causal mechanism", TargetRefs: []domain.ResourceRef{{Namespace: "team-a", Service: "api"}}, EvidenceNeeds: []string{"latency"}, ModelConfidence: .8}
 	evidence := []domain.Evidence{{ID: "e1", Source: "prometheus", Confidence: .9, ObservedAt: time.Now().UTC()}}
+	attributions, err := ValidateEvidenceAttributions(hypothesis.ID, "turn-1", evidence, []domain.EvidenceAttributionIntent{{EvidenceID: "e1", Relation: domain.EvidenceSupports, Weight: .9, Reason: "current latency"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	grounding, _ := (Grounder{}).Validate(hypothesis, evidence, ValidationInput{
-		SupportingEvidenceIDs:  []string{"e1"},
+		Attributions:           attributions,
 		FulfilledEvidenceNeeds: []string{"latency"},
 		CausalClaim:            true,
 		TargetScopeDecisions:   []domain.ResourceScopeDecision{{Allowed: true}},
@@ -149,10 +168,16 @@ func TestSnapshotInvalidationAndBeliefCommitBoundary(t *testing.T) {
 	if stale[0].Status != domain.HypothesisInvestigating {
 		t.Fatalf("supported hypothesis was not invalidated: %+v", stale[0])
 	}
-	if _, err := CommitBelief(h, domain.BeliefDelta{HypothesisRevisionID: "h1", NewConfidence: .4, RevisionRequired: true}); err == nil {
+	if _, err := CommitBelief(h, domain.BeliefDelta{HypothesisRevisionID: "h1", PreviousConfidence: .8, NewConfidence: .4, Direction: domain.BeliefDecrease, RevisionRequired: true}); err == nil {
 		t.Fatal("semantic change must require a new revision")
 	}
-	updated, err := CommitBelief(h, domain.BeliefDelta{HypothesisRevisionID: "h1", NewConfidence: .4})
+	if _, err := CommitBelief(h, domain.BeliefDelta{HypothesisRevisionID: "h1", PreviousConfidence: .8, NewConfidence: .8, Direction: domain.BeliefDecrease}); err == nil {
+		t.Fatal("a reflection that does not change belief must be rejected")
+	}
+	if _, err := CommitBelief(h, domain.BeliefDelta{HypothesisRevisionID: "h1", PreviousConfidence: .8, NewConfidence: .4, Direction: domain.BeliefIncrease}); err == nil {
+		t.Fatal("belief direction inconsistent with the confidence delta must be rejected")
+	}
+	updated, err := CommitBelief(h, domain.BeliefDelta{HypothesisRevisionID: "h1", PreviousConfidence: .8, NewConfidence: .4, Direction: domain.BeliefDecrease})
 	if err != nil || updated.ModelConfidence != .4 {
 		t.Fatalf("valid subjective confidence commit failed: %+v %v", updated, err)
 	}

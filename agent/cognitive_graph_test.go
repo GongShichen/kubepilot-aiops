@@ -55,7 +55,7 @@ func runDeterministicBaselineGraphForTest(t *testing.T, registry *AgentRegistry,
 		return nil
 	}
 	deps.Transition = transition
-	graph, err := buildBaselineGraph(SupervisorDeps{Agents: registry}, deps, transition)
+	graph, err := buildBaselineGraph(registry, deps, transition)
 	if err != nil {
 		t.Fatal(err)
 	}

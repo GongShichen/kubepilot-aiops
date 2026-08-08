@@ -22,12 +22,12 @@ skills:
     allowed_tool_categories: [CONTROL]
     output_contract: incident-understanding-v1
   - id: plan-investigation
-    version: "1"
+    version: "2"
     requires: [brain-kernel]
     mandatory: true
     compatible_phases: [PLANNING]
     allowed_tool_categories: [REASONING, CONTROL]
-    output_contract: investigation-plan-v1
+    output_contract: investigation-plan-v2
   - id: explore-resources
     version: "2"
     requires: [brain-kernel]
@@ -85,18 +85,18 @@ skills:
     allowed_tool_categories: [REASONING]
     output_contract: hypothesis-revision-v1
   - id: reflect-on-observation
-    version: "1"
+    version: "2"
     requires: [brain-kernel]
     mandatory: true
     compatible_phases: [REFLECTION]
     allowed_tool_categories: [REASONING, CONTROL]
-    output_contract: belief-delta-v1
+    output_contract: belief-or-plan-revision-v2
   - id: falsify-hypotheses
-    version: "1"
+    version: "2"
     requires: [brain-kernel, form-hypotheses]
     compatible_phases: [INVESTIGATION]
     allowed_tool_categories: [EVIDENCE, REASONING]
-    output_contract: falsification-request-v1
+    output_contract: falsification-attribution-v2
   - id: synthesize-diagnosis
     version: "1"
     requires: [brain-kernel, form-hypotheses]

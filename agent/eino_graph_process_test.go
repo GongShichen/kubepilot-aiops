@@ -44,8 +44,7 @@ func runCheckpointResumeE2E(t *testing.T) {
 	executor := &crossProcessExecutor{store: redis, key: "mutation-count:" + incidentID}
 	supervisor, err := NewSupervisor(ctx, SupervisorDeps{
 		Collectors:           collectors,
-		HistoricalCandidates: fixedHistoricalRetriever{},
-		Agents:               registry,
+		BrainModel:           BrainModelRuntime{Chat: registry.chat},
 		Executor:             executor,
 		Checkpoints:          checkpoints,
 		Reranker:             resumeReranker{},
@@ -136,8 +135,7 @@ func runResumeHelper() {
 	executor := &crossProcessExecutor{store: redis, key: "mutation-count:" + os.Getenv("KUBEPILOT_RESUME_INCIDENT_ID")}
 	supervisor, err := NewSupervisor(ctx, SupervisorDeps{
 		Collectors:           collectors,
-		HistoricalCandidates: fixedHistoricalRetriever{},
-		Agents:               registry,
+		BrainModel:           BrainModelRuntime{Chat: registry.chat},
 		Executor:             executor,
 		Checkpoints:          checkpoints,
 		Reranker:             resumeReranker{},

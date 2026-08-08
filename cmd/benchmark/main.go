@@ -42,6 +42,7 @@ import (
 	topologybenchmark "github.com/kubepilot-aiops/kubepilot/benchmark/topology"
 	topologyevolution "github.com/kubepilot-aiops/kubepilot/benchmark/topologyevolution"
 	artifactlayout "github.com/kubepilot-aiops/kubepilot/internal/artifacts"
+	"github.com/kubepilot-aiops/kubepilot/internal/brainruntime"
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 	"github.com/kubepilot-aiops/kubepilot/internal/evaluation"
@@ -165,11 +166,11 @@ func run(args []string) {
 	caseID := fs.String("case-id", "", "run exactly one scenario ID (diagnostic use)")
 	runID := fs.String("run-id", "", "stable run ID used for resume/API orchestration")
 	resumeRun := fs.Bool("resume", false, "continue after the last checkpoint")
-	diagnosisMethod := fs.String("diagnosis-method", domain.DiagnosisMethodKubePilot, "direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, or kubepilot-no-optional-skills")
+	diagnosisMethod := fs.String("diagnosis-method", domain.DiagnosisMethodKubePilot, "kubepilot, kubepilot-no-reflection, or kubepilot-no-optional-skills")
 	causalMode := fs.String("causal-mode", domain.CausalModeFull, "no-causal, static-causal, learned-causal, or full")
 	modelProfile := fs.String("model-profile", os.Getenv("MODEL_PROFILE"), "stable label for the active model configuration")
-	compareMethods := fs.Bool("compare-methods", false, "run all diagnosis baselines sequentially")
-	strategyList := fs.String("strategies", "direct,rag,react,rule-only,evidence-only,cognitive,active-diagnosis,kubepilot,kubepilot-no-reflection,kubepilot-no-optional-skills", "comma-separated strategies used by comparison runs")
+	compareMethods := fs.Bool("compare-methods", false, "run KubePilot Brain ablations sequentially")
+	strategyList := fs.String("strategies", "kubepilot,kubepilot-no-reflection,kubepilot-no-optional-skills", "comma-separated KubePilot Brain strategies used by comparison runs")
 	datasetSplit := fs.String("dataset-split", "test", "dev, validation, test, or all")
 	seedList := fs.String("seeds", "20260803,20260804,20260805", "comma-separated paired load and fault seeds")
 	repetitions := fs.Int("repetitions", 1, "repetitions per scenario and seed")
@@ -181,7 +182,7 @@ func run(args []string) {
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	canonicalMethod, validMethod := domain.NormalizeDiagnosisMethod(*diagnosisMethod)
-	if !validMethod || *diagnosisMethod == "" {
+	if !validMethod || *diagnosisMethod == "" || !domain.IsKubePilotBrainMethod(canonicalMethod) {
 		fatal(fmt.Errorf("unsupported diagnosis method %q", *diagnosisMethod))
 	}
 	*diagnosisMethod = canonicalMethod
@@ -528,46 +529,19 @@ func semanticJudgeConfigHash(cfg config.ChatConfig) string {
 }
 
 func diagnosisSkillSnapshotHash(method string) (string, error) {
-	if domain.IsKubePilotBrainMethod(method) {
-		resolver, err := agent.LoadDefaultBrainSkillResolver()
-		if err != nil {
-			return "", err
-		}
-		return resolver.SnapshotHash(), nil
+	canonical, valid := domain.NormalizeDiagnosisMethod(method)
+	if !valid || !domain.IsKubePilotBrainMethod(canonical) {
+		return "", fmt.Errorf("diagnosis method %q is not supported by the KubePilot Brain benchmark", method)
 	}
-	files := []struct{ agent, path string }{
-		{"planner_agent", "internal/agent/skills/planner/SKILL.md"},
-		{"metric_worker", "internal/agent/skills/metric-worker/SKILL.md"},
-		{"log_worker", "internal/agent/skills/log-worker/SKILL.md"},
-		{"trace_worker", "internal/agent/skills/trace-worker/SKILL.md"},
-		{"topology_worker", "internal/agent/skills/topology-worker/SKILL.md"},
-		{"diagnosis_agent", "internal/agent/skills/diagnosis/SKILL.md"},
-		{"alternative_agent", "internal/agent/skills/alternative/SKILL.md"},
-		{"critic_agent", "internal/agent/skills/critic/SKILL.md"},
-		{"recovery_agent", "internal/agent/skills/recovery/SKILL.md"},
-		{"supervisor_agent", "internal/agent/skills/supervisor/SKILL.md"},
+	resolver, err := agent.LoadDefaultBrainSkillResolver()
+	if err != nil {
+		return "", err
 	}
-	h := sha256.New()
-	for _, item := range files {
-		fileHash, err := fileSHA256(item.path)
-		if err != nil {
-			return "", err
-		}
-		_, _ = h.Write([]byte(item.agent + ":" + fileHash + "\n"))
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return resolver.SnapshotHash(), nil
 }
 
 func diagnosisBudgetConfigHash() string {
-	configuration := map[string]string{}
-	for key, fallback := range map[string]string{
-		"SUPERVISOR_MAX_ITERATIONS": "10", "SUPERVISOR_MAX_TOOL_USES": "50", "SUPERVISOR_MAX_TOKENS": "8192", "SUPERVISOR_MAX_CORRECTIONS": "3",
-		"DIAGNOSIS_MAX_ITERATIONS": "18", "DIAGNOSIS_MAX_TOOL_USES": "50", "DIAGNOSIS_MAX_TOKENS": "8192", "DIAGNOSIS_MAX_CORRECTIONS": "3",
-		"RECOVERY_MAX_ITERATIONS": "10", "RECOVERY_MAX_TOOL_USES": "50", "RECOVERY_MAX_TOKENS": "8192", "RECOVERY_MAX_CORRECTIONS": "2",
-	} {
-		configuration[key] = env(key, fallback)
-	}
-	encoded, _ := json.Marshal(configuration)
+	encoded, _ := json.Marshal(brainruntime.DefaultBudget())
 	hash := sha256.Sum256(encoded)
 	return hex.EncodeToString(hash[:])
 }
@@ -670,7 +644,7 @@ func caseCheckpointKey(caseID string, seed int64, repetition int) string {
 }
 
 func comparisonStrategyOrder(runID string) []string {
-	return randomizedStrategyOrder([]string{domain.DiagnosisMethodDirect, domain.DiagnosisMethodRAG, domain.DiagnosisMethodReAct, domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive, domain.DiagnosisMethodKubePilot, domain.DiagnosisMethodKubePilotNoReflection, domain.DiagnosisMethodKubePilotNoOptionalSkills}, runID)
+	return randomizedStrategyOrder([]string{domain.DiagnosisMethodKubePilot, domain.DiagnosisMethodKubePilotNoReflection, domain.DiagnosisMethodKubePilotNoOptionalSkills}, runID)
 }
 
 func randomizedStrategyOrder(strategies []string, runID string) []string {
@@ -688,7 +662,7 @@ func parseStrategies(value string) ([]string, error) {
 	var strategies []string
 	for _, part := range strings.Split(value, ",") {
 		strategy, ok := domain.NormalizeDiagnosisMethod(strings.TrimSpace(part))
-		if !ok || seen[strategy] {
+		if !ok || !domain.IsKubePilotBrainMethod(strategy) || seen[strategy] {
 			return nil, fmt.Errorf("invalid or duplicate strategy %q", part)
 		}
 		seen[strategy] = true
@@ -701,24 +675,11 @@ func parseStrategies(value string) ([]string, error) {
 }
 
 func strategyArchitecture(strategy string) string {
-	switch strategy {
-	case domain.DiagnosisMethodDirect:
-		return "single-pass"
-	case domain.DiagnosisMethodRAG:
-		return "single-pass-episodic"
-	case domain.DiagnosisMethodReAct:
-		return "single-react"
-	case domain.DiagnosisMethodRuleOnly:
-		return "eino-rule-diagnosis-runtime"
-	case domain.DiagnosisMethodEvidence:
-		return "eino-evidence-diagnosis-runtime"
-	case domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive:
-		return domain.WorkflowRuntimeName
-	case domain.DiagnosisMethodKubePilot, domain.DiagnosisMethodKubePilotNoReflection, domain.DiagnosisMethodKubePilotNoOptionalSkills:
+	canonical, valid := domain.NormalizeDiagnosisMethod(strategy)
+	if valid && domain.IsKubePilotBrainMethod(canonical) {
 		return "eino-native-self-reflective-brain"
-	default:
-		return "unknown"
 	}
+	return "unknown"
 }
 
 func pricingSnapshot() map[string]float64 {
@@ -1205,9 +1166,9 @@ func resume(args []string) {
 	}
 	var manifest reporter.Manifest
 	fatal(readJSON(filepath.Join(*artifactDir, "manifest.json"), &manifest))
-	method := manifest.DiagnosisMethod
-	if method == "" {
-		method = domain.DiagnosisMethodKubePilot
+	method, valid := domain.NormalizeDiagnosisMethod(manifest.DiagnosisMethod)
+	if !valid || !domain.IsKubePilotBrainMethod(method) {
+		fatal(fmt.Errorf("run %q does not contain a resumable KubePilot Brain diagnosis method", *runID))
 	}
 	seeds := manifest.Seeds
 	if len(seeds) == 0 {

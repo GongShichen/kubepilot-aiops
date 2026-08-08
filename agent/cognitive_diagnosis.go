@@ -410,8 +410,6 @@ func recoveryPermission(verified []domain.VerifiedHypothesis, arbitration domain
 		if item.Draft.ID != arbitration.SelectedHypothesisID {
 			continue
 		}
-		permission.ObjectiveDiagnosisConfidence = item.ObjectiveScore
-		permission.DiagnosisStability = 1
 		// Action safety and verification are only knowable once the existing
 		// recovery proposal and dry-run nodes run. Keep this diagnosis-stage
 		// permission non-authoritative and require the later safety controller.

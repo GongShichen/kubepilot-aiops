@@ -53,7 +53,7 @@ func TestRetryCreatesNewWorkflowAttemptAndInvalidatesFrozenArtifacts(t *testing.
 	}
 }
 
-func TestBaselineRetryDoesNotAdoptBrainWorkflowAttemptSemantics(t *testing.T) {
+func TestRemovedBaselineIncidentCannotRetryIntoProductionRuntime(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemoryStore()
 	now := time.Now().UTC()
@@ -63,15 +63,8 @@ func TestBaselineRetryDoesNotAdoptBrainWorkflowAttemptSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := &IncidentManager{Store: st, Hub: NewHub()}
-	retried, err := manager.Retry(ctx, incident.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if retried.WorkflowAttempt != nil || retried.ExecutionSnapshot != nil {
-		t.Fatalf("baseline retry adopted Brain attempt state: attempt=%+v snapshot=%+v", retried.WorkflowAttempt, retried.ExecutionSnapshot)
-	}
-	if retried.Investigation == nil || retried.Investigation.Architecture != investigation.Architecture {
-		t.Fatalf("baseline investigation behavior changed: %+v", retried.Investigation)
+	if _, err := manager.Retry(ctx, incident.ID); err == nil {
+		t.Fatal("removed baseline incident retried into the production Brain runtime")
 	}
 }
 

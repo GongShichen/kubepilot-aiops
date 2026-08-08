@@ -2,6 +2,7 @@ package worldmodel
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -20,7 +21,8 @@ func Build(incident *domain.Incident, evidence []domain.Evidence, graph topology
 		return model
 	}
 	model.IncidentID, model.Cluster, model.Namespace = incident.ID, incident.Cluster, incident.Namespace
-	model.RootEntityID = entityID("service", incident.Namespace, incident.Service)
+	rootName := firstNonEmpty(incident.Service, incident.Resource)
+	model.RootEntityID = entityID("service", incident.Namespace, rootName)
 	entities := map[string]domain.OperationalEntity{}
 	relations := map[string]domain.OperationalRelation{}
 	addEntity := func(id, kind, service, resource string, evidenceID string, observedAt time.Time, attributes map[string]string) {
@@ -46,6 +48,9 @@ func Build(incident *domain.Incident, evidence []domain.Evidence, graph topology
 		for key, value := range attributes {
 			if strings.TrimSpace(value) != "" {
 				current.Attributes[key] = value
+				if key == "state" {
+					current.State = value
+				}
 			}
 		}
 		entities[id] = current
@@ -64,7 +69,7 @@ func Build(incident *domain.Incident, evidence []domain.Evidence, graph topology
 		}
 		relations[key] = current
 	}
-	addEntity(model.RootEntityID, "service", incident.Service, incident.Resource, "", incident.CreatedAt, map[string]string{"role": "incident_root"})
+	addEntity(model.RootEntityID, "service", firstNonEmpty(incident.Service, rootName), firstNonEmpty(incident.Resource, rootName), "", incident.CreatedAt, map[string]string{"role": "incident_root"})
 	for _, node := range graph.Nodes {
 		id := entityID(node.Type, incident.Namespace, node.ID)
 		service, resource := node.Metadata["service"], node.Metadata["resource"]
@@ -112,6 +117,7 @@ func Build(incident *domain.Incident, evidence []domain.Evidence, graph topology
 			current.State = state
 			entities[id] = current
 		}
+		expandOperationalFacts(incident, item, canonicalEvidenceFacts(item), model.RootEntityID, addEntity, addRelation, &model)
 	}
 	for _, entity := range entities {
 		model.Entities = append(model.Entities, entity)
@@ -135,6 +141,194 @@ func Build(incident *domain.Incident, evidence []domain.Evidence, graph topology
 	})
 	model.EvidenceSnapshotHash = brainruntime.EvidenceSnapshotHash(evidence)
 	return model
+}
+
+func canonicalEvidenceFacts(item domain.Evidence) map[string]any {
+	for _, payload := range []map[string]any{item.Facts, item.Content, item.Data} {
+		if len(payload) > 0 {
+			return payload
+		}
+	}
+	return nil
+}
+
+func expandOperationalFacts(
+	incident *domain.Incident,
+	evidence domain.Evidence,
+	facts map[string]any,
+	rootID string,
+	addEntity func(string, string, string, string, string, time.Time, map[string]string),
+	addRelation func(string, string, string, string),
+	model *domain.OperationalWorldModel,
+) {
+	if len(facts) == 0 {
+		return
+	}
+	observedAt := evidenceTime(evidence)
+	serviceName := firstNonEmpty(evidence.Service, incident.Service, evidence.Resource, incident.Resource)
+	serviceID := entityID("service", incident.Namespace, serviceName)
+	objectEntities := map[string]string{serviceName: serviceID}
+	if serviceID != "" {
+		addEntity(serviceID, "service", serviceName, serviceName, evidence.ID, observedAt, nil)
+	}
+	deploymentID := ""
+	if deployment, ok := stringMap(facts["deployment"]); ok {
+		name := textValue(deployment["name"])
+		if name != "" {
+			deploymentID = entityID("deployment", incident.Namespace, name)
+			objectEntities[name] = deploymentID
+			state := "healthy"
+			if numericValue(deployment["unavailable_replicas"]) > 0 {
+				state = "degraded"
+			}
+			addEntity(deploymentID, "deployment", serviceName, name, evidence.ID, observedAt, map[string]string{"state": state, "revision": textValue(deployment["revision"]), "uid": textValue(deployment["uid"]), "resource_version": textValue(deployment["resource_version"])})
+			addRelation(serviceID, deploymentID, "implemented_by", evidence.ID)
+			for _, container := range mapSlice(deployment["containers"]) {
+				containerName := textValue(container["name"])
+				containerID := entityID("container", incident.Namespace, name+"/template/"+containerName)
+				addEntity(containerID, "container", serviceName, containerName, evidence.ID, observedAt, map[string]string{"image": textValue(container["image"]), "role": "pod_template"})
+				addRelation(deploymentID, containerID, "defines", evidence.ID)
+			}
+		}
+	}
+	for _, pod := range mapSlice(facts["pods"]) {
+		name := textValue(pod["name"])
+		if name == "" {
+			continue
+		}
+		podID := entityID("pod", incident.Namespace, name)
+		objectEntities[name] = podID
+		addEntity(podID, "pod", serviceName, name, evidence.ID, observedAt, map[string]string{"state": textValue(pod["phase"]), "uid": textValue(pod["uid"]), "resource_version": textValue(pod["resource_version"]), "pod_ip": textValue(pod["pod_ip"])})
+		if deploymentID != "" {
+			addRelation(deploymentID, podID, "owns", evidence.ID)
+		} else {
+			addRelation(serviceID, podID, "selects", evidence.ID)
+		}
+		nodeName := textValue(pod["node"])
+		if nodeName != "" {
+			nodeID := entityID("node", incident.Namespace, nodeName)
+			addEntity(nodeID, "node", "", nodeName, evidence.ID, observedAt, nil)
+			addRelation(podID, nodeID, "runs_on", evidence.ID)
+		}
+		for _, container := range mapSlice(pod["containers"]) {
+			containerName := textValue(container["name"])
+			if containerName == "" {
+				continue
+			}
+			containerID := entityID("container", incident.Namespace, name+"/"+containerName)
+			addEntity(containerID, "container", serviceName, containerName, evidence.ID, observedAt, map[string]string{"state": firstNonEmpty(textValue(container["state"]), textValue(container["reason"])), "image": textValue(container["image"])})
+			addRelation(podID, containerID, "contains", evidence.ID)
+		}
+	}
+	for _, dependency := range stringSlice(facts["discovered_dependencies"]) {
+		dependencyID := entityID("service", incident.Namespace, dependency)
+		addEntity(dependencyID, "service", dependency, dependency, evidence.ID, observedAt, map[string]string{"role": "one_hop_dependency"})
+		addRelation(serviceID, dependencyID, "depends_on", evidence.ID)
+	}
+	for index, event := range mapSlice(facts["events"]) {
+		object := textValue(event["object"])
+		entity := objectEntities[object]
+		if entity == "" {
+			entity = rootID
+		}
+		occurredAt := timeValue(event["last_timestamp"])
+		if occurredAt.IsZero() {
+			occurredAt = observedAt
+		}
+		model.Timeline = append(model.Timeline, domain.OperationalEvent{ID: fmt.Sprintf("%s:event:%d", evidence.ID, index), EntityID: entity, Kind: firstNonEmpty(textValue(event["reason"]), textValue(event["type"]), "kubernetes_event"), Summary: firstNonEmpty(textValue(event["message"]), textValue(event["reason"])), EvidenceID: evidence.ID, OccurredAt: occurredAt})
+	}
+}
+
+func stringMap(value any) (map[string]any, bool) {
+	if value == nil {
+		return nil, false
+	}
+	if direct, ok := value.(map[string]any); ok {
+		return direct, true
+	}
+	ref := reflect.ValueOf(value)
+	if ref.Kind() != reflect.Map || ref.Type().Key().Kind() != reflect.String {
+		return nil, false
+	}
+	out := make(map[string]any, ref.Len())
+	iter := ref.MapRange()
+	for iter.Next() {
+		out[iter.Key().String()] = iter.Value().Interface()
+	}
+	return out, true
+}
+
+func mapSlice(value any) []map[string]any {
+	ref := reflect.ValueOf(value)
+	if !ref.IsValid() || (ref.Kind() != reflect.Slice && ref.Kind() != reflect.Array) {
+		return nil
+	}
+	out := make([]map[string]any, 0, ref.Len())
+	for index := 0; index < ref.Len(); index++ {
+		if item, ok := stringMap(ref.Index(index).Interface()); ok {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func stringSlice(value any) []string {
+	ref := reflect.ValueOf(value)
+	if !ref.IsValid() || (ref.Kind() != reflect.Slice && ref.Kind() != reflect.Array) {
+		return nil
+	}
+	out := []string{}
+	for index := 0; index < ref.Len(); index++ {
+		if item := textValue(ref.Index(index).Interface()); item != "" {
+			out = appendUnique(out, item)
+		}
+	}
+	return out
+}
+
+func textValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func numericValue(value any) float64 {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case float32:
+		return float64(typed)
+	case float64:
+		return typed
+	default:
+		return 0
+	}
+}
+
+func timeValue(value any) time.Time {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed
+	case string:
+		parsed, _ := time.Parse(time.RFC3339Nano, typed)
+		return parsed
+	default:
+		ref := reflect.ValueOf(value)
+		if ref.IsValid() && ref.Kind() == reflect.Struct {
+			field := ref.FieldByName("Time")
+			if field.IsValid() && field.CanInterface() {
+				if observed, ok := field.Interface().(time.Time); ok {
+					return observed
+				}
+			}
+		}
+		return time.Time{}
+	}
 }
 
 func entityID(kind, namespace, name string) string {

@@ -20,8 +20,9 @@ Use only the triggering Tool Result, GroundingDelta, affected hypotheses, and cu
 3. If no admitted hypothesis exists yet, repair the procedure by submitting falsifiable hypotheses or requesting the missing phase-compatible Skill. Do not emit a BeliefDelta for a hypothesis that does not exist.
 4. If an admitted hypothesis exists, explain which belief is affected and propose a confidence change without changing server grounding.
 5. Decide whether a new revision is required. Changes to Statement, Mechanism, Target, or falsification conditions require a new revision.
-6. Select one bounded next goal or escalation. A denied Tool Category requires a compatible Skill activation before category selection.
-7. Never retry an unchanged constraint request, and do not repeat the observation verbatim.
+6. When the best discriminating action changes, create an immutable Investigation Plan revision that cites the current parent plan and affected Hypothesis revisions.
+7. Otherwise select one bounded next goal or escalation. A denied Tool Category requires a compatible Skill activation before category selection.
+8. Never retry an unchanged constraint request, and do not repeat the observation verbatim.
 
 ## Allowed Tools
 
@@ -33,7 +34,7 @@ Every Incident, Resource, Evidence, Hypothesis Revision, Validation, Diagnosis, 
 
 ## Output Contract
 
-Return a structured corrective action. When a hypothesis exists, return BeliefDelta records and a next goal. When none exists, return a hypothesis submission or Skill request that resolves the procedural blocker. Do not expose hidden reasoning.
+Return a structured corrective action. When a hypothesis exists, return a BeliefDelta, an immutable Investigation Plan revision, or a next goal. When none exists, return a hypothesis submission or Skill request that resolves the procedural blocker. Do not expose hidden reasoning.
 
 ## Output Example
 
@@ -44,6 +45,12 @@ With an admitted hypothesis, commit only the subjective confidence change:
 ```
 
 Without an admitted hypothesis, use the `submit_hypotheses` example from `form-hypotheses` or request the missing Skill; do not invent a hypothesis ID.
+
+When new Evidence or Grounding changes the highest-information next action, revise rather than mutate the active plan:
+
+```json
+{"tool":"revise_investigation_plan","arguments":{"intent":"replace the next action with a more discriminating current observation","expected_observation":["immutable plan revision linked to the current plan"],"parent_plan_id":"<current-plan-id>","revision_reason":"the latest GroundingDelta eliminated the previous branch","hypothesis_ids":["<hypothesis-revision-id>"],"objective":"resolve the remaining conflict","goals":["collect the observation that distinguishes the remaining hypotheses"],"stop_conditions":["one hypothesis is supported and alternatives are refuted","no informative request remains"]}}
+```
 
 When the trigger is `CONSTRAINT_FAILURE` with
 `tool_category_not_granted_by_skill`, repair the procedural boundary by

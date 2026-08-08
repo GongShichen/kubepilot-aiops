@@ -112,7 +112,7 @@ paths:
               required: [profile]
               properties:
                 profile: {type: string, enum: [smoke, ci, standard, robustness, correlation, log-retrieval, incident-retrieval, full]}
-                strategies: {type: array, items: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}, default: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}
+                strategies: {type: array, items: {type: string, enum: [kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}, default: [kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}
                 dataset_split: {type: string, enum: [dev, validation, test, all], default: test}
                 seeds: {type: array, minItems: 1, items: {type: integer, format: int64}, default: [20260803, 20260804, 20260805]}
                 repetitions: {type: integer, minimum: 1, default: 1}
@@ -147,7 +147,7 @@ components:
         namespace: {type: string}
         resource: {type: string}
         summary: {type: string}
-        diagnosis_method: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills], default: kubepilot}
+        diagnosis_method: {type: string, enum: [kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills], default: kubepilot}
         causal_mode: {type: string, enum: [no-causal, static-causal, learned-causal, full], default: full, description: Runtime causal knowledge policy used for controlled ablations and deployments}
         evidence_start_at: {type: string, format: date-time, description: Optional start of the incident observation window}
     Approval:
@@ -169,7 +169,7 @@ components:
         namespace: {type: string}
         resource: {type: string}
         summary: {type: string}
-        diagnosis_method: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}
+        diagnosis_method: {type: string, enum: [kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}
         causal_mode: {type: string, enum: [no-causal, static-causal, learned-causal, full]}
         diagnosis_error: {type: string, description: Workflow failure kept separate from an incorrect diagnosis}
         recovery_execution:
@@ -194,6 +194,7 @@ components:
         confidence: {type: number}
         reasoning_type: {type: string, enum: [hypothesis_verification]}
         execution_snapshot: {$ref: '#/components/schemas/ExecutionSnapshot'}
+        execution_context: {$ref: '#/components/schemas/ExecutionContext'}
         workflow_attempt: {$ref: '#/components/schemas/WorkflowAttempt'}
         dry_run: {$ref: '#/components/schemas/DryRunResult'}
         investigation: {$ref: '#/components/schemas/Investigation'}
@@ -284,19 +285,9 @@ components:
       type: object
       required: [architecture, plan, started_at]
       properties:
-        architecture: {type: string, enum: [single-pass, single-pass-episodic, single-react, eino-rule-diagnosis-runtime, eino-evidence-diagnosis-runtime, eino-cognitive-diagnosis-runtime, eino-native-self-reflective-brain]}
+        architecture: {type: string, enum: [eino-native-self-reflective-brain]}
         plan: {$ref: '#/components/schemas/InvestigationPlan'}
-        findings: {type: array, items: {$ref: '#/components/schemas/WorkerFinding'}}
-        debate: {type: array, maxItems: 2, items: {$ref: '#/components/schemas/DebateRound'}}
-        candidates: {type: array, items: {type: object, description: Server-generated candidate draft with referenced evidence and graph node IDs}}
-        verified_hypotheses: {type: array, items: {type: object, description: Deterministic evidence, causal, observation, contradiction, and objective-score audit}}
-        signals: {type: array, items: {$ref: '#/components/schemas/EvidenceSignal'}}
-        state_assertions: {type: array, items: {$ref: '#/components/schemas/StateAssertion'}}
-        cognitive_reasoning: {type: array, items: {$ref: '#/components/schemas/CognitiveReasoning'}}
-        falsification: {type: array, items: {$ref: '#/components/schemas/FalsificationResult'}}
-        pairwise_falsification: {type: array, items: {$ref: '#/components/schemas/PairwiseFalsification'}}
-        candidate_expansion_requests: {type: array, items: {$ref: '#/components/schemas/CandidateExpansionRequest'}}
-        arbitration: {$ref: '#/components/schemas/ArbitrationResult'}
+        plan_history: {type: array, items: {$ref: '#/components/schemas/InvestigationPlan'}}
         recovery_permission: {$ref: '#/components/schemas/RecoveryPermission'}
         memory_reads: {type: array, items: {$ref: '#/components/schemas/MemoryAccessEvent'}}
         model_usage: {type: array, items: {$ref: '#/components/schemas/ModelUsageEvent'}}
@@ -308,6 +299,7 @@ components:
         skill_retrievals: {type: array, items: {$ref: '#/components/schemas/SkillRetrievalResult'}}
         skill_activations: {type: array, items: {$ref: '#/components/schemas/SkillActivation'}}
         tool_executions: {type: array, items: {$ref: '#/components/schemas/BrainToolExecution'}}
+        evidence_attributions: {type: array, items: {$ref: '#/components/schemas/HypothesisEvidenceAttribution'}}
         agent_hypotheses: {type: array, items: {$ref: '#/components/schemas/AgentHypothesis'}}
         hypothesis_admissions: {type: array, items: {$ref: '#/components/schemas/HypothesisAdmission'}}
         hypothesis_groundings: {type: array, items: {$ref: '#/components/schemas/HypothesisGrounding'}}
@@ -322,7 +314,6 @@ components:
         brain_budget: {$ref: '#/components/schemas/BrainBudgetState'}
         execution_snapshot: {$ref: '#/components/schemas/ExecutionSnapshot'}
         workflow_attempt: {$ref: '#/components/schemas/WorkflowAttempt'}
-        diagnosis_rounds: {type: integer, minimum: 1, maximum: 2}
         started_at: {type: string, format: date-time}
         completed_at: {type: string, format: date-time}
     OperationalWorldModel:
@@ -425,14 +416,37 @@ components:
         error: {type: string}
     HybridRetrievalResult:
       type: object
-      required: [channels, fused, final, reranker_used, snapshot_hash, retrieved_at]
+      required: [query, fusion_profile, channels, fused, final, reranker_used, snapshot_hash, retrieved_at]
       properties:
+        query: {$ref: '#/components/schemas/HybridQueryUnderstanding'}
+        fusion_profile: {$ref: '#/components/schemas/RetrievalFusionProfile'}
         channels: {type: array, items: {$ref: '#/components/schemas/HybridRetrievalChannelResult'}}
         fused: {type: array, items: {$ref: '#/components/schemas/RetrievalCandidate'}}
         final: {type: array, items: {$ref: '#/components/schemas/RetrievalCandidate'}}
         reranker_used: {type: boolean}
         snapshot_hash: {type: string}
         retrieved_at: {type: string, format: date-time}
+    HybridQueryUnderstanding:
+      type: object
+      required: [intent, time]
+      description: Replayable retrieval intent over entities, time and observed signals; it is not a diagnosis.
+      properties:
+        entities: {type: array, items: {type: string}}
+        intent: {type: string}
+        time:
+          type: object
+          properties:
+            start: {type: string, format: date-time}
+            end: {type: string, format: date-time}
+        signals: {type: array, items: {type: string}}
+    RetrievalFusionProfile:
+      type: object
+      required: [channel_weights, reasons]
+      properties:
+        channel_weights:
+          type: object
+          additionalProperties: {type: number, minimum: 0}
+        reasons: {type: array, items: {type: string}}
     SkillSearchResult:
       type: object
       required: [id, version, content_hash, description, bm25_score, vector_score, phase_score, final_score]
@@ -464,6 +478,26 @@ components:
         model_config_hash: {type: string}
         tool_schema_hash: {type: string}
         policy_hash: {type: string}
+    ExecutionContext:
+      type: object
+      required: [namespace_allowlist, incident_id, proposal_id, approval_id, idempotency_key, target_uid, resource_version, mutation_spec_hash, approved_at, expires_at]
+      properties:
+        namespace_allowlist: {type: array, items: {type: string}}
+        incident_id: {type: string}
+        proposal_id: {type: string}
+        recovery_plan_id: {type: string}
+        diagnosis_version: {type: string}
+        evidence_snapshot_hash: {type: string}
+        execution_snapshot: {$ref: '#/components/schemas/ExecutionSnapshot'}
+        approval_id: {type: string}
+        idempotency_key: {type: string}
+        operator: {type: string}
+        target_uid: {type: string}
+        resource_version: {type: string}
+        mutation_spec_hash: {type: string}
+        dry_run_validated_at: {type: string, format: date-time}
+        approved_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
     WorkflowAttempt:
       type: object
       required: [id, incident_id, sequence, checkpoint_id, status, execution_snapshot, started_at]
@@ -646,6 +680,20 @@ components:
         allowed_tool_categories: {type: array, items: {type: string}}
         resource_scope: {type: array, items: {type: object, additionalProperties: true}}
         occurred_at: {type: string, format: date-time}
+    HypothesisEvidenceAttribution:
+      type: object
+      required: [id, hypothesis_revision_id, evidence_id, relation, weight, reason, attributed_by_turn, evidence_snapshot_hash, validated_at]
+      description: Explicit LLM Evidence interpretation whose identity, enum, snapshot and shape are validated by the Runtime without mechanism inference.
+      properties:
+        id: {type: string}
+        hypothesis_revision_id: {type: string}
+        evidence_id: {type: string}
+        relation: {type: string, enum: [SUPPORT, CONTRADICT, NEUTRAL]}
+        weight: {type: number, minimum: 0, maximum: 1}
+        reason: {type: string}
+        attributed_by_turn: {type: string}
+        evidence_snapshot_hash: {type: string}
+        validated_at: {type: string, format: date-time}
     HypothesisGrounding:
       type: object
       required: [id, hypothesis_revision_id, level, evidence, coverage, validated_at, evidence_snapshot_hash]
@@ -653,12 +701,35 @@ components:
         id: {type: string}
         hypothesis_revision_id: {type: string}
         level: {type: string, enum: [SUPPORTED, PARTIAL, REFUTED, UNKNOWN]}
-        evidence: {type: object, additionalProperties: true}
-        coverage: {type: object, additionalProperties: true, description: Coverage of declared validation obligations; not a diagnosis probability}
+        evidence: {$ref: '#/components/schemas/GroundingEvidence'}
+        coverage: {$ref: '#/components/schemas/GroundingCoverage'}
         missing_observations: {type: array, items: {type: string}}
         validated_at: {type: string, format: date-time}
         evidence_snapshot_hash: {type: string}
         causal_coverage_applicable: {type: boolean}
+    GroundingEvidence:
+      type: object
+      required: [independent_source_count, evidence_support, contradiction_ratio]
+      description: Evidence attribution summary validated by the Runtime; it is not a diagnosis probability.
+      properties:
+        supporting_evidence_ids: {type: array, items: {type: string}}
+        contradicting_evidence_ids: {type: array, items: {type: string}}
+        neutral_evidence_ids: {type: array, items: {type: string}}
+        attribution_ids: {type: array, items: {type: string}}
+        independent_source_count: {type: integer, minimum: 0}
+        evidence_support: {type: number, minimum: 0, maximum: 1}
+        contradiction_ratio: {type: number, minimum: 0, maximum: 1}
+      additionalProperties: false
+    GroundingCoverage:
+      type: object
+      required: [evidence_need_coverage, causal_path_coverage, target_scope_coverage, temporal_coverage]
+      description: Completion of declared validation obligations; it is never a diagnosis score or confidence.
+      properties:
+        evidence_need_coverage: {type: number, minimum: 0, maximum: 1}
+        causal_path_coverage: {type: number, minimum: 0, maximum: 1}
+        target_scope_coverage: {type: number, minimum: 0, maximum: 1}
+        temporal_coverage: {type: number, minimum: 0, maximum: 1}
+      additionalProperties: false
     HypothesisComparison:
       type: object
       required: [hypothesis_revision_id, level, evidence, coverage, evidence_snapshot_hash]
@@ -666,21 +737,22 @@ components:
       properties:
         hypothesis_revision_id: {type: string}
         level: {type: string, enum: [SUPPORTED, PARTIAL, REFUTED, UNKNOWN]}
-        evidence: {type: object, additionalProperties: true}
-        coverage: {type: object, additionalProperties: true}
+        evidence: {$ref: '#/components/schemas/GroundingEvidence'}
+        coverage: {$ref: '#/components/schemas/GroundingCoverage'}
         missing_observations: {type: array, items: {type: string}}
         evidence_snapshot_hash: {type: string}
     GroundingDelta:
       type: object
-      required: [hypothesis_revision_id, current_level, current_coverage, conflict_detected, suggested_revision_need, occurred_at]
+      required: [hypothesis_revision_id, current_level, previous_coverage, current_coverage, conflict_detected, suggested_revision_need, occurred_at]
       properties:
         hypothesis_revision_id: {type: string}
-        previous_level: {type: string}
+        previous_level: {type: string, enum: [SUPPORTED, PARTIAL, REFUTED, UNKNOWN]}
         current_level: {type: string, enum: [SUPPORTED, PARTIAL, REFUTED, UNKNOWN]}
         evidence_change: {type: array, items: {type: string}}
         new_supporting_evidence_ids: {type: array, items: {type: string}}
         new_contradicting_evidence_ids: {type: array, items: {type: string}}
-        current_coverage: {type: object, additionalProperties: true}
+        previous_coverage: {$ref: '#/components/schemas/GroundingCoverage'}
+        current_coverage: {$ref: '#/components/schemas/GroundingCoverage'}
         conflict_detected: {type: boolean}
         suggested_revision_need: {type: boolean}
         occurred_at: {type: string, format: date-time}
@@ -691,7 +763,7 @@ components:
         hypothesis_revision_id: {type: string}
         previous_confidence: {type: number, minimum: 0, maximum: 1}
         new_confidence: {type: number, minimum: 0, maximum: 1}
-        direction: {type: string}
+        direction: {type: string, enum: [INCREASE, DECREASE]}
         evidence_ids: {type: array, items: {type: string}}
         validation_result_ids: {type: array, items: {type: string}}
         revision_required: {type: boolean}
@@ -801,7 +873,7 @@ components:
       required: [workflow, strategy, architecture, agents, model_usage]
       properties:
         workflow: {type: string}
-        strategy: {type: string, enum: [direct, rag, react, rule-only, evidence-only, cognitive, active-diagnosis, kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}
+        strategy: {type: string, enum: [kubepilot, kubepilot-no-reflection, kubepilot-no-optional-skills]}
         architecture: {type: string}
         skill_snapshot_hash: {type: string}
         ranking_policy_hash: {type: string}
@@ -832,11 +904,16 @@ components:
       type: object
       required: [objective, tasks, stop_conditions, round_limit, created_at]
       properties:
+        id: {type: string}
+        version: {type: integer, minimum: 1}
+        parent_id: {type: string}
+        revision_reason: {type: string}
         objective: {type: string}
-        tasks: {type: array, maxItems: 18, items: {$ref: '#/components/schemas/WorkerTask'}}
+        tasks: {type: array, maxItems: 50, items: {$ref: '#/components/schemas/WorkerTask'}}
         stop_conditions: {type: array, items: {type: string}}
-        round_limit: {type: integer, minimum: 1, maximum: 18}
+        round_limit: {type: integer, minimum: 1, maximum: 50}
         created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
     WorkerTask:
       type: object
       required: [id, question]
@@ -865,156 +942,10 @@ components:
         window_start: {type: string, format: date-time}
         window_end: {type: string, format: date-time}
         hypothesis_ids: {type: array, items: {type: string}}
-    WorkerFinding:
-      type: object
-      required: [task_id, worker, source, summary, evidence_ids, completed_at]
-      properties:
-        task_id: {type: string}
-        worker: {type: string}
-        source: {type: string, enum: [metric, log, trace, topology]}
-        summary: {type: string}
-        evidence_ids: {type: array, items: {type: string}}
-        supporting_hypothesis_ids: {type: array, items: {type: string}}
-        contradicting_hypothesis_ids: {type: array, items: {type: string}}
-        unknowns: {type: array, items: {type: string}}
-        completed_at: {type: string, format: date-time}
-    DebateRound:
-      type: object
-      required: [round, primary, alternative, occurred_at]
-      properties:
-        round: {type: integer, minimum: 1, maximum: 2}
-        primary: {type: object, description: Structured hypothesis argument; hidden reasoning is not retained}
-        alternative: {type: object, description: First-round blind alternative hypothesis argument}
-        critiques: {type: array, items: {type: object}}
-        occurred_at: {type: string, format: date-time}
-    ArbitrationResult:
-      type: object
-      required: [selected_score, score_margin, accepted, needs_more_evidence, reason]
-      properties:
-        selected_hypothesis_id: {type: string}
-        display_hypothesis_id: {type: string, description: Presentation-only ordinal cognitive preference; it never changes objective selection, gates, or recovery permission}
-        ranked_hypothesis_ids: {type: array, items: {type: string}}
-        selected_score: {type: number, minimum: 0, maximum: 1}
-        score_margin: {type: number}
-        accepted: {type: boolean}
-        needs_more_evidence: {type: boolean}
-        reason: {type: string}
-        gate_results: {type: array, items: {$ref: '#/components/schemas/HypothesisGateResult'}}
-    HypothesisGateResult:
-      type: object
-      required: [hypothesis_id, score_breakdown]
-      properties:
-        hypothesis_id: {type: string}
-        score_breakdown:
-          type: object
-          description: Deterministic Evidence, Causal, Observation Coverage, Objective Score, Contradiction, and source-count audit record
-        failed_gates:
-          type: array
-          items: {type: string, enum: [supported_status, supporting_score, causal_coverage, final_score, contradiction, evidence_count, independent_sources, kubernetes_evidence, score_margin]}
-    EvidenceSignal:
-      type: object
-      required: [id, evidence_id, source, category, signal, strength, direction, reliability, independence, temporal_alignment, diagnostic_weight, extraction]
-      properties:
-        id: {type: string}
-        evidence_id: {type: string}
-        source: {type: string}
-        category: {type: string}
-        signal: {type: string}
-        value: {type: number}
-        strength: {type: number, minimum: 0, maximum: 1}
-        direction: {type: string, enum: [increase, decrease, normal, unknown]}
-        reliability: {type: number, minimum: 0, maximum: 1}
-        independence: {type: number, minimum: 0, maximum: 1}
-        temporal_alignment: {type: number, minimum: 0, maximum: 1}
-        diagnostic_weight: {type: number, minimum: 0, maximum: 1}
-        extraction: {type: string}
-        window_start: {type: string, format: date-time}
-        window_end: {type: string, format: date-time}
-        observed_at: {type: string, format: date-time}
-        namespace: {type: string}
-        service: {type: string}
-        resource: {type: string}
-    StateAssertion:
-      type: object
-      required: [id, subject, property, state, confidence, first_seen, last_seen, status]
-      properties:
-        id: {type: string}
-        subject: {type: string}
-        property: {type: string}
-        state: {type: string}
-        confidence: {type: number, minimum: 0, maximum: 1}
-        supporting_signal_ids: {type: array, items: {type: string}}
-        contradicting_signal_ids: {type: array, items: {type: string}}
-        first_seen: {type: string, format: date-time}
-        last_seen: {type: string, format: date-time}
-        status: {type: string, enum: [ACTIVE, RESOLVED, STALE, CONTRADICTED]}
-    CognitiveReasoning:
-      type: object
-      required: [round, accepted, occurred_at]
-      description: Structured, reference-bound cognitive proposal. Hidden reasoning is never persisted.
-      properties:
-        round: {type: integer, minimum: 0, maximum: 2}
-        intent: {type: object, properties: {focus: {type: array, items: {type: string}}, priorities: {type: array, items: {type: string}}}}
-        interpretations: {type: array, items: {type: object, properties: {candidate_ids: {type: array, items: {type: string}}, mechanism_labels: {type: array, items: {type: string}}, supporting_assertion_ids: {type: array, items: {type: string}}, reasoning_predicates: {type: array, items: {type: string}}, required_observations: {type: array, items: {type: string}}}}}
-        tie_breaking_preferences: {type: array, items: {$ref: '#/components/schemas/TieBreakingPreference'}}
-        investigation_policies: {type: array, items: {$ref: '#/components/schemas/InvestigationPolicy'}}
-        counterarguments: {type: array, items: {type: object, properties: {candidate_id: {type: string}, assertion_ids: {type: array, items: {type: string}}, observation_kinds: {type: array, items: {type: string}}}}}
-        accepted: {type: boolean}
-        rejected_reasons: {type: array, items: {type: string}}
-        occurred_at: {type: string, format: date-time}
-    TieBreakingPreference:
-      type: object
-      required: [preferred_candidate_id, other_candidate_id]
-      properties:
-        preferred_candidate_id: {type: string}
-        other_candidate_id: {type: string}
-        assertion_ids: {type: array, items: {type: string}}
-        predicates: {type: array, items: {type: string}}
-    InvestigationPolicy:
-      type: object
-      required: [candidate_ids, observation_kind]
-      properties:
-        candidate_ids: {type: array, minItems: 2, maxItems: 2, items: {type: string}}
-        observation_kind: {type: string}
-        rationale_predicates: {type: array, items: {type: string}}
-        expected_entropy_reduction: {type: number, minimum: 0, maximum: 1}
-        decision_impact: {type: number, minimum: 0, maximum: 1}
-        diagnostic_value: {type: number, minimum: 0, maximum: 1}
-        status: {type: string}
-    CandidateExpansionRequest:
-      type: object
-      required: [assertion_ids, required_observations, status]
-      properties:
-        assertion_ids: {type: array, items: {type: string}}
-        required_observations: {type: array, items: {type: string}}
-        status: {type: string, enum: [activated_non_actionable, rejected_limit_reached, rejected_invalid]}
-        reason: {type: string}
-    FalsificationResult:
-      type: object
-      required: [candidate_id]
-      properties:
-        candidate_id: {type: string}
-        supporting_assertion_ids: {type: array, items: {type: string}}
-        contradicting_assertion_ids: {type: array, items: {type: string}}
-        missing_observation_kinds: {type: array, items: {type: string}}
-        counterfactual_observation_kinds: {type: array, items: {type: string}}
-    PairwiseFalsification:
-      type: object
-      required: [preferred_candidate_id, other_candidate_id, result]
-      properties:
-        preferred_candidate_id: {type: string}
-        other_candidate_id: {type: string}
-        discriminating_assertion_ids: {type: array, items: {type: string}}
-        result: {type: string}
     RecoveryPermission:
       type: object
       required: [level, allowed, reason]
       properties:
-        objective_diagnosis_confidence: {type: number, minimum: 0, maximum: 1}
-        action_safety: {type: number, minimum: 0, maximum: 1}
-        verification_confidence: {type: number, minimum: 0, maximum: 1}
-        diagnosis_stability: {type: number, minimum: 0, maximum: 1}
-        autonomy_score: {type: number, minimum: 0, maximum: 1}
         level: {type: string, enum: [auto, approval, escalate, requires_recovery_assessment, AUTO, HUMAN]}
         allowed: {type: boolean}
         reason: {type: string}

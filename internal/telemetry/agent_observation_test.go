@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"slices"
 	"testing"
 	"time"
 
@@ -97,7 +96,7 @@ func TestObserveAgentClassifiesCognitivePolicyOutcomes(t *testing.T) {
 	}
 }
 
-func TestObserveAgentProjectsGateAuditAndModelUsage(t *testing.T) {
+func TestObserveAgentProjectsModelUsage(t *testing.T) {
 	incident := &domain.Incident{Investigation: &domain.Investigation{
 		Architecture: "eino-cognitive-diagnosis-runtime",
 		Plan:         domain.InvestigationPlan{Tasks: []domain.WorkerTask{{ID: "metric"}}},
@@ -105,17 +104,10 @@ func TestObserveAgentProjectsGateAuditAndModelUsage(t *testing.T) {
 		Debate:       []domain.DebateRound{{Round: 1}},
 		MemoryReads:  []domain.MemoryAccessEvent{{QueryHash: "memory"}},
 		ModelUsage:   []domain.ModelUsageEvent{{InputTokens: 10, OutputTokens: 20, ReasoningTokens: 5, EstimatedCost: .01}},
-		Arbitration: &domain.ArbitrationResult{GateResults: []domain.HypothesisGateResult{
-			{HypothesisID: "h1", FailedGates: []string{"final_score", "supporting_score"}},
-			{HypothesisID: "h2", FailedGates: []string{"final_score"}},
-		}},
 	}}
 	got := ObserveAgent(incident)
 	if got.Architecture == "" || got.PlannerTasks != 1 || got.DebateRounds != 1 || got.MemoryReads != 1 || got.InputTokens != 10 || got.OutputTokens != 20 || got.ReasoningTokens != 5 || got.EstimatedModelCost != .01 {
 		t.Fatalf("baseline model audit was not projected: %+v", got)
-	}
-	if len(got.ArbitrationGateFailures) != 2 || !slices.Contains(got.ArbitrationGateFailures, "final_score") || !slices.Contains(got.ArbitrationGateFailures, "supporting_score") {
-		t.Fatalf("gate failures were not deduplicated: %+v", got.ArbitrationGateFailures)
 	}
 }
 

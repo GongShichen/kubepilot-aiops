@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ func TestHybridRetrieveGeneratesFromAllOperationalChannels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Channels) != 5 || len(result.Final) == 0 || result.SnapshotHash == "" {
+	if len(result.Channels) != 5 || len(result.Final) == 0 || result.SnapshotHash == "" || result.Query.Intent == "" || len(result.FusionProfile.ChannelWeights) != 5 {
 		t.Fatalf("hybrid retrieval is incomplete: %+v", result)
 	}
 	wanted := map[domain.RetrievalChannel]bool{domain.RetrievalBM25: true, domain.RetrievalVector: true, domain.RetrievalGraph: true, domain.RetrievalTemporal: true, domain.RetrievalMetric: true}
@@ -44,9 +45,34 @@ func TestHybridRetrieveGeneratesFromAllOperationalChannels(t *testing.T) {
 
 func TestFuseHybridChannelsAdmitsGraphOnlyCandidate(t *testing.T) {
 	graphOnly := domain.RetrievalCandidate{IncidentID: "graph-only", SourceScores: map[string]float64{"topology": .9}}
-	items := fuseHybridChannels(map[domain.RetrievalChannel][]domain.RetrievalCandidate{domain.RetrievalGraph: {graphOnly}}, 10)
+	items := fuseHybridChannels(map[domain.RetrievalChannel][]domain.RetrievalCandidate{domain.RetrievalGraph: {graphOnly}}, hybridFusionProfile(domain.HybridQueryUnderstanding{}).ChannelWeights, 10)
 	if len(items) != 1 || items[0].IncidentID != "graph-only" || items[0].Rank.TopologyScore == 0 {
 		t.Fatalf("graph channel did not generate a candidate: %+v", items)
+	}
+}
+
+func TestFuseHybridChannelsPreservesTopFiftyCandidatePool(t *testing.T) {
+	lexical := make([]domain.RetrievalCandidate, 0, 60)
+	vector := make([]domain.RetrievalCandidate, 0, 60)
+	for index := 0; index < 60; index++ {
+		candidate := domain.RetrievalCandidate{IncidentID: fmt.Sprintf("incident-%02d", index)}
+		lexical = append(lexical, candidate)
+		vector = append(vector, candidate)
+	}
+	items := fuseHybridChannels(map[domain.RetrievalChannel][]domain.RetrievalCandidate{domain.RetrievalBM25: lexical, domain.RetrievalVector: vector}, hybridFusionProfile(domain.HybridQueryUnderstanding{}).ChannelWeights, 50)
+	if len(items) != 50 {
+		t.Fatalf("hybrid fusion cannot support Recall@50: got %d candidates", len(items))
+	}
+}
+
+func TestHybridQueryUnderstandingAdaptsFusionWithoutSelectingRootCause(t *testing.T) {
+	understanding := domain.HybridQueryUnderstanding{Intent: "explain latency spike after deployment through an upstream dependency", Entities: []string{"payment", "database"}, Signals: []string{"latency", "increase"}}
+	profile := hybridFusionProfile(understanding)
+	if profile.ChannelWeights[domain.RetrievalGraph] <= .9 || profile.ChannelWeights[domain.RetrievalTemporal] <= .7 || profile.ChannelWeights[domain.RetrievalMetric] <= .9 {
+		t.Fatalf("incident intent did not adapt independent retrieval channels: %+v", profile)
+	}
+	if len(profile.Reasons) < 4 {
+		t.Fatalf("fusion profile lacks replayable reasons: %+v", profile)
 	}
 }
 

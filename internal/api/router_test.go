@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -78,7 +79,7 @@ func perform(router http.Handler, method, path, body string, headers map[string]
 
 func TestIncidentAPIExposesCanonicalInvestigationLedger(t *testing.T) {
 	router, memoryStore, _ := testRouter()
-	response := perform(router, http.MethodPost, "/api/v1/incidents", `{"service":"payment","namespace":"kubepilot-demo","summary":"latency","diagnosis_method":"direct"}`, nil)
+	response := perform(router, http.MethodPost, "/api/v1/incidents", `{"service":"payment","namespace":"kubepilot-demo","summary":"latency","diagnosis_method":"kubepilot"}`, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -86,27 +87,35 @@ func TestIncidentAPIExposesCanonicalInvestigationLedger(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &incident); err != nil {
 		t.Fatal(err)
 	}
-	if incident.DiagnosisMethod != domain.DiagnosisMethodDirect || incident.CausalMode != domain.CausalModeFull {
+	if incident.DiagnosisMethod != domain.DiagnosisMethodKubePilot || incident.CausalMode != domain.CausalModeFull {
 		t.Fatalf("canonical strategy was not persisted: %+v", incident)
 	}
 	incident.Investigation = &domain.Investigation{
-		Architecture: "single-pass",
-		Plan:         domain.InvestigationPlan{Objective: "diagnose"},
-		Findings:     []domain.WorkerFinding{{Worker: "metric_worker", EvidenceIDs: []string{"metric"}}},
-		Debate:       []domain.DebateRound{{Round: 1}},
-		Arbitration:  &domain.ArbitrationResult{Accepted: true},
-		ModelUsage:   []domain.ModelUsageEvent{{Agent: "planner_agent", InputTokens: 10, OutputTokens: 5, EstimatedCost: .01}},
+		Architecture:    "eino-native-self-reflective-brain",
+		Plan:            domain.InvestigationPlan{Objective: "diagnose"},
+		AgentHypotheses: []domain.AgentHypothesis{{ID: "h1", Statement: "dependency unavailable"}},
+		ModelUsage:      []domain.ModelUsageEvent{{Agent: "brain_model_reasoning", InputTokens: 10, OutputTokens: 5, EstimatedCost: .01}},
 	}
 	if err := memoryStore.Update(context.Background(), &incident); err != nil {
 		t.Fatal(err)
 	}
 	response = perform(router, http.MethodGet, "/api/v1/incidents/"+incident.ID+"/investigation", "", nil)
-	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"arbitration"`)) || bytes.Contains(response.Body.Bytes(), []byte("chain_of_thought")) {
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"agent_hypotheses"`)) || bytes.Contains(response.Body.Bytes(), []byte("chain_of_thought")) {
 		t.Fatalf("investigation response=%d %s", response.Code, response.Body.String())
 	}
 	response = perform(router, http.MethodGet, "/api/v1/incidents/"+incident.ID+"/agent-runs", "", nil)
-	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"input_tokens":10`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"strategy":"direct"`)) {
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"input_tokens":10`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"strategy":"kubepilot"`)) || !bytes.Contains(response.Body.Bytes(), []byte(domain.BrainWorkflowRuntimeName)) {
 		t.Fatalf("agent run ledger response=%d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestIncidentAPIRejectsRemovedLegacyDiagnosisMethods(t *testing.T) {
+	router, _, _ := testRouter()
+	for _, method := range []string{"direct", "rag", "react", "rule-only", "evidence-only", "cognitive", "active-diagnosis"} {
+		response := perform(router, http.MethodPost, "/api/v1/incidents", fmt.Sprintf(`{"service":"payment","namespace":"kubepilot-demo","summary":"latency","diagnosis_method":%q}`, method), nil)
+		if response.Code == http.StatusOK {
+			t.Fatalf("removed legacy diagnosis method %q was accepted", method)
+		}
 	}
 }
 

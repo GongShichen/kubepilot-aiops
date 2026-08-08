@@ -9,7 +9,11 @@ import (
 type IncidentStatus string
 type DiagnosisMethod = string
 
-const WorkflowRuntimeName = "eino-cognitive-diagnosis-runtime"
+const (
+	WorkflowRuntimeName      = "eino-cognitive-diagnosis-runtime"
+	BrainWorkflowRuntimeName = "eino-kubepilot-brain-runtime"
+	SupervisorRuntimeName    = "eino-kubepilot-supervisor-runtime"
+)
 
 const (
 	StatusReceived         IncidentStatus = "RECEIVED"
@@ -125,48 +129,57 @@ func IsKubePilotBrainMethod(value string) bool {
 	return ok && (normalized == DiagnosisMethodKubePilot || normalized == DiagnosisMethodKubePilotNoReflection || normalized == DiagnosisMethodKubePilotNoOptionalSkills)
 }
 
+func RuntimeNameForDiagnosisMethod(value string) string {
+	if IsKubePilotBrainMethod(value) {
+		return BrainWorkflowRuntimeName
+	}
+	return WorkflowRuntimeName
+}
+
 type Investigation struct {
-	Architecture          string                      `json:"architecture"`
-	Plan                  InvestigationPlan           `json:"plan"`
-	Findings              []WorkerFinding             `json:"findings,omitempty"`
-	Debate                []DebateRound               `json:"debate,omitempty"`
-	Candidates            []HypothesisDraft           `json:"candidates,omitempty"`
-	Verified              []VerifiedHypothesis        `json:"verified_hypotheses,omitempty"`
-	Signals               []EvidenceSignal            `json:"signals,omitempty"`
-	Assertions            []StateAssertion            `json:"state_assertions,omitempty"`
-	CognitiveReasoning    []CognitiveReasoning        `json:"cognitive_reasoning,omitempty"`
-	Falsification         []FalsificationResult       `json:"falsification,omitempty"`
-	Pairwise              []PairwiseFalsification     `json:"pairwise_falsification,omitempty"`
-	ExpansionRequests     []CandidateExpansionRequest `json:"candidate_expansion_requests,omitempty"`
-	Arbitration           *ArbitrationResult          `json:"arbitration,omitempty"`
-	RecoveryPermission    *RecoveryPermission         `json:"recovery_permission,omitempty"`
-	MemoryReads           []MemoryAccessEvent         `json:"memory_reads,omitempty"`
-	ModelUsage            []ModelUsageEvent           `json:"model_usage,omitempty"`
-	BrainTurns            []BrainTurn                 `json:"brain_turns,omitempty"`
-	AssistantTurns        []AssistantTurnRecord       `json:"assistant_turns,omitempty"`
-	IncidentUnderstanding *IncidentUnderstanding      `json:"incident_understanding,omitempty"`
-	WorldModel            *OperationalWorldModel      `json:"world_model,omitempty"`
-	HybridRetrievals      []HybridRetrievalResult     `json:"hybrid_retrievals,omitempty"`
-	SkillRetrievals       []SkillRetrievalResult      `json:"skill_retrievals,omitempty"`
-	SkillActivations      []SkillActivation           `json:"skill_activations,omitempty"`
-	ToolExecutions        []BrainToolExecution        `json:"tool_executions,omitempty"`
-	AgentHypotheses       []AgentHypothesis           `json:"agent_hypotheses,omitempty"`
-	HypothesisAdmissions  []HypothesisAdmission       `json:"hypothesis_admissions,omitempty"`
-	HypothesisGroundings  []HypothesisGrounding       `json:"hypothesis_groundings,omitempty"`
-	HypothesisComparisons []HypothesisComparison      `json:"hypothesis_comparisons,omitempty"`
-	GroundingDeltas       []GroundingDelta            `json:"grounding_deltas,omitempty"`
-	BeliefDeltas          []BeliefDelta               `json:"belief_deltas,omitempty"`
-	Reflections           []ReflectionRecord          `json:"reflections,omitempty"`
-	AgentDiagnosis        *AgentDiagnosis             `json:"agent_diagnosis,omitempty"`
-	DiagnosisValidations  []DiagnosisValidation       `json:"diagnosis_validations,omitempty"`
-	AgentRecoveryPlan     *AgentRecoveryPlan          `json:"agent_recovery_plan,omitempty"`
-	Termination           *TerminationEvent           `json:"termination,omitempty"`
-	BrainBudget           *BrainBudgetState           `json:"brain_budget,omitempty"`
-	ExecutionSnapshot     *ExecutionSnapshot          `json:"execution_snapshot,omitempty"`
-	WorkflowAttempt       *WorkflowAttempt            `json:"workflow_attempt,omitempty"`
-	DiagnosisRounds       int                         `json:"diagnosis_rounds,omitempty"`
-	StartedAt             time.Time                   `json:"started_at"`
-	CompletedAt           time.Time                   `json:"completed_at,omitempty"`
+	Architecture          string                          `json:"architecture"`
+	Plan                  InvestigationPlan               `json:"plan"`
+	PlanHistory           []InvestigationPlan             `json:"plan_history,omitempty"`
+	Findings              []WorkerFinding                 `json:"findings,omitempty"`
+	Debate                []DebateRound                   `json:"debate,omitempty"`
+	Candidates            []HypothesisDraft               `json:"candidates,omitempty"`
+	Verified              []VerifiedHypothesis            `json:"verified_hypotheses,omitempty"`
+	Signals               []EvidenceSignal                `json:"signals,omitempty"`
+	Assertions            []StateAssertion                `json:"state_assertions,omitempty"`
+	CognitiveReasoning    []CognitiveReasoning            `json:"cognitive_reasoning,omitempty"`
+	Falsification         []FalsificationResult           `json:"falsification,omitempty"`
+	Pairwise              []PairwiseFalsification         `json:"pairwise_falsification,omitempty"`
+	ExpansionRequests     []CandidateExpansionRequest     `json:"candidate_expansion_requests,omitempty"`
+	Arbitration           *ArbitrationResult              `json:"arbitration,omitempty"`
+	RecoveryPermission    *RecoveryPermission             `json:"recovery_permission,omitempty"`
+	MemoryReads           []MemoryAccessEvent             `json:"memory_reads,omitempty"`
+	ModelUsage            []ModelUsageEvent               `json:"model_usage,omitempty"`
+	BrainTurns            []BrainTurn                     `json:"brain_turns,omitempty"`
+	AssistantTurns        []AssistantTurnRecord           `json:"assistant_turns,omitempty"`
+	IncidentUnderstanding *IncidentUnderstanding          `json:"incident_understanding,omitempty"`
+	WorldModel            *OperationalWorldModel          `json:"world_model,omitempty"`
+	HybridRetrievals      []HybridRetrievalResult         `json:"hybrid_retrievals,omitempty"`
+	SkillRetrievals       []SkillRetrievalResult          `json:"skill_retrievals,omitempty"`
+	SkillActivations      []SkillActivation               `json:"skill_activations,omitempty"`
+	ToolExecutions        []BrainToolExecution            `json:"tool_executions,omitempty"`
+	EvidenceAttributions  []HypothesisEvidenceAttribution `json:"evidence_attributions,omitempty"`
+	AgentHypotheses       []AgentHypothesis               `json:"agent_hypotheses,omitempty"`
+	HypothesisAdmissions  []HypothesisAdmission           `json:"hypothesis_admissions,omitempty"`
+	HypothesisGroundings  []HypothesisGrounding           `json:"hypothesis_groundings,omitempty"`
+	HypothesisComparisons []HypothesisComparison          `json:"hypothesis_comparisons,omitempty"`
+	GroundingDeltas       []GroundingDelta                `json:"grounding_deltas,omitempty"`
+	BeliefDeltas          []BeliefDelta                   `json:"belief_deltas,omitempty"`
+	Reflections           []ReflectionRecord              `json:"reflections,omitempty"`
+	AgentDiagnosis        *AgentDiagnosis                 `json:"agent_diagnosis,omitempty"`
+	DiagnosisValidations  []DiagnosisValidation           `json:"diagnosis_validations,omitempty"`
+	AgentRecoveryPlan     *AgentRecoveryPlan              `json:"agent_recovery_plan,omitempty"`
+	Termination           *TerminationEvent               `json:"termination,omitempty"`
+	BrainBudget           *BrainBudgetState               `json:"brain_budget,omitempty"`
+	ExecutionSnapshot     *ExecutionSnapshot              `json:"execution_snapshot,omitempty"`
+	WorkflowAttempt       *WorkflowAttempt                `json:"workflow_attempt,omitempty"`
+	DiagnosisRounds       int                             `json:"diagnosis_rounds,omitempty"`
+	StartedAt             time.Time                       `json:"started_at"`
+	CompletedAt           time.Time                       `json:"completed_at,omitempty"`
 }
 
 // StateAssertion is a server-owned statement about the live incident state.
@@ -273,22 +286,22 @@ type PairwiseFalsification struct {
 }
 
 type RecoveryPermission struct {
-	ObjectiveDiagnosisConfidence float64 `json:"objective_diagnosis_confidence"`
-	ActionSafety                 float64 `json:"action_safety"`
-	VerificationConfidence       float64 `json:"verification_confidence"`
-	DiagnosisStability           float64 `json:"diagnosis_stability"`
-	AutonomyScore                float64 `json:"autonomy_score"`
-	Level                        string  `json:"level"`
-	Allowed                      bool    `json:"allowed"`
-	Reason                       string  `json:"reason"`
+	Level   string `json:"level"`
+	Allowed bool   `json:"allowed"`
+	Reason  string `json:"reason"`
 }
 
 type InvestigationPlan struct {
+	ID             string       `json:"id,omitempty"`
+	Version        int          `json:"version,omitempty"`
+	ParentID       string       `json:"parent_id,omitempty"`
+	RevisionReason string       `json:"revision_reason,omitempty"`
 	Objective      string       `json:"objective"`
 	Tasks          []WorkerTask `json:"tasks"`
 	StopConditions []string     `json:"stop_conditions"`
 	RoundLimit     int          `json:"round_limit"`
 	CreatedAt      time.Time    `json:"created_at"`
+	UpdatedAt      time.Time    `json:"updated_at,omitempty"`
 }
 
 type WorkerTask struct {
@@ -969,17 +982,22 @@ type DryRunResult struct {
 }
 
 type ExecutionContext struct {
-	NamespaceAllowlist []string  `json:"namespace_allowlist"`
-	IncidentID         string    `json:"incident_id"`
-	ProposalID         string    `json:"proposal_id"`
-	ApprovalID         string    `json:"approval_id"`
-	IdempotencyKey     string    `json:"idempotency_key"`
-	Operator           string    `json:"operator"`
-	TargetUID          string    `json:"target_uid"`
-	ResourceVersion    string    `json:"resource_version"`
-	MutationSpecHash   string    `json:"mutation_spec_hash"`
-	ApprovedAt         time.Time `json:"approved_at"`
-	ExpiresAt          time.Time `json:"expires_at"`
+	NamespaceAllowlist   []string           `json:"namespace_allowlist"`
+	IncidentID           string             `json:"incident_id"`
+	ProposalID           string             `json:"proposal_id"`
+	RecoveryPlanID       string             `json:"recovery_plan_id,omitempty"`
+	DiagnosisVersion     string             `json:"diagnosis_version,omitempty"`
+	EvidenceSnapshotHash string             `json:"evidence_snapshot_hash,omitempty"`
+	ExecutionSnapshot    *ExecutionSnapshot `json:"execution_snapshot,omitempty"`
+	ApprovalID           string             `json:"approval_id"`
+	IdempotencyKey       string             `json:"idempotency_key"`
+	Operator             string             `json:"operator"`
+	TargetUID            string             `json:"target_uid"`
+	ResourceVersion      string             `json:"resource_version"`
+	MutationSpecHash     string             `json:"mutation_spec_hash"`
+	DryRunValidatedAt    time.Time          `json:"dry_run_validated_at,omitempty"`
+	ApprovedAt           time.Time          `json:"approved_at"`
+	ExpiresAt            time.Time          `json:"expires_at"`
 }
 
 // RecoveryExecution is server-owned audit state for the deterministic action
@@ -1014,11 +1032,15 @@ type AuditEvent struct {
 }
 
 var transitions = map[IncidentStatus]map[IncidentStatus]bool{
-	StatusReceived:         {StatusCorrelating: true, StatusNeedsAttention: true, StatusCancelled: true},
-	StatusCorrelating:      {StatusCollecting: true, StatusNeedsAttention: true, StatusCancelled: true},
-	StatusCollecting:       {StatusDiagnosing: true, StatusNeedsAttention: true, StatusCancelled: true},
-	StatusDiagnosing:       {StatusCollecting: true, StatusProposing: true, StatusNeedsAttention: true, StatusCancelled: true},
-	StatusProposing:        {StatusAwaitingApproval: true, StatusNeedsAttention: true, StatusCancelled: true},
+	StatusReceived:    {StatusCorrelating: true, StatusNeedsAttention: true, StatusCancelled: true},
+	StatusCorrelating: {StatusCollecting: true, StatusNeedsAttention: true, StatusCancelled: true},
+	StatusCollecting:  {StatusDiagnosing: true, StatusNeedsAttention: true, StatusCancelled: true},
+	StatusDiagnosing:  {StatusCollecting: true, StatusProposing: true, StatusNeedsAttention: true, StatusCancelled: true},
+	// A server-side dry-run may reject a proposal before any mutation or
+	// approval exists. The Brain must then return to diagnosis/recovery
+	// planning with a new immutable RecoveryPlan instead of remaining stuck in
+	// PROPOSING or reusing the rejected proposal.
+	StatusProposing:        {StatusDiagnosing: true, StatusAwaitingApproval: true, StatusNeedsAttention: true, StatusCancelled: true},
 	StatusAwaitingApproval: {StatusRecovering: true, StatusNeedsAttention: true, StatusRejected: true, StatusCancelled: true},
 	StatusRecovering:       {StatusVerifying: true, StatusNeedsAttention: true, StatusRecoveryFailed: true},
 	StatusVerifying:        {StatusResolved: true, StatusNeedsAttention: true, StatusRecoveryFailed: true},

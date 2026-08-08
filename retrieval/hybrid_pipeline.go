@@ -30,6 +30,19 @@ func (h IncidentRetrievalEngine) Retrieve(ctx context.Context, query domain.Hybr
 	if len(query.Terms) > 0 {
 		features.Terms = mergeStrings(features.Terms, query.Terms)
 	}
+	understanding := understandHybridQuery(query, features)
+	features.Terms = mergeStrings(features.Terms, understanding.Entities)
+	features.Terms = mergeStrings(features.Terms, understanding.Signals)
+	if strings.TrimSpace(understanding.Intent) != "" {
+		features.Terms = mergeStrings(features.Terms, strings.Fields(strings.ToLower(understanding.Intent)))
+	}
+	if features.WindowStart.IsZero() {
+		features.WindowStart = understanding.Time.Start
+	}
+	if features.WindowEnd.IsZero() {
+		features.WindowEnd = understanding.Time.End
+	}
+	fusionProfile := hybridFusionProfile(understanding)
 	channelLimit := maxInt(limit*10, 50)
 	type response struct {
 		candidates []domain.RetrievalCandidate
@@ -81,7 +94,7 @@ func (h IncidentRetrievalEngine) Retrieve(ctx context.Context, query domain.Hybr
 	_ = group.Wait()
 
 	ordered := []domain.RetrievalChannel{domain.RetrievalBM25, domain.RetrievalVector, domain.RetrievalGraph, domain.RetrievalTemporal, domain.RetrievalMetric}
-	result := domain.HybridRetrievalResult{RetrievedAt: time.Now().UTC()}
+	result := domain.HybridRetrievalResult{Query: understanding, FusionProfile: fusionProfile, RetrievedAt: time.Now().UTC()}
 	lists := map[domain.RetrievalChannel][]domain.RetrievalCandidate{}
 	for _, channel := range ordered {
 		entry := responses[channel]
@@ -94,7 +107,10 @@ func (h IncidentRetrievalEngine) Retrieve(ctx context.Context, query domain.Hybr
 			lists[channel] = channelResult.Candidates
 		}
 	}
-	result.Fused = fuseHybridChannels(lists, maxInt(limit*4, 20))
+	// Preserve a true top-50 fused candidate pool for Recall@50 evaluation and
+	// reranking. The much smaller `Final` projection remains the only context
+	// sent to the Brain, so recall does not inflate model context.
+	result.Fused = fuseHybridChannels(lists, fusionProfile.ChannelWeights, maxInt(limit*10, 50))
 	result.Final = append([]domain.RetrievalCandidate(nil), result.Fused...)
 	if h.Reranker != nil && h.Reranker.Enabled() && len(result.Final) > 0 {
 		var err error
@@ -112,8 +128,56 @@ func (h IncidentRetrievalEngine) Retrieve(ctx context.Context, query domain.Hybr
 		WorldModelSnapshot string
 		Channels           []domain.HybridRetrievalChannelResult
 		Final              []domain.RetrievalCandidate
-	}{query.IncidentID, features.Terms, worldModelSnapshot(query.WorldModel), result.Channels, result.Final})
+		Query              domain.HybridQueryUnderstanding
+		FusionProfile      domain.RetrievalFusionProfile
+	}{query.IncidentID, features.Terms, worldModelSnapshot(query.WorldModel), result.Channels, result.Final, understanding, fusionProfile})
 	return result, nil
+}
+
+func understandHybridQuery(query domain.HybridRetrievalQuery, features domain.IncidentFeatures) domain.HybridQueryUnderstanding {
+	understanding := query.Understanding
+	understanding.Entities = mergeStrings(understanding.Entities, []string{features.Service, features.Resource})
+	understanding.Entities = mergeStrings(understanding.Entities, features.TopologyServices)
+	understanding.Signals = mergeStrings(understanding.Signals, query.Terms)
+	for name := range features.Observed {
+		understanding.Signals = mergeStrings(understanding.Signals, []string{name})
+	}
+	if strings.TrimSpace(understanding.Intent) == "" {
+		understanding.Intent = "root cause analysis"
+	}
+	if understanding.Time.Start.IsZero() {
+		understanding.Time.Start = features.WindowStart
+	}
+	if understanding.Time.End.IsZero() {
+		understanding.Time.End = features.WindowEnd
+	}
+	return understanding
+}
+
+func hybridFusionProfile(understanding domain.HybridQueryUnderstanding) domain.RetrievalFusionProfile {
+	weights := map[domain.RetrievalChannel]float64{
+		domain.RetrievalBM25: 1, domain.RetrievalVector: 1, domain.RetrievalGraph: .9,
+		domain.RetrievalTemporal: .7, domain.RetrievalMetric: .9,
+	}
+	text := strings.ToLower(strings.Join(append(append([]string{understanding.Intent}, understanding.Entities...), understanding.Signals...), " "))
+	reasons := []string{"base_operational_profile"}
+	boost := func(channel domain.RetrievalChannel, weight float64, reason string, tokens ...string) {
+		for _, token := range tokens {
+			if strings.Contains(text, token) {
+				if weights[channel] < weight {
+					weights[channel] = weight
+				}
+				reasons = append(reasons, reason)
+				return
+			}
+		}
+	}
+	boost(domain.RetrievalBM25, 1.2, "exact_failure_signal", "error", "exception", "refused", "oomkilled", "imagepull")
+	boost(domain.RetrievalVector, 1.1, "semantic_expansion", "similar", "unknown", "semantic", "analogy")
+	boost(domain.RetrievalGraph, 1.2, "dependency_or_impact", "dependency", "downstream", "upstream", "impact", "topology")
+	boost(domain.RetrievalTemporal, 1.2, "timeline_or_change", "before", "after", "during", "deploy", "change", "timeline")
+	boost(domain.RetrievalMetric, 1.2, "metric_shape", "latency", "cpu", "memory", "trend", "spike", "increase", "saturation")
+	return domain.RetrievalFusionProfile{ChannelWeights: weights, Reasons: uniqueStringOrder(reasons)}
 }
 
 func enrichFeaturesFromWorldModel(features domain.IncidentFeatures, model *domain.OperationalWorldModel) domain.IncidentFeatures {
@@ -173,8 +237,10 @@ func worldModelSnapshot(model *domain.OperationalWorldModel) string {
 	return model.EvidenceSnapshotHash
 }
 
-func fuseHybridChannels(lists map[domain.RetrievalChannel][]domain.RetrievalCandidate, limit int) []domain.RetrievalCandidate {
-	weights := map[domain.RetrievalChannel]float64{domain.RetrievalBM25: 1, domain.RetrievalVector: 1, domain.RetrievalGraph: .9, domain.RetrievalTemporal: .7, domain.RetrievalMetric: .9}
+func fuseHybridChannels(lists map[domain.RetrievalChannel][]domain.RetrievalCandidate, weights map[domain.RetrievalChannel]float64, limit int) []domain.RetrievalCandidate {
+	if len(weights) == 0 {
+		weights = hybridFusionProfile(domain.HybridQueryUnderstanding{}).ChannelWeights
+	}
 	merged := map[string]domain.RetrievalCandidate{}
 	availableWeight := 0.0
 	for channel, list := range lists {
@@ -233,6 +299,18 @@ func fuseHybridChannels(lists map[domain.RetrievalChannel][]domain.RetrievalCand
 	sortPipelineCandidates(out)
 	if len(out) > limit {
 		out = out[:limit]
+	}
+	return out
+}
+
+func uniqueStringOrder(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
 	}
 	return out
 }

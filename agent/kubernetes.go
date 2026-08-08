@@ -48,7 +48,7 @@ func (a KubernetesEvidenceCollector) Collect(ctx context.Context, in *domain.Inc
 		}
 		podSummaries = append(podSummaries, map[string]any{
 			"name": pod.Name, "uid": pod.UID, "resource_version": pod.ResourceVersion,
-			"phase": pod.Status.Phase, "pod_ip": pod.Status.PodIP,
+			"phase": pod.Status.Phase, "pod_ip": pod.Status.PodIP, "node": pod.Spec.NodeName,
 			// Service selectors apply to Pod labels, not the Deployment name. Keep
 			// the server-observed labels so the deterministic signal layer can
 			// distinguish an empty Endpoint set caused by a selector mismatch from

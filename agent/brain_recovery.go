@@ -83,7 +83,7 @@ func brainRecoveryPermissionNode(ctx context.Context, state *WorkflowState, tran
 	return state, nil
 }
 
-func brainDryRunNode(ctx context.Context, state *WorkflowState, executor Executor) (*WorkflowState, error) {
+func brainDryRunNode(ctx context.Context, state *WorkflowState, executor Executor, transition func(context.Context, *domain.Incident, domain.IncidentStatus) error) (*WorkflowState, error) {
 	result, err := dryRunProposal(ctx, executor, state.Incident)
 	state.DryRun, state.Incident.DryRun = result, result
 	now := time.Now().UTC()
@@ -100,7 +100,15 @@ func brainDryRunNode(ctx context.Context, state *WorkflowState, executor Executo
 		state.PendingReflection = &trigger
 		state.Termination = nil
 		state.BrainPhase, state.ActiveToolCategory = domain.BrainPhaseRecovery, domain.BrainToolRecovery
-		state.AgentRecoveryPlan, state.Incident.Proposal = nil, nil
+		state.AgentRecoveryPlan, state.RecoveryPermission, state.Incident.Proposal = nil, nil, nil
+		// No mutation or approval has occurred. Return to the planning state so
+		// reflection can create a new RecoveryPlan and the Safety Kernel can
+		// validate a completely new version chain.
+		if state.Incident.Status == domain.StatusProposing {
+			if transitionErr := transition(ctx, state.Incident, domain.StatusDiagnosing); transitionErr != nil {
+				return state, transitionErr
+			}
+		}
 	}
 	state.ToolExecutions = append(state.ToolExecutions, domain.BrainToolExecution{Envelope: domain.AgentActionEnvelope{ActionID: provenance.ToolCallID, IncidentID: state.Incident.ID, TurnID: currentBrainTurnID(state), Phase: domain.BrainPhaseRecovery, ToolName: "dry_run_recovery", ToolCategory: domain.BrainToolRecovery, EvidenceSnapshotHash: state.EvidenceSnapshotHash}, Result: record})
 	return state, nil
@@ -127,7 +135,7 @@ func appendBrainStateChange(state *WorkflowState, toolName, status, summary stri
 	class := domain.ToolResultStateChange
 	if status == "APPROVAL_REQUESTED" {
 		class = domain.ToolResultValidation
-	} else if status == "APPROVAL_REJECTED" {
+	} else if status == "APPROVAL_REJECTED" || status == "APPROVAL_CONTEXT_REJECTED" {
 		class = domain.ToolResultConstraint
 	}
 	if class == domain.ToolResultStateChange {

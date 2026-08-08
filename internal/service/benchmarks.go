@@ -80,12 +80,12 @@ func (m *BenchmarkManager) StartRequest(request BenchmarkRequest) (*BenchmarkRun
 		request.Seeds = []int64{20260803, 20260804, 20260805}
 	}
 	if len(request.Strategies) == 0 {
-		request.Strategies = []string{domain.DiagnosisMethodDirect, domain.DiagnosisMethodRAG, domain.DiagnosisMethodReAct, domain.DiagnosisMethodKubePilot}
+		request.Strategies = []string{domain.DiagnosisMethodKubePilot, domain.DiagnosisMethodKubePilotNoReflection, domain.DiagnosisMethodKubePilotNoOptionalSkills}
 	}
 	seenStrategies := map[string]bool{}
 	for index, strategy := range request.Strategies {
 		canonical, ok := domain.NormalizeDiagnosisMethod(strategy)
-		if !ok || seenStrategies[canonical] {
+		if !ok || !domain.IsKubePilotBrainMethod(canonical) || seenStrategies[canonical] {
 			return nil, fmt.Errorf("invalid or duplicate strategy %q", strategy)
 		}
 		seenStrategies[canonical] = true
@@ -110,9 +110,6 @@ func (m *BenchmarkManager) execute(id string, autoApprove, resume bool) {
 	run.UpdatedAt = time.Now().UTC()
 	m.persistLocked(run)
 	m.mu.Unlock()
-	if run.Profile == "smoke" || run.Profile == "ci" || run.Profile == "standard" || run.Profile == "robustness" || run.Profile == "full" {
-		go m.monitorArbitrationGateStreak(ctx, id, cancel)
-	}
 	var commands [][]string
 	switch run.Profile {
 	case "smoke", "ci", "standard", "robustness":
@@ -465,115 +462,6 @@ func (m *BenchmarkManager) persistCaseResults(run *BenchmarkRun) error {
 		}
 	}
 	return nil
-}
-
-type gateStreakState struct {
-	count      int
-	candidates map[string]bool
-}
-
-func (state *gateStreakState) Observe(gates []string, infrastructureFailure bool) (string, bool) {
-	if infrastructureFailure || len(gates) == 0 {
-		state.count = 0
-		state.candidates = nil
-		return "", false
-	}
-	current := map[string]bool{}
-	for _, gate := range gates {
-		if gate != "" {
-			current[gate] = true
-		}
-	}
-	if len(current) == 0 {
-		state.count = 0
-		state.candidates = nil
-		return "", false
-	}
-	if state.count == 0 {
-		state.candidates = current
-		state.count = 1
-	} else {
-		for gate := range state.candidates {
-			if !current[gate] {
-				delete(state.candidates, gate)
-			}
-		}
-		if len(state.candidates) == 0 {
-			state.candidates = current
-			state.count = 1
-		} else {
-			state.count++
-		}
-	}
-	if state.count < 4 {
-		return "", false
-	}
-	keys := make([]string, 0, len(state.candidates))
-	for gate := range state.candidates {
-		keys = append(keys, gate)
-	}
-	sort.Strings(keys)
-	return keys[0], true
-}
-
-func (m *BenchmarkManager) monitorArbitrationGateStreak(ctx context.Context, id string, cancel context.CancelFunc) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	processed := map[string]int{}
-	states := map[string]*gateStreakState{}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		m.mu.RLock()
-		run := cloneBenchmarkRun(m.runs[id])
-		m.mu.RUnlock()
-		if run == nil {
-			return
-		}
-		for _, path := range benchmarkCasePaths(run) {
-			state := states[path]
-			if state == nil {
-				state = &gateStreakState{}
-				states[path] = state
-			}
-			file, err := os.Open(path)
-			if err != nil {
-				continue
-			}
-			scanner := bufio.NewScanner(file)
-			scanner.Buffer(make([]byte, 64<<10), 2<<20)
-			line := 0
-			for scanner.Scan() {
-				line++
-				if line <= processed[path] {
-					continue
-				}
-				var item struct {
-					InfrastructureFailure   bool     `json:"infrastructure_failure"`
-					ArbitrationGateFailures []string `json:"arbitration_gate_failures"`
-				}
-				if json.Unmarshal(scanner.Bytes(), &item) != nil {
-					continue
-				}
-				gate, pause := state.Observe(item.ArbitrationGateFailures, item.InfrastructureFailure)
-				if pause {
-					file.Close()
-					reason := fmt.Sprintf("automatically paused after four consecutive cases failed arbitration gate %q with no infrastructure failure", gate)
-					m.mu.Lock()
-					m.paused[id] = reason
-					m.mu.Unlock()
-					m.append(id, reason)
-					cancel()
-					return
-				}
-			}
-			processed[path] = line
-			file.Close()
-		}
-	}
 }
 
 func benchmarkCasePaths(run *BenchmarkRun) []string {

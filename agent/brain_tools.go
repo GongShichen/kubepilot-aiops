@@ -114,6 +114,17 @@ type submitInvestigationPlanInput struct {
 	StopConditions      []string `json:"stop_conditions" jsonschema:"required,minItems=1"`
 }
 
+type reviseInvestigationPlanInput struct {
+	Intent              string   `json:"intent" jsonschema:"required"`
+	ExpectedObservation []string `json:"expected_observation" jsonschema:"required,minItems=1"`
+	ParentPlanID        string   `json:"parent_plan_id" jsonschema:"required"`
+	RevisionReason      string   `json:"revision_reason" jsonschema:"required"`
+	HypothesisIDs       []string `json:"hypothesis_ids" jsonschema:"required,minItems=1,maxItems=5"`
+	Objective           string   `json:"objective" jsonschema:"required"`
+	Goals               []string `json:"goals" jsonschema:"required,minItems=1"`
+	StopConditions      []string `json:"stop_conditions" jsonschema:"required,minItems=1"`
+}
+
 type proposedBrainHypothesis struct {
 	Statement               string               `json:"statement" jsonschema:"required"`
 	Category                string               `json:"category" jsonschema:"required"`
@@ -140,25 +151,24 @@ type reviseBrainHypothesisInput struct {
 }
 
 type validateBrainHypothesisInput struct {
-	Intent                   string   `json:"intent" jsonschema:"required"`
-	ExpectedObservation      []string `json:"expected_observation" jsonschema:"required,minItems=1"`
-	HypothesisID             string   `json:"hypothesis_id" jsonschema:"required"`
-	SupportingEvidenceIDs    []string `json:"supporting_evidence_ids,omitempty"`
-	ContradictingEvidenceIDs []string `json:"contradicting_evidence_ids,omitempty"`
-	MissingObservations      []string `json:"missing_observations,omitempty"`
-	ExpectedCausalNodeIDs    []string `json:"expected_causal_node_ids,omitempty"`
+	Intent                string                             `json:"intent" jsonschema:"required"`
+	ExpectedObservation   []string                           `json:"expected_observation" jsonschema:"required,minItems=1"`
+	HypothesisID          string                             `json:"hypothesis_id" jsonschema:"required"`
+	Attributions          []domain.EvidenceAttributionIntent `json:"attributions" jsonschema:"required,minItems=1"`
+	MissingObservations   []string                           `json:"missing_observations,omitempty"`
+	ExpectedCausalNodeIDs []string                           `json:"expected_causal_node_ids,omitempty"`
 }
 
 type commitBrainBeliefInput struct {
-	Intent              string   `json:"intent" jsonschema:"required"`
-	ExpectedObservation []string `json:"expected_observation" jsonschema:"required,minItems=1"`
-	HypothesisID        string   `json:"hypothesis_id" jsonschema:"required"`
-	NewConfidence       float64  `json:"new_confidence" jsonschema:"required,minimum=0,maximum=1"`
-	Direction           string   `json:"direction" jsonschema:"required"`
-	EvidenceIDs         []string `json:"evidence_ids,omitempty"`
-	ValidationIDs       []string `json:"validation_result_ids,omitempty"`
-	RevisionRequired    bool     `json:"revision_required"`
-	RevisionReason      string   `json:"revision_reason,omitempty"`
+	Intent              string                 `json:"intent" jsonschema:"required"`
+	ExpectedObservation []string               `json:"expected_observation" jsonschema:"required,minItems=1"`
+	HypothesisID        string                 `json:"hypothesis_id" jsonschema:"required"`
+	NewConfidence       float64                `json:"new_confidence" jsonschema:"required,minimum=0,maximum=1"`
+	Direction           domain.BeliefDirection `json:"direction" jsonschema:"required,enum=INCREASE,enum=DECREASE"`
+	EvidenceIDs         []string               `json:"evidence_ids,omitempty"`
+	ValidationIDs       []string               `json:"validation_result_ids,omitempty"`
+	RevisionRequired    bool                   `json:"revision_required"`
+	RevisionReason      string                 `json:"revision_reason,omitempty"`
 }
 
 type submitBrainDiagnosisInput struct {
@@ -225,39 +235,40 @@ type submitBrainRecoveryInput struct {
 }
 
 type brainCapabilityOutput struct {
-	Class               domain.ToolResultClass        `json:"class"`
-	Status              string                        `json:"status"`
-	Summary             string                        `json:"summary,omitempty"`
-	Provenance          domain.ToolResultProvenance   `json:"provenance"`
-	NewInformation      bool                          `json:"new_information"`
-	ConstraintCode      string                        `json:"constraint_code,omitempty"`
-	Infrastructure      bool                          `json:"infrastructure_failure,omitempty"`
-	Evidence            []domain.Evidence             `json:"evidence,omitempty"`
-	EvidenceView        []domain.BrainEvidenceView    `json:"evidence_view,omitempty"`
-	Resources           []domain.ResourceRef          `json:"resources,omitempty"`
-	Memory              []domain.MemoryResult         `json:"memory,omitempty"`
-	HistoricalIncidents []domain.RetrievalCandidate   `json:"historical_incidents,omitempty"`
-	HybridRetrieval     *domain.HybridRetrievalResult `json:"hybrid_retrieval,omitempty"`
-	Patterns            []domain.CausalPattern        `json:"patterns,omitempty"`
-	Hypotheses          []domain.AgentHypothesis      `json:"hypotheses,omitempty"`
-	Admissions          []domain.HypothesisAdmission  `json:"admissions,omitempty"`
-	Grounding           *domain.HypothesisGrounding   `json:"grounding,omitempty"`
-	GroundingDelta      *domain.GroundingDelta        `json:"grounding_delta,omitempty"`
-	Comparisons         []domain.HypothesisComparison `json:"hypothesis_comparisons,omitempty"`
-	BeliefDelta         *domain.BeliefDelta           `json:"belief_delta,omitempty"`
-	Diagnosis           *domain.AgentDiagnosis        `json:"diagnosis,omitempty"`
-	DiagnosisValidation *domain.DiagnosisValidation   `json:"diagnosis_validation,omitempty"`
-	DiagnosisFinalized  bool                          `json:"diagnosis_finalized,omitempty"`
-	RecoveryPlan        *domain.AgentRecoveryPlan     `json:"recovery_plan,omitempty"`
-	RequestedSkills     []SkillRequest                `json:"requested_skills,omitempty"`
-	SkillActivations    []domain.SkillActivation      `json:"skill_activations,omitempty"`
-	SelectedCategory    domain.BrainToolCategory      `json:"selected_category,omitempty"`
-	NextPhase           domain.BrainPhase             `json:"next_phase,omitempty"`
-	Termination         *domain.TerminationEvent      `json:"termination,omitempty"`
-	Understanding       *domain.IncidentUnderstanding `json:"incident_understanding,omitempty"`
-	InvestigationPlan   *domain.InvestigationPlan     `json:"investigation_plan,omitempty"`
-	ReferenceContent    string                        `json:"reference_content,omitempty"`
-	ReferenceID         string                        `json:"reference_id,omitempty"`
+	Class                domain.ToolResultClass                 `json:"class"`
+	Status               string                                 `json:"status"`
+	Summary              string                                 `json:"summary,omitempty"`
+	Provenance           domain.ToolResultProvenance            `json:"provenance"`
+	NewInformation       bool                                   `json:"new_information"`
+	ConstraintCode       string                                 `json:"constraint_code,omitempty"`
+	Infrastructure       bool                                   `json:"infrastructure_failure,omitempty"`
+	Evidence             []domain.Evidence                      `json:"evidence,omitempty"`
+	EvidenceView         []domain.BrainEvidenceView             `json:"evidence_view,omitempty"`
+	Resources            []domain.ResourceRef                   `json:"resources,omitempty"`
+	Memory               []domain.MemoryResult                  `json:"memory,omitempty"`
+	HistoricalIncidents  []domain.RetrievalCandidate            `json:"historical_incidents,omitempty"`
+	HybridRetrieval      *domain.HybridRetrievalResult          `json:"hybrid_retrieval,omitempty"`
+	Patterns             []domain.CausalPattern                 `json:"patterns,omitempty"`
+	Hypotheses           []domain.AgentHypothesis               `json:"hypotheses,omitempty"`
+	Admissions           []domain.HypothesisAdmission           `json:"admissions,omitempty"`
+	Grounding            *domain.HypothesisGrounding            `json:"grounding,omitempty"`
+	GroundingDelta       *domain.GroundingDelta                 `json:"grounding_delta,omitempty"`
+	EvidenceAttributions []domain.HypothesisEvidenceAttribution `json:"evidence_attributions,omitempty"`
+	Comparisons          []domain.HypothesisComparison          `json:"hypothesis_comparisons,omitempty"`
+	BeliefDelta          *domain.BeliefDelta                    `json:"belief_delta,omitempty"`
+	Diagnosis            *domain.AgentDiagnosis                 `json:"diagnosis,omitempty"`
+	DiagnosisValidation  *domain.DiagnosisValidation            `json:"diagnosis_validation,omitempty"`
+	DiagnosisFinalized   bool                                   `json:"diagnosis_finalized,omitempty"`
+	RecoveryPlan         *domain.AgentRecoveryPlan              `json:"recovery_plan,omitempty"`
+	RequestedSkills      []SkillRequest                         `json:"requested_skills,omitempty"`
+	SkillActivations     []domain.SkillActivation               `json:"skill_activations,omitempty"`
+	SelectedCategory     domain.BrainToolCategory               `json:"selected_category,omitempty"`
+	NextPhase            domain.BrainPhase                      `json:"next_phase,omitempty"`
+	Termination          *domain.TerminationEvent               `json:"termination,omitempty"`
+	Understanding        *domain.IncidentUnderstanding          `json:"incident_understanding,omitempty"`
+	InvestigationPlan    *domain.InvestigationPlan              `json:"investigation_plan,omitempty"`
+	ReferenceContent     string                                 `json:"reference_content,omitempty"`
+	ReferenceID          string                                 `json:"reference_id,omitempty"`
 }
 
 func buildBrainCapabilities(deps brainRuntimeDeps, resolver *BrainSkillResolver) (*captools.Registry, error) {
@@ -330,6 +341,13 @@ func buildBrainCapabilities(deps brainRuntimeDeps, resolver *BrainSkillResolver)
 	} else {
 		capabilities = append(capabilities, capability)
 	}
+	if capability, err := captools.NewCapability("revise_investigation_plan", "Create an immutable Investigation Plan revision after new Evidence, Grounding, or Belief changes the best discriminating action.", func(ctx context.Context, input reviseInvestigationPlanInput) (brainCapabilityOutput, error) {
+		return runBrainRevisePlan(ctx, input)
+	}, brainRegistration(captools.CategoryReasoning, captools.NodeBrainReasoning)); err != nil {
+		return nil, err
+	} else {
+		capabilities = append(capabilities, capability)
+	}
 	if capability, err := captools.NewCapability("submit_hypotheses", "Submit open-world diagnosis hypotheses for structural, scope, permission, and verifiability admission only.", func(ctx context.Context, input submitBrainHypothesesInput) (brainCapabilityOutput, error) {
 		return runBrainSubmitHypotheses(ctx, deps, input)
 	}, brainRegistration(captools.CategoryReasoning, captools.NodeBrainReasoning)); err != nil {
@@ -344,7 +362,7 @@ func buildBrainCapabilities(deps brainRuntimeDeps, resolver *BrainSkillResolver)
 	} else {
 		capabilities = append(capabilities, capability)
 	}
-	if capability, err := captools.NewCapability("validate_hypothesis", "Validate a hypothesis only against cited server evidence IDs, explicit coverage obligations, and server causal node IDs.", func(ctx context.Context, input validateBrainHypothesisInput) (brainCapabilityOutput, error) {
+	if capability, err := captools.NewCapability("validate_hypothesis", "Persist explicit SUPPORT, CONTRADICT, or NEUTRAL attribution for every cited server Evidence record, then calculate coverage and grounding without changing model belief.", func(ctx context.Context, input validateBrainHypothesisInput) (brainCapabilityOutput, error) {
 		return runBrainValidateHypothesis(ctx, input)
 	}, brainRegistration(captools.CategoryReasoning, captools.NodeBrainReasoning)); err != nil {
 		return nil, err
@@ -445,7 +463,7 @@ func runBrainEvidenceTool(ctx context.Context, deps brainRuntimeDeps, source, to
 		return *denied, nil
 	}
 	for _, target := range input.Targets {
-		admission := (brainruntime.AdmissionService{}).Admit(domain.AgentHypothesis{ID: "scope-check", Statement: "scope check", Mechanism: "scope check", TargetRefs: []domain.ResourceRef{target}, EvidenceNeeds: []string{"scope"}, FalsificationConditions: []string{"scope invalid"}}, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.IncidentGraph, ExternalInventory: deps.ExternalInventory, AvailableToolCategories: []domain.BrainToolCategory{domain.BrainToolEvidence}})
+		admission := (brainruntime.AdmissionService{}).Admit(domain.AgentHypothesis{ID: "scope-check", Statement: "scope check", Mechanism: "scope check", TargetRefs: []domain.ResourceRef{target}, EvidenceNeeds: []string{"scope"}, FalsificationConditions: []string{"scope invalid"}}, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.RuntimeTopology, ExternalInventory: deps.ExternalInventory, AvailableToolCategories: []domain.BrainToolCategory{domain.BrainToolEvidence}})
 		if admission.Decision != "ADMITTED" {
 			return constraintBrainOutput(envelope, "target_scope_denied", "requested target is outside the Incident scope"), nil
 		}
@@ -559,11 +577,13 @@ func runBrainIncidentRetrieval(ctx context.Context, deps brainRuntimeDeps, input
 	if limit <= 0 || limit > 10 {
 		limit = 5
 	}
-	features := state.Features
+	features := state.RuntimeFeatures
 	if deps.Reasoning != nil && len(features.Terms) == 0 {
 		features = deps.Reasoning.BuildFeatures(state.Incident, state.Incident.Evidence)
 	}
-	result, retrieveErr := deps.BrainRetrieval.Retrieve(ctx, domain.HybridRetrievalQuery{IncidentID: state.Incident.ID, Terms: uniqueBrainValues(input.Terms), Features: features, WorldModel: state.WorldModel, Limit: limit})
+	entities := uniqueBrainValues([]string{state.Incident.Service, state.Incident.Resource})
+	understanding := domain.HybridQueryUnderstanding{Entities: entities, Intent: input.Intent, Time: domain.RetrievalTimeRange{Start: state.Incident.EvidenceStartAt, End: time.Now().UTC()}, Signals: uniqueBrainValues(input.Terms)}
+	result, retrieveErr := deps.BrainRetrieval.Retrieve(ctx, domain.HybridRetrievalQuery{IncidentID: state.Incident.ID, Terms: uniqueBrainValues(input.Terms), Understanding: understanding, Features: features, WorldModel: state.WorldModel, Limit: limit})
 	if retrieveErr != nil {
 		return errorBrainOutput(envelope, "hybrid historical retrieval failed", true), nil
 	}
@@ -647,7 +667,7 @@ func runBrainSubmitHypotheses(ctx context.Context, deps brainRuntimeDeps, input 
 	for _, proposal := range input.Hypotheses {
 		id := "hyp:" + ulid.Make().String()
 		hypothesis := domain.AgentHypothesis{ID: id, LineageID: id, Version: 1, Relation: domain.HypothesisRoot, Statement: proposal.Statement, Category: proposal.Category, Mechanism: proposal.Mechanism, TargetRefs: proposal.Targets, EvidenceNeeds: proposal.EvidenceNeeds, FalsificationConditions: proposal.FalsificationConditions, ModelConfidence: proposal.ModelConfidence, Status: domain.HypothesisProposed, CreatedByTurn: currentBrainTurnID(state), CreatedAt: now}
-		admission := (brainruntime.AdmissionService{}).Admit(hypothesis, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.IncidentGraph, ExternalInventory: deps.ExternalInventory, AvailableToolCategories: available})
+		admission := (brainruntime.AdmissionService{}).Admit(hypothesis, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.RuntimeTopology, ExternalInventory: deps.ExternalInventory, AvailableToolCategories: available})
 		if admission.Decision == "ADMITTED" {
 			hypothesis.Status = domain.HypothesisAdmitted
 		}
@@ -685,11 +705,43 @@ func runBrainSubmitPlan(ctx context.Context, input submitInvestigationPlanInput)
 	if denied := authorizeBrainTool(state, envelope); denied != nil {
 		return *denied, nil
 	}
-	plan := domain.InvestigationPlan{Objective: input.Objective, StopConditions: input.StopConditions, RoundLimit: state.BrainBudget.Limits.MaxTurns, CreatedAt: time.Now().UTC()}
+	now := time.Now().UTC()
+	plan := domain.InvestigationPlan{ID: "plan:" + ulid.Make().String(), Version: 1, Objective: input.Objective, StopConditions: input.StopConditions, RoundLimit: state.BrainBudget.Limits.MaxTurns, CreatedAt: now, UpdatedAt: now}
 	for index, goal := range input.Goals {
 		plan.Tasks = append(plan.Tasks, domain.WorkerTask{ID: fmt.Sprintf("brain-goal-%d", index+1), Question: goal})
 	}
-	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "investigation plan persisted", InvestigationPlan: &plan, NewInformation: true, Provenance: baseBrainProvenance(envelope, "investigation-plan-v1", plan)}, nil
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "versioned investigation plan persisted", InvestigationPlan: &plan, NewInformation: true, Provenance: baseBrainProvenance(envelope, "investigation-plan-v2", plan)}, nil
+}
+
+func runBrainRevisePlan(ctx context.Context, input reviseInvestigationPlanInput) (brainCapabilityOutput, error) {
+	state, err := brainWorkflowState(ctx)
+	if err != nil {
+		return brainCapabilityOutput{}, err
+	}
+	if state.BrainPhase != domain.BrainPhaseInvestigation && state.BrainPhase != domain.BrainPhaseReflection {
+		return phaseConstraintOutput(state, "revise_investigation_plan", domain.BrainToolReasoning, input.Intent, domain.BrainPhaseInvestigation), nil
+	}
+	envelope := newBrainEnvelope(state, "revise_investigation_plan", domain.BrainToolReasoning, domain.AgentActionIntent{Intent: input.Intent, HypothesisIDs: uniqueBrainValues(input.HypothesisIDs), ExpectedObservation: input.ExpectedObservation})
+	if denied := authorizeBrainTool(state, envelope); denied != nil {
+		return *denied, nil
+	}
+	if state.InvestigationPlan == nil || state.InvestigationPlan.ID == "" || input.ParentPlanID != state.InvestigationPlan.ID {
+		return constraintBrainOutput(envelope, "stale_investigation_plan", "plan revision must reference the current immutable parent plan"), nil
+	}
+	for _, hypothesisID := range uniqueBrainValues(input.HypothesisIDs) {
+		if _, ok := findAgentHypothesis(state.AgentHypotheses, hypothesisID); !ok {
+			return constraintBrainOutput(envelope, "unknown_hypothesis_revision", "plan revision references an unknown hypothesis revision"), nil
+		}
+	}
+	if strings.TrimSpace(input.RevisionReason) == "" {
+		return constraintBrainOutput(envelope, "missing_plan_revision_reason", "plan revision reason is required"), nil
+	}
+	now := time.Now().UTC()
+	plan := domain.InvestigationPlan{ID: "plan:" + ulid.Make().String(), Version: state.InvestigationPlan.Version + 1, ParentID: state.InvestigationPlan.ID, RevisionReason: strings.TrimSpace(input.RevisionReason), Objective: input.Objective, StopConditions: input.StopConditions, RoundLimit: state.BrainBudget.Limits.MaxTurns, CreatedAt: state.InvestigationPlan.CreatedAt, UpdatedAt: now}
+	for index, goal := range input.Goals {
+		plan.Tasks = append(plan.Tasks, domain.WorkerTask{ID: fmt.Sprintf("brain-plan-%d-goal-%d", plan.Version, index+1), Question: goal, HypothesisIDs: uniqueBrainValues(input.HypothesisIDs)})
+	}
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "immutable Investigation Plan revision persisted", InvestigationPlan: &plan, NewInformation: true, Provenance: baseBrainProvenance(envelope, "investigation-plan-v2", plan)}, nil
 }
 
 func runBrainReviseHypothesis(ctx context.Context, deps brainRuntimeDeps, input reviseBrainHypothesisInput) (brainCapabilityOutput, error) {
@@ -724,7 +776,7 @@ func runBrainReviseHypothesis(ctx context.Context, deps brainRuntimeDeps, input 
 	}
 	id := "hyp:" + ulid.Make().String()
 	hypothesis := domain.AgentHypothesis{ID: id, LineageID: lineage, Version: version, ParentIDs: append([]string(nil), input.ParentIDs...), Relation: input.Relation, RevisionReason: input.RevisionReason, Statement: input.Hypothesis.Statement, Category: input.Hypothesis.Category, Mechanism: input.Hypothesis.Mechanism, TargetRefs: input.Hypothesis.Targets, EvidenceNeeds: input.Hypothesis.EvidenceNeeds, FalsificationConditions: input.Hypothesis.FalsificationConditions, ModelConfidence: input.Hypothesis.ModelConfidence, Status: domain.HypothesisProposed, CreatedByTurn: currentBrainTurnID(state), CreatedAt: time.Now().UTC()}
-	admission := (brainruntime.AdmissionService{}).Admit(hypothesis, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.IncidentGraph, ExternalInventory: deps.ExternalInventory, AvailableToolCategories: availableBrainCategories(state)})
+	admission := (brainruntime.AdmissionService{}).Admit(hypothesis, brainruntime.AdmissionContext{Incident: state.Incident, Graph: state.RuntimeTopology, ExternalInventory: deps.ExternalInventory, AvailableToolCategories: availableBrainCategories(state)})
 	if admission.Decision == "ADMITTED" {
 		hypothesis.Status = domain.HypothesisAdmitted
 	}
@@ -755,10 +807,42 @@ func runBrainValidateHypothesis(ctx context.Context, input validateBrainHypothes
 	if value, found := findHypothesisGrounding(state.HypothesisGroundings, hypothesis.ID); found {
 		previous = &value
 	}
-	fulfilledNeeds := serverFulfilledEvidenceNeeds(state, hypothesis, input.SupportingEvidenceIDs)
-	causalNodes := serverValidatedCausalNodes(state.Incident.Evidence, input.SupportingEvidenceIDs, input.ExpectedCausalNodeIDs)
-	grounding, delta := (brainruntime.Grounder{}).Validate(hypothesis, state.Incident.Evidence, brainruntime.ValidationInput{SupportingEvidenceIDs: input.SupportingEvidenceIDs, ContradictingEvidenceIDs: input.ContradictingEvidenceIDs, FulfilledEvidenceNeeds: fulfilledNeeds, MissingObservations: input.MissingObservations, ExpectedCausalNodeIDs: causalNodes, CausalClaim: strings.TrimSpace(hypothesis.Mechanism) != "", TargetScopeDecisions: admission.ResourceScope, WindowStart: state.Incident.EvidenceStartAt, WindowEnd: time.Now().UTC()}, previous)
-	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "server grounding calculated from cited IDs and explicit coverage obligations", Grounding: &grounding, GroundingDelta: &delta, NewInformation: len(delta.EvidenceChange) > 0 || previous == nil || previous.Level != grounding.Level, Provenance: baseBrainProvenance(envelope, "hypothesis-grounding-v1", grounding)}, nil
+	attributions, attributionErr := brainruntime.ValidateEvidenceAttributions(hypothesis.ID, currentBrainTurnID(state), state.Incident.Evidence, input.Attributions)
+	if attributionErr != nil {
+		return constraintBrainOutput(envelope, "invalid_evidence_attribution", attributionErr.Error()), nil
+	}
+	attributedIDs := map[string]bool{}
+	for _, attribution := range attributions {
+		attributedIDs[attribution.EvidenceID] = true
+	}
+	for _, evidenceID := range serverBoundEvidenceIDs(state, hypothesis.ID) {
+		if !attributedIDs[evidenceID] {
+			return constraintBrainOutput(envelope, "unattributed_bound_evidence", "every current Evidence record collected for this hypothesis must be attributed as SUPPORT, CONTRADICT, or NEUTRAL"), nil
+		}
+	}
+	supportingIDs := brainruntime.AttributedEvidenceIDs(attributions, domain.EvidenceSupports)
+	fulfilledNeeds := serverFulfilledEvidenceNeeds(state, hypothesis, supportingIDs)
+	causalNodes := serverValidatedCausalNodes(state.Incident.Evidence, supportingIDs, input.ExpectedCausalNodeIDs)
+	grounding, delta := (brainruntime.Grounder{}).Validate(hypothesis, state.Incident.Evidence, brainruntime.ValidationInput{Attributions: attributions, FulfilledEvidenceNeeds: fulfilledNeeds, MissingObservations: input.MissingObservations, ExpectedCausalNodeIDs: causalNodes, CausalClaim: strings.TrimSpace(hypothesis.Mechanism) != "", TargetScopeDecisions: admission.ResourceScope, WindowStart: state.Incident.EvidenceStartAt, WindowEnd: time.Now().UTC()}, previous)
+	provenanceValue := struct {
+		Attributions []domain.HypothesisEvidenceAttribution `json:"attributions"`
+		Grounding    domain.HypothesisGrounding             `json:"grounding"`
+	}{Attributions: attributions, Grounding: grounding}
+	return brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "OK", Summary: "explicit Evidence attribution persisted and server grounding calculated from current cited IDs", EvidenceAttributions: attributions, Grounding: &grounding, GroundingDelta: &delta, NewInformation: len(delta.EvidenceChange) > 0 || previous == nil || previous.Level != grounding.Level, Provenance: baseBrainProvenance(envelope, "hypothesis-grounding-v2", provenanceValue)}, nil
+}
+
+func serverBoundEvidenceIDs(state *WorkflowState, hypothesisID string) []string {
+	if state == nil || hypothesisID == "" {
+		return nil
+	}
+	ids := []string{}
+	for _, execution := range state.ToolExecutions {
+		if execution.Result.Class != domain.ToolResultEvidence || !brainContainsString(execution.Envelope.Intent.HypothesisIDs, hypothesisID) {
+			continue
+		}
+		ids = append(ids, execution.Result.Provenance.EvidenceIDs...)
+	}
+	return uniqueBrainValues(ids)
 }
 
 func runBrainCompareHypotheses(ctx context.Context, input compareBrainHypothesesInput) (brainCapabilityOutput, error) {
@@ -883,6 +967,36 @@ func runBrainCommitBelief(ctx context.Context, input commitBrainBeliefInput) (br
 	hypothesis, ok := findAgentHypothesis(state.AgentHypotheses, input.HypothesisID)
 	if !ok {
 		return constraintBrainOutput(envelope, "unknown_hypothesis_revision", "hypothesis revision does not exist"), nil
+	}
+	if input.NewConfidence == hypothesis.ModelConfidence {
+		return constraintBrainOutput(envelope, "belief_delta_no_change", "reflection must change the subjective confidence or create a new hypothesis revision"), nil
+	}
+	if (input.Direction == domain.BeliefIncrease && input.NewConfidence < hypothesis.ModelConfidence) ||
+		(input.Direction == domain.BeliefDecrease && input.NewConfidence > hypothesis.ModelConfidence) {
+		return constraintBrainOutput(envelope, "belief_direction_mismatch", "belief direction must match the declared confidence change"), nil
+	}
+	if len(input.EvidenceIDs) == 0 && len(input.ValidationIDs) == 0 {
+		return constraintBrainOutput(envelope, "belief_delta_ungrounded", "belief change must cite current Evidence or a hypothesis validation result"), nil
+	}
+	currentEvidence := map[string]bool{}
+	for _, item := range state.Incident.Evidence {
+		currentEvidence[item.ID] = true
+	}
+	for _, id := range input.EvidenceIDs {
+		if !currentEvidence[id] {
+			return constraintBrainOutput(envelope, "belief_evidence_not_current", "belief change references Evidence outside the current Incident snapshot"), nil
+		}
+	}
+	currentValidations := map[string]bool{}
+	for _, grounding := range state.HypothesisGroundings {
+		if grounding.HypothesisRevisionID == input.HypothesisID && grounding.EvidenceSnapshotHash == state.EvidenceSnapshotHash {
+			currentValidations[grounding.ID] = true
+		}
+	}
+	for _, id := range input.ValidationIDs {
+		if !currentValidations[id] {
+			return constraintBrainOutput(envelope, "belief_validation_not_current", "belief change references a validation outside this hypothesis and Evidence snapshot"), nil
+		}
 	}
 	delta := domain.BeliefDelta{HypothesisRevisionID: input.HypothesisID, PreviousConfidence: hypothesis.ModelConfidence, NewConfidence: input.NewConfidence, Direction: input.Direction, EvidenceIDs: input.EvidenceIDs, ValidationResultIDs: input.ValidationIDs, RevisionRequired: input.RevisionRequired, RevisionReason: input.RevisionReason, OccurredAt: time.Now().UTC()}
 	if _, commitErr := brainruntime.CommitBelief(hypothesis, delta); commitErr != nil {

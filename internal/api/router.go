@@ -240,7 +240,7 @@ func (s *Server) hypotheses(c *gin.Context) {
 		respond(c, nil, err)
 		return
 	}
-	if incident.Investigation != nil && incident.Investigation.Architecture == "eino-native-self-reflective-brain" {
+	if incident.Investigation != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"hypotheses":            incident.Investigation.AgentHypotheses,
 			"admissions":            incident.Investigation.HypothesisAdmissions,
@@ -258,11 +258,7 @@ func (s *Server) hypotheses(c *gin.Context) {
 		})
 		return
 	}
-	if incident.DiagnosisLedger == nil {
-		c.JSON(http.StatusOK, []domain.VerifiedHypothesis{})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"drafts": incident.DiagnosisLedger.Drafts, "verified": incident.DiagnosisLedger.Verified, "transitions": incident.DiagnosisLedger.HypothesisTransitions, "confidence_history": confidenceHistory(incident.DiagnosisLedger.Verified)})
+	c.JSON(http.StatusOK, gin.H{"hypotheses": []domain.AgentHypothesis{}, "groundings": []domain.HypothesisGrounding{}})
 }
 func (s *Server) agentRuns(c *gin.Context) {
 	incident, err := s.Manager.Get(c, c.Param("id"))
@@ -270,13 +266,7 @@ func (s *Server) agentRuns(c *gin.Context) {
 		respond(c, nil, err)
 		return
 	}
-	var decisions []domain.AgentDecisionEvent
-	var feedback []domain.SafetyFeedback
-	if incident.DiagnosisLedger != nil {
-		decisions = incident.DiagnosisLedger.AgentDecisions
-		feedback = incident.DiagnosisLedger.SafetyFeedback
-	}
-	architecture := "constrained-react"
+	architecture := "eino-native-self-reflective-brain"
 	var modelUsage []domain.ModelUsageEvent
 	var memoryReads []domain.MemoryAccessEvent
 	if incident.Investigation != nil {
@@ -285,18 +275,14 @@ func (s *Server) agentRuns(c *gin.Context) {
 		memoryReads = incident.Investigation.MemoryReads
 	}
 	type agentRunSummary struct {
-		Agent              string  `json:"agent"`
-		ParentAgent        string  `json:"parent_agent,omitempty"`
-		ModelCalls         int     `json:"model_calls"`
-		InputTokens        int     `json:"input_tokens"`
-		OutputTokens       int     `json:"output_tokens"`
-		ReasoningTokens    int     `json:"reasoning_tokens"`
-		DurationMS         float64 `json:"duration_ms"`
-		EstimatedCost      float64 `json:"estimated_cost"`
-		Iterations         int     `json:"iterations"`
-		ToolUses           int     `json:"tool_uses"`
-		ToolComplexityCost int     `json:"tool_complexity_cost"`
-		Corrections        int     `json:"corrections"`
+		Agent           string  `json:"agent"`
+		ParentAgent     string  `json:"parent_agent,omitempty"`
+		ModelCalls      int     `json:"model_calls"`
+		InputTokens     int     `json:"input_tokens"`
+		OutputTokens    int     `json:"output_tokens"`
+		ReasoningTokens int     `json:"reasoning_tokens"`
+		DurationMS      float64 `json:"duration_ms"`
+		EstimatedCost   float64 `json:"estimated_cost"`
 	}
 	byAgent := map[string]*agentRunSummary{}
 	for _, usage := range modelUsage {
@@ -312,25 +298,24 @@ func (s *Server) agentRuns(c *gin.Context) {
 		item.DurationMS += usage.DurationMS
 		item.EstimatedCost += usage.EstimatedCost
 	}
-	if incident.AgentBudget != nil {
-		for agentName, usage := range incident.AgentBudget.Usage {
-			item := byAgent[agentName]
-			if item == nil {
-				item = &agentRunSummary{Agent: agentName}
-				byAgent[agentName] = item
-			}
-			item.Iterations = usage.Iterations
-			item.ToolUses = usage.ToolUses
-			item.ToolComplexityCost = usage.ToolCost
-			item.Corrections = usage.Corrections
-		}
-	}
 	agents := make([]agentRunSummary, 0, len(byAgent))
 	for _, item := range byAgent {
 		agents = append(agents, *item)
 	}
 	sort.SliceStable(agents, func(i, j int) bool { return agents[i].Agent < agents[j].Agent })
-	c.JSON(http.StatusOK, gin.H{"workflow": domain.WorkflowRuntimeName, "strategy": incident.DiagnosisMethod, "architecture": architecture, "skill_snapshot_hash": incident.SkillSnapshotHash, "ranking_policy_hash": incident.RankingPolicyHash, "reranker_config_hash": incident.RerankerConfigHash, "agents": agents, "budget": incident.AgentBudget, "model_usage": modelUsage, "memory_reads": memoryReads, "decisions": decisions, "safety_feedback": feedback})
+	var budget *domain.BrainBudgetState
+	var skillActivations []domain.SkillActivation
+	var toolExecutions []domain.BrainToolExecution
+	var reflections []domain.ReflectionRecord
+	var termination *domain.TerminationEvent
+	if incident.Investigation != nil {
+		budget = incident.Investigation.BrainBudget
+		skillActivations = incident.Investigation.SkillActivations
+		toolExecutions = incident.Investigation.ToolExecutions
+		reflections = incident.Investigation.Reflections
+		termination = incident.Investigation.Termination
+	}
+	c.JSON(http.StatusOK, gin.H{"workflow": domain.BrainWorkflowRuntimeName, "strategy": incident.DiagnosisMethod, "architecture": architecture, "skill_snapshot_hash": incident.SkillSnapshotHash, "reranker_config_hash": incident.RerankerConfigHash, "agents": agents, "budget": budget, "model_usage": modelUsage, "memory_reads": memoryReads, "skill_activations": skillActivations, "tool_executions": toolExecutions, "reflections": reflections, "termination": termination})
 }
 
 func (s *Server) investigation(c *gin.Context) {
@@ -344,13 +329,6 @@ func (s *Server) investigation(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, incident.Investigation)
-}
-func confidenceHistory(items []domain.VerifiedHypothesis) []domain.HypothesisConfidenceRecord {
-	var out []domain.HypothesisConfidenceRecord
-	for _, item := range items {
-		out = append(out, item.ConfidenceHistory...)
-	}
-	return out
 }
 func (s *Server) auth() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -381,13 +359,6 @@ func (s *Server) benchmarkStart(c *gin.Context) {
 	}
 	if len(in.Strategies) == 0 && (in.Profile == "smoke" || in.Profile == "ci" || in.Profile == "standard" || in.Profile == "robustness" || in.Profile == "full") {
 		in.Strategies = []string{
-			domain.DiagnosisMethodDirect,
-			domain.DiagnosisMethodRAG,
-			domain.DiagnosisMethodReAct,
-			domain.DiagnosisMethodRuleOnly,
-			domain.DiagnosisMethodEvidence,
-			domain.DiagnosisMethodCognitive,
-			domain.DiagnosisMethodActive,
 			domain.DiagnosisMethodKubePilot,
 			domain.DiagnosisMethodKubePilotNoReflection,
 			domain.DiagnosisMethodKubePilotNoOptionalSkills,

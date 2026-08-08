@@ -99,7 +99,7 @@ type ManualIncident struct {
 func (m *IncidentManager) Create(ctx context.Context, input ManualIncident) (*domain.Incident, error) {
 	now := time.Now().UTC()
 	method, valid := domain.NormalizeDiagnosisMethod(input.DiagnosisMethod)
-	if !valid {
+	if !valid || !domain.IsKubePilotBrainMethod(method) {
 		return nil, fmt.Errorf("unsupported diagnosis method %q", input.DiagnosisMethod)
 	}
 	causalMode, valid := domain.NormalizeCausalMode(input.CausalMode)
@@ -282,10 +282,12 @@ func (m *IncidentManager) Retry(ctx context.Context, id string) (*domain.Inciden
 		return nil, fmt.Errorf("incident cannot be retried from %s", in.Status)
 	}
 	now := time.Now().UTC()
-	brainAttempt := domain.IsKubePilotBrainMethod(in.DiagnosisMethod)
+	if !domain.IsKubePilotBrainMethod(in.DiagnosisMethod) {
+		return nil, fmt.Errorf("incident uses removed diagnosis method %q", in.DiagnosisMethod)
+	}
 	var migratedFrom string
 	sequence := 1
-	if brainAttempt && in.WorkflowAttempt != nil {
+	if in.WorkflowAttempt != nil {
 		migratedFrom = in.WorkflowAttempt.ID
 		sequence = in.WorkflowAttempt.Sequence + 1
 		in.WorkflowAttempt.Status = domain.WorkflowAttemptInvalidated
@@ -307,11 +309,9 @@ func (m *IncidentManager) Retry(ctx context.Context, id string) (*domain.Inciden
 	in.DiagnosisError = ""
 	in.SkillSnapshotHash, in.RankingPolicyHash, in.RerankerConfigHash = "", "", ""
 	in.AgentBudget, in.DiagnosisLedger = nil, nil
-	if brainAttempt {
-		in.Investigation = nil
-		in.ExecutionSnapshot = nil
-		in.WorkflowAttempt = &domain.WorkflowAttempt{ID: "attempt:" + ulid.Make().String(), IncidentID: in.ID, Sequence: sequence, CheckpointID: "incident:" + in.ID, Status: domain.WorkflowAttemptActive, MigratedFromAttemptID: migratedFrom, StartedAt: now}
-	}
+	in.Investigation = nil
+	in.ExecutionSnapshot = nil
+	in.WorkflowAttempt = &domain.WorkflowAttempt{ID: "attempt:" + ulid.Make().String(), IncidentID: in.ID, Sequence: sequence, CheckpointID: "incident:" + in.ID, Status: domain.WorkflowAttemptActive, MigratedFromAttemptID: migratedFrom, StartedAt: now}
 	in.UpdatedAt = now
 	if m.Checkpoints != nil {
 		_ = m.Checkpoints.Delete(ctx, "incident:"+id)
@@ -319,11 +319,7 @@ func (m *IncidentManager) Retry(ctx context.Context, id string) (*domain.Inciden
 	if err = m.Store.Update(ctx, in); err != nil {
 		return nil, err
 	}
-	if brainAttempt {
-		m.audit(ctx, id, "workflow_attempt_migrated", "diagnosis workflow restarted with a new immutable attempt", map[string]any{"attempt_id": in.WorkflowAttempt.ID, "sequence": sequence, "migrated_from_attempt_id": migratedFrom})
-	} else {
-		m.audit(ctx, id, "incident_retried", "diagnosis workflow restarted", nil)
-	}
+	m.audit(ctx, id, "workflow_attempt_migrated", "diagnosis workflow restarted with a new immutable attempt", map[string]any{"attempt_id": in.WorkflowAttempt.ID, "sequence": sequence, "migrated_from_attempt_id": migratedFrom})
 	if m.Supervisor != nil {
 		go m.diagnose(id)
 	}
@@ -499,6 +495,15 @@ func (m *IncidentManager) resumeWorkflow(id string, approved bool, idempotencyKe
 		resume.Context = domain.ExecutionContext{NamespaceAllowlist: append([]string(nil), m.AllowedNamespaces...), IncidentID: in.ID, ProposalID: in.Proposal.ID, ApprovalID: ulid.Make().String(), IdempotencyKey: idempotencyKey, Operator: operator, TargetUID: in.Proposal.TargetUID, ResourceVersion: in.Proposal.ResourceVersion, ApprovedAt: time.Now().UTC(), ExpiresAt: in.Proposal.ExpiresAt}
 		if in.DryRun != nil {
 			resume.Context.MutationSpecHash = in.DryRun.MutationSpecHash
+			resume.Context.DryRunValidatedAt = in.DryRun.ValidatedAt
+		}
+		if domain.IsKubePilotBrainMethod(in.DiagnosisMethod) && in.Investigation != nil && in.Investigation.AgentRecoveryPlan != nil {
+			plan := in.Investigation.AgentRecoveryPlan
+			resume.Context.RecoveryPlanID = plan.ID
+			resume.Context.DiagnosisVersion = plan.DiagnosisVersion
+			resume.Context.EvidenceSnapshotHash = plan.EvidenceSnapshotHash
+			snapshot := plan.ExecutionSnapshot
+			resume.Context.ExecutionSnapshot = &snapshot
 		}
 	}
 	state, runErr := m.Supervisor.Resume(ctx, id, in.WorkflowInterruptID, resume)

@@ -131,7 +131,7 @@ func requiresHypothesisBinding(envelope domain.AgentActionEnvelope) bool {
 	// evidence collectors. Other reasoning tools (understanding, planning and
 	// initial hypothesis submission) intentionally have no prior hypothesis.
 	switch envelope.ToolName {
-	case "validate_hypothesis", "compare_hypotheses", "revise_hypothesis", "commit_belief_delta", "submit_diagnosis", "validate_diagnosis":
+	case "validate_hypothesis", "compare_hypotheses", "revise_hypothesis", "revise_investigation_plan", "commit_belief_delta", "submit_diagnosis", "validate_diagnosis":
 		return true
 	default:
 		return false
@@ -274,15 +274,75 @@ func resourceRefMatches(a, b domain.ResourceRef) bool {
 }
 
 type ValidationInput struct {
-	SupportingEvidenceIDs    []string
-	ContradictingEvidenceIDs []string
-	FulfilledEvidenceNeeds   []string
-	MissingObservations      []string
-	ExpectedCausalNodeIDs    []string
-	CausalClaim              bool
-	TargetScopeDecisions     []domain.ResourceScopeDecision
-	WindowStart              time.Time
-	WindowEnd                time.Time
+	Attributions           []domain.HypothesisEvidenceAttribution
+	FulfilledEvidenceNeeds []string
+	MissingObservations    []string
+	ExpectedCausalNodeIDs  []string
+	CausalClaim            bool
+	TargetScopeDecisions   []domain.ResourceScopeDecision
+	WindowStart            time.Time
+	WindowEnd              time.Time
+}
+
+// ValidateEvidenceAttributions freezes the model's explicit Evidence
+// interpretation without deciding whether the mechanism itself is plausible.
+// Only current server Evidence IDs, the closed relation enum, bounded weights,
+// and a non-empty explanation are admitted.
+func ValidateEvidenceAttributions(hypothesisID, turnID string, evidence []domain.Evidence, intents []domain.EvidenceAttributionIntent) ([]domain.HypothesisEvidenceAttribution, error) {
+	if strings.TrimSpace(hypothesisID) == "" {
+		return nil, fmt.Errorf("hypothesis revision is required")
+	}
+	if len(intents) == 0 {
+		return nil, fmt.Errorf("at least one Evidence attribution is required")
+	}
+	byID := make(map[string]domain.Evidence, len(evidence))
+	for _, item := range evidence {
+		if item.ID != "" {
+			byID[item.ID] = item
+		}
+	}
+	snapshot := EvidenceSnapshotHash(evidence)
+	seen := map[string]bool{}
+	validatedAt := time.Now().UTC()
+	out := make([]domain.HypothesisEvidenceAttribution, 0, len(intents))
+	for index, intent := range intents {
+		id := strings.TrimSpace(intent.EvidenceID)
+		if id == "" {
+			return nil, fmt.Errorf("attribution %d has no Evidence ID", index+1)
+		}
+		if _, ok := byID[id]; !ok {
+			return nil, fmt.Errorf("attribution references unknown current Evidence ID %s", id)
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("Evidence ID %s is attributed more than once", id)
+		}
+		seen[id] = true
+		if intent.Relation != domain.EvidenceSupports && intent.Relation != domain.EvidenceContradicts && intent.Relation != domain.EvidenceNeutral {
+			return nil, fmt.Errorf("attribution for %s has invalid relation %s", id, intent.Relation)
+		}
+		if intent.Weight < 0 || intent.Weight > 1 {
+			return nil, fmt.Errorf("attribution weight for %s must be between zero and one", id)
+		}
+		if strings.TrimSpace(intent.Reason) == "" {
+			return nil, fmt.Errorf("attribution for %s requires a reason", id)
+		}
+		out = append(out, domain.HypothesisEvidenceAttribution{
+			ID: fmt.Sprintf("attribution:%s:%d:%d", hypothesisID, validatedAt.UnixNano(), index), HypothesisRevisionID: hypothesisID,
+			EvidenceID: id, Relation: intent.Relation, Weight: intent.Weight, Reason: strings.TrimSpace(intent.Reason),
+			AttributedByTurn: turnID, EvidenceSnapshotHash: snapshot, ValidatedAt: validatedAt,
+		})
+	}
+	return out, nil
+}
+
+func AttributedEvidenceIDs(attributions []domain.HypothesisEvidenceAttribution, relation domain.EvidenceAttributionRelation) []string {
+	ids := make([]string, 0, len(attributions))
+	for _, attribution := range attributions {
+		if attribution.Relation == relation {
+			ids = append(ids, attribution.EvidenceID)
+		}
+	}
+	return unique(ids)
 }
 
 // Grounder performs ID-based validation over server-owned evidence. It has no
@@ -296,8 +356,13 @@ func (Grounder) Validate(hypothesis domain.AgentHypothesis, evidence []domain.Ev
 			byID[item.ID] = item
 		}
 	}
-	supportIDs := existingIDs(input.SupportingEvidenceIDs, byID)
-	contradictIDs := existingIDs(input.ContradictingEvidenceIDs, byID)
+	supportIDs := existingIDs(AttributedEvidenceIDs(input.Attributions, domain.EvidenceSupports), byID)
+	contradictIDs := existingIDs(AttributedEvidenceIDs(input.Attributions, domain.EvidenceContradicts), byID)
+	neutralIDs := existingIDs(AttributedEvidenceIDs(input.Attributions, domain.EvidenceNeutral), byID)
+	attributionIDs := make([]string, 0, len(input.Attributions))
+	for _, attribution := range input.Attributions {
+		attributionIDs = append(attributionIDs, attribution.ID)
+	}
 	sourceSupport := map[string]float64{}
 	currentSupport := 0
 	for _, id := range supportIDs {
@@ -336,7 +401,7 @@ func (Grounder) Validate(hypothesis domain.AgentHypothesis, evidence []domain.Ev
 	validatedAt := time.Now().UTC()
 	grounding := domain.HypothesisGrounding{
 		ID: fmt.Sprintf("grounding:%s:%d", hypothesis.ID, validatedAt.UnixNano()), HypothesisRevisionID: hypothesis.ID,
-		Level: level, Evidence: domain.GroundingEvidence{SupportingEvidenceIDs: supportIDs, ContradictingEvidenceIDs: contradictIDs, IndependentSourceCount: len(sourceSupport), EvidenceSupport: support, ContradictionRatio: contradictionRatio},
+		Level: level, Evidence: domain.GroundingEvidence{SupportingEvidenceIDs: supportIDs, ContradictingEvidenceIDs: contradictIDs, NeutralEvidenceIDs: neutralIDs, AttributionIDs: unique(attributionIDs), IndependentSourceCount: len(sourceSupport), EvidenceSupport: support, ContradictionRatio: contradictionRatio},
 		Coverage: coverage, MissingObservations: nonEmpty(input.MissingObservations), ValidatedAt: validatedAt,
 		EvidenceSnapshotHash: EvidenceSnapshotHash(evidence), CausalCoverageApplicable: input.CausalClaim,
 	}
@@ -367,6 +432,24 @@ func CommitBelief(hypothesis domain.AgentHypothesis, delta domain.BeliefDelta) (
 	}
 	if delta.NewConfidence < 0 || delta.NewConfidence > 1 {
 		return hypothesis, fmt.Errorf("model confidence must be between zero and one")
+	}
+	if delta.PreviousConfidence != hypothesis.ModelConfidence {
+		return hypothesis, fmt.Errorf("belief delta previous confidence does not match the current hypothesis revision")
+	}
+	if delta.NewConfidence == delta.PreviousConfidence {
+		return hypothesis, fmt.Errorf("belief delta must change subjective confidence")
+	}
+	switch delta.Direction {
+	case domain.BeliefIncrease:
+		if delta.NewConfidence <= delta.PreviousConfidence {
+			return hypothesis, fmt.Errorf("INCREASE direction requires higher confidence")
+		}
+	case domain.BeliefDecrease:
+		if delta.NewConfidence >= delta.PreviousConfidence {
+			return hypothesis, fmt.Errorf("DECREASE direction requires lower confidence")
+		}
+	default:
+		return hypothesis, fmt.Errorf("belief direction must be INCREASE or DECREASE")
 	}
 	if delta.RevisionRequired {
 		return hypothesis, fmt.Errorf("statement, mechanism, target, or falsification changes require a new revision")

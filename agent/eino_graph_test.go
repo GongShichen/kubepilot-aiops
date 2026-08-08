@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,7 +10,6 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
 )
@@ -268,193 +266,17 @@ func (m *memoryEinoCheckpoint) Delete(_ context.Context, id string) error {
 	return nil
 }
 
-func TestEinoGraphInterruptAndResume(t *testing.T) {
+func TestProductionSupervisorRejectsEveryRemovedLegacyDiagnosisMethod(t *testing.T) {
 	ctx := context.Background()
-	registry, err := NewAgentRegistry(ctx, scriptedEinoModel{})
+	supervisor, err := NewSupervisor(ctx, SupervisorDeps{BrainModel: BrainModelRuntime{Chat: scriptedEinoModel{}}, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if names := registry.Names(); len(names) != 11 || names[0] != SupervisorAgentName || names[1] != PlannerAgentName || names[6] != DiagnosisAgentName || names[8] != CriticAgentName || names[9] != CognitiveRuntimeName || names[10] != RecoveryAgentName {
-		t.Fatalf("unexpected ADK agents: %v", names)
-	}
-	checkpoints := &memoryEinoCheckpoint{data: map[string][]byte{}}
-	executor := &graphExecutor{}
-	collectors := map[string]Collector{}
-	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
-		collectors[source] = fixedCollector{source: source}
-	}
-	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, HistoricalCandidates: fixedHistoricalRetriever{}, Agents: registry, Executor: executor, Checkpoints: checkpoints, VerificationInterval: time.Millisecond, VerificationTimeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	incident := &domain.Incident{ID: "incident-eino", DiagnosisMethod: domain.DiagnosisMethodReAct, Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
-	_, runErr := supervisor.Run(ctx, incident)
-	interrupt, ok := compose.ExtractInterruptInfo(runErr)
-	if !ok || len(interrupt.InterruptContexts) != 1 {
-		t.Fatalf("expected one Eino interrupt, got %v; budget=%+v ledger=%+v", runErr, incident.AgentBudget, incident.DiagnosisLedger)
-	}
-	if incident.Status != domain.StatusAwaitingApproval || incident.DryRun == nil || incident.Proposal == nil {
-		t.Fatalf("incident did not reach approval: %#v", incident)
-	}
-	if incident.Investigation == nil || len(incident.Investigation.ModelUsage) == 0 {
-		t.Fatal("constrained ReAct model usage was not captured")
-	}
-	for _, usage := range incident.Investigation.ModelUsage {
-		if usage.InputTokens <= 0 || usage.OutputTokens <= 0 || usage.DurationMS < 0 {
-			t.Fatalf("incomplete per-Agent model usage: %+v", usage)
+	for _, method := range []string{domain.DiagnosisMethodDirect, domain.DiagnosisMethodRAG, domain.DiagnosisMethodReAct, domain.DiagnosisMethodRuleOnly, domain.DiagnosisMethodEvidence, domain.DiagnosisMethodCognitive, domain.DiagnosisMethodActive} {
+		incident := &domain.Incident{ID: "removed-" + method, DiagnosisMethod: method, Status: domain.StatusReceived, Namespace: "team-a", Service: "api", Resource: "api"}
+		if _, runErr := supervisor.Run(ctx, incident); runErr == nil || !strings.Contains(runErr.Error(), "not supported by the KubePilot Brain runtime") {
+			t.Fatalf("removed legacy method %q reached a production diagnosis path: %v", method, runErr)
 		}
-	}
-	resume := &ApprovalResumeData{Approved: true, Context: domain.ExecutionContext{NamespaceAllowlist: []string{"kubepilot-demo"}, IncidentID: incident.ID, ProposalID: incident.Proposal.ID, ApprovalID: "approval-1", IdempotencyKey: "key-1", Operator: "test", TargetUID: "uid-1", ResourceVersion: "rv-1", MutationSpecHash: "mutation-1", ApprovedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Minute)}}
-	state, err := supervisor.Resume(ctx, incident.ID, interrupt.InterruptContexts[0].ID, resume)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Incident.Status != domain.StatusResolved || !executor.executed {
-		t.Fatalf("status=%s executed=%v", state.Incident.Status, executor.executed)
-	}
-	if state.Incident.RecoveryExecution == nil || state.Incident.RecoveryExecution.Attempts != 1 || state.Incident.RecoveryExecution.ConfirmedMutations != 1 || state.Incident.RecoveryExecution.Namespace != incident.Namespace || state.Incident.RecoveryExecution.Outcome != "succeeded" {
-		t.Fatalf("deterministic recovery audit was not recorded: %+v", state.Incident.RecoveryExecution)
-	}
-	if _, exists, _ := checkpoints.Get(ctx, "incident:"+incident.ID); exists {
-		t.Fatal("completed workflow checkpoint was not deleted")
-	}
-}
-
-func TestEinoEvidenceOnlyGraphCarriesDeterministicDiagnosisState(t *testing.T) {
-	ctx := context.Background()
-	registry, err := NewAgentRegistry(ctx, scriptedEinoModel{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	collectors := map[string]Collector{}
-	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
-		collectors[source] = fixedCollector{source: source}
-	}
-	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, Agents: registry, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}, VerificationInterval: time.Millisecond, VerificationTimeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	incident := &domain.Incident{ID: "incident-evidence-graph", DiagnosisMethod: domain.DiagnosisMethodEvidence, Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
-	state, _ := supervisor.Run(ctx, incident)
-	if state == nil || incident.Investigation == nil {
-		t.Fatalf("eino deterministic diagnosis graph did not produce state: state=%+v incident=%+v", state, incident)
-	}
-	investigation := incident.Investigation
-	if investigation.Architecture != "eino-evidence-diagnosis-runtime" || len(investigation.Signals) < 4 || len(investigation.Assertions) == 0 || len(investigation.Findings) != 4 || investigation.Arbitration == nil || investigation.RecoveryPermission == nil {
-		t.Fatalf("eino nodes did not preserve complete deterministic audit state: %+v", investigation)
-	}
-	if len(investigation.ModelUsage) != 0 {
-		t.Fatalf("evidence-only graph invoked the cognitive model: %+v", investigation.ModelUsage)
-	}
-}
-
-func TestEinoEvidenceOnlyGraphKeepsDiagnosisRuntimeAcrossConcurrentRuns(t *testing.T) {
-	ctx := context.Background()
-	registry, err := NewAgentRegistry(ctx, scriptedEinoModel{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	collectors := map[string]Collector{}
-	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
-		collectors[source] = fixedCollector{source: source}
-	}
-	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, Agents: registry, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}, VerificationInterval: time.Millisecond, VerificationTimeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Keep substantially more invocations than the four isolated benchmark
-	// workers. This protects the shared compiled graph from state/routing
-	// regressions that only appear when several incidents overlap.
-	const runs = 64
-	errors := make(chan error, runs)
-	var group sync.WaitGroup
-	for index := 0; index < runs; index++ {
-		group.Add(1)
-		go func(index int) {
-			defer group.Done()
-			incident := &domain.Incident{
-				ID:              fmt.Sprintf("incident-evidence-concurrent-%d", index),
-				DiagnosisMethod: domain.DiagnosisMethodEvidence,
-				Status:          domain.StatusReceived,
-				Namespace:       "kubepilot-demo",
-				Service:         "gateway-service",
-				Resource:        "gateway-service",
-				Summary:         "CPU alert",
-				CreatedAt:       time.Now().Add(-time.Minute),
-				UpdatedAt:       time.Now().Add(-time.Minute),
-			}
-			state, runErr := supervisor.Run(ctx, incident)
-			if runErr != nil {
-				if _, interrupted := compose.ExtractInterruptInfo(runErr); !interrupted {
-					errors <- fmt.Errorf("run %d: %w", index, runErr)
-					return
-				}
-			}
-			if state == nil || state.DiagnosisRuntime == nil || incident.Investigation == nil {
-				errors <- fmt.Errorf("run %d lost deterministic state: state=%#v incident=%#v", index, state, incident)
-				return
-			}
-			if got := incident.Investigation.Architecture; got != "eino-evidence-diagnosis-runtime" {
-				errors <- fmt.Errorf("run %d architecture=%q, want deterministic evidence runtime", index, got)
-			}
-		}(index)
-	}
-	group.Wait()
-	close(errors)
-	for err := range errors {
-		t.Error(err)
-	}
-}
-
-func TestEvidenceToolsNodeExecutesAllFourSourcesInParallel(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	registry, err := NewAgentRegistry(ctx, scriptedEinoModel{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	group := &parallelCollectorGroup{release: make(chan struct{})}
-	collectors := map[string]Collector{}
-	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
-		collectors[source] = parallelCollector{source: source, group: group}
-	}
-	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, HistoricalCandidates: fixedHistoricalRetriever{}, Agents: registry, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}, VerificationInterval: time.Millisecond, VerificationTimeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	incident := &domain.Incident{ID: "incident-parallel", DiagnosisMethod: domain.DiagnosisMethodReAct, Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
-	_, runErr := supervisor.Run(ctx, incident)
-	if _, ok := compose.ExtractInterruptInfo(runErr); !ok {
-		t.Fatalf("parallel evidence collection did not reach approval: %v incident=%#v", runErr, incident)
-	}
-	if group.count.Load() != 4 {
-		t.Fatalf("executed collectors=%d", group.count.Load())
-	}
-}
-
-func TestConstrainedAgentCanChooseDifferentEvidenceToolOrder(t *testing.T) {
-	ctx := context.Background()
-	registry, err := NewAgentRegistry(ctx, scriptedEinoModel{reverseEvidence: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	calls := &atomic.Int32{}
-	collectors := map[string]Collector{}
-	for _, source := range []string{"metric", "log", "trace", "kubernetes"} {
-		collectors[source] = supplementalCollector{source: source, calls: calls}
-	}
-	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, HistoricalCandidates: fixedHistoricalRetriever{}, Agents: registry, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}, VerificationInterval: time.Millisecond, VerificationTimeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	incident := &domain.Incident{ID: "incident-supplement", DiagnosisMethod: domain.DiagnosisMethodReAct, Status: domain.StatusReceived, Namespace: "kubepilot-demo", Service: "gateway-service", Resource: "gateway-service", Summary: "CPU alert", CreatedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now().Add(-time.Minute)}
-	state, runErr := supervisor.Run(ctx, incident)
-	if _, ok := compose.ExtractInterruptInfo(runErr); !ok {
-		t.Fatalf("supplemental collection did not reach approval interrupt: err=%v state=%#v incident=%#v", runErr, state, incident)
-	}
-	if calls.Load() != 4 || incident.Status != domain.StatusAwaitingApproval {
-		t.Fatalf("autonomous collection calls=%d status=%s", calls.Load(), incident.Status)
 	}
 }
 

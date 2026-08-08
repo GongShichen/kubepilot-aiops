@@ -34,6 +34,20 @@ func (staticBrainSkillRetriever) Search(_ context.Context, query domain.SkillRet
 	return result, nil
 }
 
+type failingBrainDryRunExecutor struct{}
+
+func (failingBrainDryRunExecutor) DryRun(_ context.Context, proposal *domain.RecoveryProposal) (*domain.DryRunResult, error) {
+	return &domain.DryRunResult{Success: false, Action: proposal.Action, Target: proposal.Target, Error: "server-side validation rejected mutation", ValidatedAt: time.Now().UTC()}, fmt.Errorf("server-side validation rejected mutation")
+}
+
+func (failingBrainDryRunExecutor) Execute(context.Context, *domain.Incident, domain.RecoveryProposal) error {
+	return nil
+}
+
+func (failingBrainDryRunExecutor) Verify(context.Context, *domain.Incident) (domain.Verification, error) {
+	return domain.Verification{}, nil
+}
+
 func seedRetrievedBrainSkills(state *WorkflowState, ids ...string) {
 	result := domain.SkillRetrievalResult{
 		QueryHash:    "test-query",
@@ -194,6 +208,16 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 		evidenceIDs = append(evidenceIDs, item.ID)
 	}
 	sort.Strings(evidenceIDs)
+	supportAttributions := make([]any, 0, len(evidenceIDs))
+	contradictAttributions := make([]any, 0, len(evidenceIDs))
+	for _, evidenceID := range evidenceIDs {
+		supportAttributions = append(supportAttributions, map[string]any{"evidence_id": evidenceID, "relation": "SUPPORT", "weight": .9, "reason": "current server Evidence supports the declared observation need"})
+		relation, weight, reason := "NEUTRAL", .2, "current server Evidence does not distinguish the competing mechanism"
+		if len(contradictAttributions) == 0 {
+			relation, weight, reason = "CONTRADICT", .9, "current server Evidence contradicts the predicted deployment failure"
+		}
+		contradictAttributions = append(contradictAttributions, map[string]any{"evidence_id": evidenceID, "relation": relation, "weight": weight, "reason": reason})
+	}
 	causalNodeIDs := []string{}
 	for _, item := range payload.Evidence {
 		causalNodeIDs = append(causalNodeIDs, item.CausalNodeIDs...)
@@ -220,7 +244,7 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 		if selected == "" && len(hypothesisIDs) > 0 {
 			selected = hypothesisIDs[0]
 		}
-		return call("commit_belief_delta", map[string]any{"intent": fmt.Sprintf("revise belief after %d current evidence records", len(payload.Evidence)), "expected_observation": []string{"audited subjective belief delta"}, "hypothesis_id": selected, "new_confidence": maxFloat(.05, confidence[selected]-.1), "direction": "decrease", "evidence_ids": evidenceIDs, "revision_required": false})
+		return call("commit_belief_delta", map[string]any{"intent": fmt.Sprintf("revise belief after %d current evidence records", len(payload.Evidence)), "expected_observation": []string{"audited subjective belief delta"}, "hypothesis_id": selected, "new_confidence": maxFloat(.05, confidence[selected]-.1), "direction": "DECREASE", "evidence_ids": evidenceIDs, "revision_required": false})
 	case domain.BrainPhaseDiagnosis:
 		if payload.Diagnosis != nil {
 			return call("validate_diagnosis", map[string]any{"intent": "append Runtime grounding and snapshot validation", "expected_observation": []string{"validated or provisional diagnosis status"}, "diagnosis_id": payload.Diagnosis.ID})
@@ -261,10 +285,10 @@ func (m *brainGraphModel) Generate(_ context.Context, messages []*schema.Message
 			grounded[grounding.HypothesisRevisionID] = grounding
 		}
 		if _, ok := grounded[hypothesisIDs[0]]; !ok {
-			return call("validate_hypothesis", map[string]any{"intent": "validate resource pressure against both independent sources", "expected_observation": []string{"SUPPORTED or PARTIAL grounding"}, "hypothesis_id": hypothesisIDs[0], "supporting_evidence_ids": evidenceIDs, "expected_causal_node_ids": causalNodeIDs})
+			return call("validate_hypothesis", map[string]any{"intent": "validate resource pressure against both independent sources", "expected_observation": []string{"SUPPORTED or PARTIAL grounding"}, "hypothesis_id": hypothesisIDs[0], "attributions": supportAttributions, "expected_causal_node_ids": causalNodeIDs})
 		}
 		if _, ok := grounded[hypothesisIDs[1]]; !ok {
-			return call("validate_hypothesis", map[string]any{"intent": "falsify deployment regression with current evidence", "expected_observation": []string{"REFUTED grounding for the competing hypothesis"}, "hypothesis_id": hypothesisIDs[1], "contradicting_evidence_ids": []string{evidenceIDs[0]}, "missing_observations": []string{"deployment failure signal"}})
+			return call("validate_hypothesis", map[string]any{"intent": "falsify deployment regression with current evidence", "expected_observation": []string{"REFUTED grounding for the competing hypothesis"}, "hypothesis_id": hypothesisIDs[1], "attributions": contradictAttributions, "missing_observations": []string{"deployment failure signal"}})
 		}
 		return call("advance_brain_phase", map[string]any{"intent": "move to diagnosis after validating two competing hypotheses", "expected_observation": []string{"diagnosis synthesis Skill activation"}, "next_phase": "DIAGNOSIS"})
 	default:
@@ -297,7 +321,7 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 	collectors := map[string]Collector{"metric": fixedCollector{source: "metric"}, "kubernetes": fixedCollector{source: "kubernetes"}}
 	checkpoints := &memoryEinoCheckpoint{data: map[string][]byte{}}
 	executor := &graphExecutor{}
-	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, Agents: registry, Executor: executor, Checkpoints: checkpoints, VerificationInterval: time.Millisecond, VerificationTimeout: time.Second})
+	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Collectors: collectors, BrainModel: BrainModelRuntime{Chat: registry.chat}, Executor: executor, Checkpoints: checkpoints, VerificationInterval: time.Millisecond, VerificationTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,16 +357,40 @@ func TestKubePilotUsesSelfReflectiveBrainGraphAndFrozenGroundingChain(t *testing
 			t.Fatalf("incomplete Tool Result provenance: %+v", execution.Result.Provenance)
 		}
 	}
-	resume := &ApprovalResumeData{Approved: true, Context: domain.ExecutionContext{NamespaceAllowlist: []string{incident.Namespace}, IncidentID: incident.ID, ProposalID: incident.Proposal.ID, ApprovalID: "brain-approval", IdempotencyKey: "brain-idempotency", Operator: "test", TargetUID: incident.Proposal.TargetUID, ResourceVersion: incident.Proposal.ResourceVersion, MutationSpecHash: incident.DryRun.MutationSpecHash, ApprovedAt: time.Now().UTC(), ExpiresAt: incident.Proposal.ExpiresAt}}
+	executionSnapshot := inv.AgentRecoveryPlan.ExecutionSnapshot
+	resume := &ApprovalResumeData{Approved: true, Context: domain.ExecutionContext{NamespaceAllowlist: []string{incident.Namespace}, IncidentID: incident.ID, ProposalID: incident.Proposal.ID, RecoveryPlanID: inv.AgentRecoveryPlan.ID, DiagnosisVersion: inv.AgentDiagnosis.ID, EvidenceSnapshotHash: inv.AgentRecoveryPlan.EvidenceSnapshotHash, ExecutionSnapshot: &executionSnapshot, ApprovalID: "brain-approval", IdempotencyKey: "brain-idempotency", Operator: "test", TargetUID: incident.Proposal.TargetUID, ResourceVersion: incident.Proposal.ResourceVersion, MutationSpecHash: incident.DryRun.MutationSpecHash, DryRunValidatedAt: incident.DryRun.ValidatedAt, ApprovedAt: time.Now().UTC(), ExpiresAt: incident.Proposal.ExpiresAt}}
 	final, err := supervisor.Resume(ctx, incident.ID, interrupt.InterruptContexts[0].ID, resume)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Brain resume failed: %v state=%+v errors=%v", err, final, final.Errors)
 	}
 	if final.Incident.Status != domain.StatusResolved || final.Termination == nil || final.Termination.Reason != domain.TerminationRecoverySucceeded || final.WorkflowAttempt.Status != domain.WorkflowAttemptCompleted {
 		t.Fatalf("unexpected final Brain state: status=%s termination=%+v attempt=%+v", final.Incident.Status, final.Termination, final.WorkflowAttempt)
 	}
 	if final.DiagnosisRuntime != nil || len(final.Candidates) != 0 || len(final.HypothesisDrafts) != 0 || len(final.VerifiedHypotheses) != 0 || final.Incident.Investigation.Arbitration != nil || final.Incident.DiagnosisLedger != nil {
 		t.Fatalf("KubePilot entered a deterministic baseline path: runtime=%+v candidates=%d drafts=%d verified=%d arbitration=%+v", final.DiagnosisRuntime, len(final.Candidates), len(final.HypothesisDrafts), len(final.VerifiedHypotheses), final.Incident.Investigation.Arbitration)
+	}
+}
+
+func TestKubePilotExecutionContextBindsEveryFrozenRecoveryVersion(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := domain.ExecutionSnapshot{SkillSnapshotHash: "skills", ModelConfigHash: "model", ToolSchemaHash: "tools", PolicyHash: "policy"}
+	plan := &domain.AgentRecoveryPlan{ID: "plan-1", DiagnosisVersion: "diagnosis-1", EvidenceSnapshotHash: "evidence-snapshot", ExecutionSnapshot: snapshot}
+	diagnosis := &domain.AgentDiagnosis{ID: "diagnosis-1"}
+	dryRun := &domain.DryRunResult{Success: true, MutationSpecHash: "mutation-1", ValidatedAt: now}
+	proposal := &domain.RecoveryProposal{ID: "proposal-1", TargetUID: "uid-1", ResourceVersion: "rv-1"}
+	execution := &domain.ExecutionContext{NamespaceAllowlist: []string{"team-a"}, IncidentID: "incident-1", ProposalID: proposal.ID, RecoveryPlanID: plan.ID, DiagnosisVersion: diagnosis.ID, EvidenceSnapshotHash: plan.EvidenceSnapshotHash, ExecutionSnapshot: &snapshot, ApprovalID: "approval-1", IdempotencyKey: "key-1", TargetUID: proposal.TargetUID, ResourceVersion: proposal.ResourceVersion, MutationSpecHash: dryRun.MutationSpecHash, DryRunValidatedAt: dryRun.ValidatedAt, ExpiresAt: now.Add(time.Minute)}
+	state := &WorkflowState{Incident: &domain.Incident{ID: "incident-1", DiagnosisMethod: domain.DiagnosisMethodKubePilot, Namespace: "team-a", Proposal: proposal}, DryRun: dryRun, ExecutionContext: execution, BrainState: BrainState{AgentDiagnosis: diagnosis, AgentRecoveryPlan: plan, EvidenceSnapshotHash: plan.EvidenceSnapshotHash, ExecutionSnapshot: snapshot}}
+	if err := validateExecutionContext(state); err != nil {
+		t.Fatalf("valid frozen execution chain was rejected: %v", err)
+	}
+	execution.RecoveryPlanID = "plan-stale"
+	if err := validateExecutionContext(state); err == nil {
+		t.Fatal("stale recovery plan approval was accepted")
+	}
+	execution.RecoveryPlanID = plan.ID
+	execution.DryRunValidatedAt = now.Add(-time.Second)
+	if err := validateExecutionContext(state); err == nil {
+		t.Fatal("stale dry-run approval was accepted")
 	}
 }
 
@@ -353,7 +401,7 @@ func TestBrainGraphStepBudgetAllowsDomainMaxTurnsToTerminate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Agents: registry, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}})
+	supervisor, err := NewSupervisor(ctx, SupervisorDeps{BrainModel: BrainModelRuntime{Chat: registry.chat}, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +456,7 @@ func TestSupervisorReturnsFinalizedBrainStateOnGraphFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	supervisor, err := NewSupervisor(ctx, SupervisorDeps{Agents: registry, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}})
+	supervisor, err := NewSupervisor(ctx, SupervisorDeps{BrainModel: BrainModelRuntime{Chat: registry.chat}, Executor: &graphExecutor{}, Checkpoints: &memoryEinoCheckpoint{data: map[string][]byte{}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +568,7 @@ func TestVerificationFailureSchedulesOneBudgetedBrainReflection(t *testing.T) {
 	}
 	result.BrainPhase = domain.BrainPhaseReflection
 	result.Reflections = append(result.Reflections, domain.ReflectionRecord{ID: "reflection-1", Trigger: domain.ReflectionVerificationFail})
-	(&brainGraphRuntime{}).applyCapabilityOutput(result, brainCapabilityOutput{Class: domain.ToolResultValidation, Summary: "belief updated after confirmed recovery failure", BeliefDelta: &domain.BeliefDelta{HypothesisRevisionID: "h1", PreviousConfidence: .8, NewConfidence: .2, Committed: true}})
+	(&brainGraphRuntime{}).applyCapabilityOutput(result, brainCapabilityOutput{Class: domain.ToolResultValidation, Summary: "belief updated after confirmed recovery failure", BeliefDelta: &domain.BeliefDelta{HypothesisRevisionID: "h1", PreviousConfidence: .8, NewConfidence: .2, Direction: domain.BeliefDecrease, Committed: true}})
 	if _, err = (&brainGraphRuntime{}).beliefCommit(context.Background(), result); err != nil {
 		t.Fatal(err)
 	}
@@ -563,6 +611,47 @@ func TestUnresolvedHypothesisCannotAuthorizeRecovery(t *testing.T) {
 	permission := result.Incident.Investigation.RecoveryPermission
 	if permission == nil || permission.Allowed || result.Incident.Proposal != nil || !strings.Contains(permission.Reason, "hypothesis_admission_not_recovery_eligible") {
 		t.Fatalf("UNRESOLVED hypothesis crossed the recovery boundary: permission=%+v proposal=%+v", permission, result.Incident.Proposal)
+	}
+}
+
+func TestFailedBrainDryRunInvalidatesSafetyChainAndReturnsToReplanning(t *testing.T) {
+	triggerlessPlan := &domain.AgentRecoveryPlan{ID: "plan:rejected-dry-run"}
+	permission := &domain.RecoveryPermission{Allowed: true, Level: "AUTO"}
+	state := &WorkflowState{
+		Incident: &domain.Incident{
+			ID:              "dry-run-replan",
+			DiagnosisMethod: domain.DiagnosisMethodKubePilot,
+			Status:          domain.StatusProposing,
+			Namespace:       "team-a",
+			Resource:        "api",
+			Proposal:        &domain.RecoveryProposal{ID: "proposal:rejected", Action: domain.ActionRestartPod, Namespace: "team-a", Target: "api"},
+			Investigation:   &domain.Investigation{},
+		},
+		BrainState: BrainState{
+			BrainPhase:         domain.BrainPhaseRecovery,
+			AgentRecoveryPlan:  triggerlessPlan,
+			RecoveryPermission: permission,
+			ExecutionSnapshot:  domain.ExecutionSnapshot{ToolSchemaHash: "tool-schema"},
+		},
+	}
+	transition := func(_ context.Context, incident *domain.Incident, status domain.IncidentStatus) error {
+		return domain.Transition(incident, status)
+	}
+	result, err := brainDryRunNode(context.Background(), state, failingBrainDryRunExecutor{}, transition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Incident.Status != domain.StatusDiagnosing || result.PendingReflection == nil || *result.PendingReflection != domain.ReflectionRecoveryFailure {
+		t.Fatalf("failed dry-run did not return to recovery reflection: status=%s reflection=%v", result.Incident.Status, result.PendingReflection)
+	}
+	if result.AgentRecoveryPlan != nil || result.RecoveryPermission != nil || result.Incident.Proposal != nil {
+		t.Fatalf("rejected safety version chain survived dry-run failure: plan=%+v permission=%+v proposal=%+v", result.AgentRecoveryPlan, result.RecoveryPermission, result.Incident.Proposal)
+	}
+	if len(result.ToolExecutions) != 1 || result.ToolExecutions[0].Result.Status != "DRY_RUN_FAILED" || result.ToolExecutions[0].Result.Summary == "" || result.ToolExecutions[0].Result.Provenance.RawArtifactHash == "" {
+		t.Fatalf("dry-run failure did not produce a classified non-empty tool result: %+v", result.ToolExecutions)
+	}
+	if err = transition(context.Background(), result.Incident, domain.StatusProposing); err != nil {
+		t.Fatalf("a newly revised recovery plan could not re-enter permission validation: %v", err)
 	}
 }
 
@@ -1476,7 +1565,7 @@ func TestBrainCapabilitySurfaceHasNoRemovedToolAliases(t *testing.T) {
 	wanted := map[string]bool{
 		"query_metrics": false, "search_logs": false, "query_traces": false, "inspect_kubernetes": false, "discover_resources": false,
 		"retrieve_incidents": false, "retrieve_runbooks": false, "retrieve_patterns": false,
-		"validate_hypothesis": false, "compare_hypotheses": false, "validate_diagnosis": false,
+		"validate_hypothesis": false, "compare_hypotheses": false, "validate_diagnosis": false, "revise_investigation_plan": false,
 	}
 	removed := map[string]bool{"query_prometheus_evidence": true, "query_loki_evidence": true, "query_trace_evidence": true, "query_kubernetes_evidence": true, "retrieve_causal_patterns": true}
 	for _, node := range []string{captools.NodeBrainEvidence, captools.NodeBrainRetrieval, captools.NodeBrainReasoning, captools.NodeBrainRecovery, captools.NodeBrainControl} {
@@ -1601,6 +1690,30 @@ func TestBrainRetrievalAuditIsPersistedThroughMemoryBoundary(t *testing.T) {
 	}
 }
 
+func TestEmptyBrainRetrievalIsStillAuditedWithItsMemoryKind(t *testing.T) {
+	memory := &recordingBrainMemory{}
+	state := &WorkflowState{
+		Incident: &domain.Incident{ID: "empty-memory-audit", Namespace: "team-a", Service: "api", Resource: "api", Investigation: &domain.Investigation{}},
+		BrainState: BrainState{
+			BrainTurns:        []domain.BrainTurn{{ID: "turn:empty-memory", Sequence: 1, Phase: domain.BrainPhaseInvestigation}},
+			ExecutionSnapshot: domain.ExecutionSnapshot{ToolSchemaHash: "tools", PolicyHash: "policy"},
+			BrainMessages:     []*schema.Message{{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{ID: "call:empty-memory", Type: "function", Function: schema.FunctionCall{Name: "retrieve_incidents", Arguments: `{"intent":"find analogous incidents","expected_observation":["bounded episodic context"]}`}}}}},
+		},
+	}
+	output := brainCapabilityOutput{Class: domain.ToolResultValidation, Status: "NO_RESULTS", Summary: "no episodic memory matched", NewInformation: false, Provenance: domain.ToolResultProvenance{Collector: "hybrid-retrieval-v2", RawArtifactHash: "artifact", ParserVersion: "retrieval-v2"}}
+	raw, err := json.Marshal(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &brainGraphRuntime{deps: brainRuntimeDeps{Memory: memory}}
+	if _, err = runtime.classifyToolResults(withBrainWorkflowState(context.Background(), state), []*schema.Message{{Role: schema.Tool, ToolCallID: "call:empty-memory", ToolName: "retrieve_incidents", Content: string(raw)}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incident.Investigation.MemoryReads) != 1 || len(memory.events) != 1 || memory.events[0].Kind != domain.MemoryEpisodic || len(memory.events[0].ResultIDs) != 0 || memory.events[0].QueryHash == "" {
+		t.Fatalf("empty episodic read was not fully audited: investigation=%+v recorder=%+v", state.Incident.Investigation.MemoryReads, memory.events)
+	}
+}
+
 func TestHypothesisComparisonDoesNotSelectOrMutateBelief(t *testing.T) {
 	first := domain.AgentHypothesis{ID: "h1", ModelConfidence: .8}
 	second := domain.AgentHypothesis{ID: "h2", ModelConfidence: .4}
@@ -1645,7 +1758,16 @@ func TestDiagnosisValidationCannotRewriteBrainDiagnosis(t *testing.T) {
 }
 
 func TestWorkflowStateSerializesBrainUnderDedicatedBoundary(t *testing.T) {
-	state := WorkflowState{Incident: &domain.Incident{ID: "checkpoint"}, BrainState: BrainState{BrainPhase: domain.BrainPhaseInvestigation, BrainBudget: domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()}}}
+	state := WorkflowState{
+		Incident:         &domain.Incident{ID: "checkpoint"},
+		Candidates:       []domain.RetrievalCandidate{{IncidentID: "legacy-candidate"}},
+		DiagnosisRuntime: &CognitiveDiagnosisState{Method: domain.DiagnosisMethodActive},
+		BrainState: BrainState{
+			BrainPhase:      domain.BrainPhaseInvestigation,
+			BrainBudget:     domain.BrainBudgetState{Limits: brainruntime.DefaultBudget()},
+			RuntimeEvidence: []domain.Evidence{{ID: "e1", Source: "kubernetes"}},
+		},
+	}
 	raw, err := json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)
@@ -1653,5 +1775,13 @@ func TestWorkflowStateSerializesBrainUnderDedicatedBoundary(t *testing.T) {
 	encoded := string(raw)
 	if !strings.Contains(encoded, `"brain":{"phase":"INVESTIGATION"`) || strings.Contains(encoded, `"brain_phase"`) || strings.Contains(encoded, `"brain_messages"`) {
 		t.Fatalf("Brain state did not use the new checkpoint boundary: %s", encoded)
+	}
+	for _, forbidden := range []string{"legacy-candidate", `"diagnosis_runtime"`, `"candidate_lists"`, `"hypothesis_drafts"`, `"diagnosis_ledger"`} {
+		if strings.Contains(encoded, forbidden) {
+			t.Fatalf("removed diagnosis state leaked into the Brain checkpoint through %q: %s", forbidden, encoded)
+		}
+	}
+	if !strings.Contains(encoded, `"runtime_evidence":[{"id":"e1"`) {
+		t.Fatalf("Brain runtime Evidence is missing from the checkpoint: %s", encoded)
 	}
 }

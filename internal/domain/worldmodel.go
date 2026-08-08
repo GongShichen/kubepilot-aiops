@@ -84,11 +84,31 @@ const (
 )
 
 type HybridRetrievalQuery struct {
-	IncidentID string                 `json:"incident_id"`
-	Terms      []string               `json:"terms"`
-	Features   IncidentFeatures       `json:"features"`
-	WorldModel *OperationalWorldModel `json:"world_model,omitempty"`
-	Limit      int                    `json:"limit"`
+	IncidentID    string                   `json:"incident_id"`
+	Terms         []string                 `json:"terms"`
+	Understanding HybridQueryUnderstanding `json:"understanding"`
+	Features      IncidentFeatures         `json:"features"`
+	WorldModel    *OperationalWorldModel   `json:"world_model,omitempty"`
+	Limit         int                      `json:"limit"`
+}
+
+type RetrievalTimeRange struct {
+	Start time.Time `json:"start,omitempty"`
+	End   time.Time `json:"end,omitempty"`
+}
+
+// HybridQueryUnderstanding is a replayable operational interpretation of a
+// retrieval request. It controls retrieval only and never asserts a root cause.
+type HybridQueryUnderstanding struct {
+	Entities []string           `json:"entities,omitempty"`
+	Intent   string             `json:"intent"`
+	Time     RetrievalTimeRange `json:"time"`
+	Signals  []string           `json:"signals,omitempty"`
+}
+
+type RetrievalFusionProfile struct {
+	ChannelWeights map[RetrievalChannel]float64 `json:"channel_weights"`
+	Reasons        []string                     `json:"reasons"`
 }
 
 type HybridRetrievalChannelResult struct {
@@ -99,12 +119,14 @@ type HybridRetrievalChannelResult struct {
 }
 
 type HybridRetrievalResult struct {
-	Channels     []HybridRetrievalChannelResult `json:"channels"`
-	Fused        []RetrievalCandidate           `json:"fused"`
-	Final        []RetrievalCandidate           `json:"final"`
-	RerankerUsed bool                           `json:"reranker_used"`
-	SnapshotHash string                         `json:"snapshot_hash"`
-	RetrievedAt  time.Time                      `json:"retrieved_at"`
+	Query         HybridQueryUnderstanding       `json:"query"`
+	FusionProfile RetrievalFusionProfile         `json:"fusion_profile"`
+	Channels      []HybridRetrievalChannelResult `json:"channels"`
+	Fused         []RetrievalCandidate           `json:"fused"`
+	Final         []RetrievalCandidate           `json:"final"`
+	RerankerUsed  bool                           `json:"reranker_used"`
+	SnapshotHash  string                         `json:"snapshot_hash"`
+	RetrievedAt   time.Time                      `json:"retrieved_at"`
 }
 
 type SkillSearchDocument struct {

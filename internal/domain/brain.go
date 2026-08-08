@@ -104,6 +104,37 @@ type AssistantTurnRecord struct {
 	ObservedAt       time.Time `json:"observed_at"`
 }
 
+// EvidenceAttributionRelation is the Brain's explicit interpretation of one
+// server-owned Evidence record relative to one immutable Hypothesis revision.
+// The Runtime validates identity, snapshot and contract shape only; it never
+// infers this relation from free text or substitutes a deterministic diagnosis.
+type EvidenceAttributionRelation string
+
+const (
+	EvidenceSupports    EvidenceAttributionRelation = "SUPPORT"
+	EvidenceContradicts EvidenceAttributionRelation = "CONTRADICT"
+	EvidenceNeutral     EvidenceAttributionRelation = "NEUTRAL"
+)
+
+type EvidenceAttributionIntent struct {
+	EvidenceID string                      `json:"evidence_id"`
+	Relation   EvidenceAttributionRelation `json:"relation"`
+	Weight     float64                     `json:"weight"`
+	Reason     string                      `json:"reason"`
+}
+
+type HypothesisEvidenceAttribution struct {
+	ID                   string                      `json:"id"`
+	HypothesisRevisionID string                      `json:"hypothesis_revision_id"`
+	EvidenceID           string                      `json:"evidence_id"`
+	Relation             EvidenceAttributionRelation `json:"relation"`
+	Weight               float64                     `json:"weight"`
+	Reason               string                      `json:"reason"`
+	AttributedByTurn     string                      `json:"attributed_by_turn"`
+	EvidenceSnapshotHash string                      `json:"evidence_snapshot_hash"`
+	ValidatedAt          time.Time                   `json:"validated_at"`
+}
+
 type GroundingLevel string
 
 const (
@@ -116,6 +147,8 @@ const (
 type GroundingEvidence struct {
 	SupportingEvidenceIDs    []string `json:"supporting_evidence_ids,omitempty"`
 	ContradictingEvidenceIDs []string `json:"contradicting_evidence_ids,omitempty"`
+	NeutralEvidenceIDs       []string `json:"neutral_evidence_ids,omitempty"`
+	AttributionIDs           []string `json:"attribution_ids,omitempty"`
 	IndependentSourceCount   int      `json:"independent_source_count"`
 	EvidenceSupport          float64  `json:"evidence_support"`
 	ContradictionRatio       float64  `json:"contradiction_ratio"`
@@ -166,17 +199,24 @@ type GroundingDelta struct {
 	OccurredAt                  time.Time         `json:"occurred_at"`
 }
 
+type BeliefDirection string
+
+const (
+	BeliefIncrease BeliefDirection = "INCREASE"
+	BeliefDecrease BeliefDirection = "DECREASE"
+)
+
 type BeliefDelta struct {
-	HypothesisRevisionID string    `json:"hypothesis_revision_id"`
-	PreviousConfidence   float64   `json:"previous_confidence"`
-	NewConfidence        float64   `json:"new_confidence"`
-	Direction            string    `json:"direction"`
-	EvidenceIDs          []string  `json:"evidence_ids,omitempty"`
-	ValidationResultIDs  []string  `json:"validation_result_ids,omitempty"`
-	RevisionRequired     bool      `json:"revision_required"`
-	RevisionReason       string    `json:"revision_reason,omitempty"`
-	Committed            bool      `json:"committed"`
-	OccurredAt           time.Time `json:"occurred_at"`
+	HypothesisRevisionID string          `json:"hypothesis_revision_id"`
+	PreviousConfidence   float64         `json:"previous_confidence"`
+	NewConfidence        float64         `json:"new_confidence"`
+	Direction            BeliefDirection `json:"direction"`
+	EvidenceIDs          []string        `json:"evidence_ids,omitempty"`
+	ValidationResultIDs  []string        `json:"validation_result_ids,omitempty"`
+	RevisionRequired     bool            `json:"revision_required"`
+	RevisionReason       string          `json:"revision_reason,omitempty"`
+	Committed            bool            `json:"committed"`
+	OccurredAt           time.Time       `json:"occurred_at"`
 }
 
 type ReflectionTrigger string

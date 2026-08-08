@@ -398,7 +398,6 @@ func populateAgentMetrics(result *reporter.CaseResult, incident *domain.Incident
 	result.OutputTokens = observation.OutputTokens
 	result.ReasoningTokens = observation.ReasoningTokens
 	result.EstimatedModelCost = observation.EstimatedModelCost
-	result.ArbitrationGateFailures = append([]string(nil), observation.ArbitrationGateFailures...)
 	if result.Score.RootCauseCorrect {
 		result.EvidenceEfficiency = observation.EvidenceEfficiency
 	}

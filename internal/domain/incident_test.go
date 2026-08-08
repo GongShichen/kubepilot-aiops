@@ -23,6 +23,20 @@ func TestDiagnosisMethodsAreCanonicalBeforePersistence(t *testing.T) {
 	}
 }
 
+func TestKubePilotHasDedicatedWorkflowRuntimeIdentity(t *testing.T) {
+	if SupervisorRuntimeName == WorkflowRuntimeName || SupervisorRuntimeName == BrainWorkflowRuntimeName {
+		t.Fatalf("Supervisor graph retained a strategy runtime identity: %q", SupervisorRuntimeName)
+	}
+	for _, method := range []string{"", DiagnosisMethodKubePilot, DiagnosisMethodKubePilotNoReflection, DiagnosisMethodKubePilotNoOptionalSkills} {
+		if got := RuntimeNameForDiagnosisMethod(method); got != BrainWorkflowRuntimeName || got == WorkflowRuntimeName {
+			t.Fatalf("KubePilot method %q retained legacy runtime identity %q", method, got)
+		}
+	}
+	if got := RuntimeNameForDiagnosisMethod(DiagnosisMethodActive); got != WorkflowRuntimeName {
+		t.Fatalf("baseline runtime identity changed: %q", got)
+	}
+}
+
 func TestNormalizeCausalMode(t *testing.T) {
 	for _, mode := range []string{CausalModeNone, CausalModeStatic, CausalModeLearned, CausalModeFull} {
 		if normalized, ok := NormalizeCausalMode(mode); !ok || normalized != mode {
@@ -64,5 +78,11 @@ func TestStateTransitions(t *testing.T) {
 	}
 	if CanTransition(StatusReceived, StatusResolved) {
 		t.Fatal("unexpected transition")
+	}
+	if !CanTransition(StatusProposing, StatusDiagnosing) {
+		t.Fatal("pre-mutation dry-run rejection must allow a clean recovery replan")
+	}
+	if CanTransition(StatusRecovering, StatusDiagnosing) {
+		t.Fatal("post-mutation recovery must never re-enter diagnosis automatically")
 	}
 }

@@ -152,7 +152,6 @@ type CaseResult struct {
 	NamespaceViolation                bool          `json:"namespace_violation"`
 	DuplicateMutation                 bool          `json:"duplicate_mutation"`
 	InfrastructureFailure             bool          `json:"infrastructure_failure"`
-	ArbitrationGateFailures           []string      `json:"arbitration_gate_failures,omitempty"`
 	JudgeError                        string        `json:"judge_error,omitempty"`
 }
 type Summary struct {

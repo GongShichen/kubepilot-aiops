@@ -25,3 +25,49 @@ func TestBuildProjectsEntitiesSignalsTimelineAndMetricSignatures(t *testing.T) {
 		t.Fatalf("world model is not replayable: %+v", model)
 	}
 }
+
+func TestBuildUsesResourceAsRootWhenServiceIsAbsent(t *testing.T) {
+	incident := &domain.Incident{ID: "incident-resource", Namespace: "team-a", Resource: "worker-deployment", CreatedAt: time.Now().UTC()}
+	model := Build(incident, nil, topology.IncidentGraph{})
+	if model.RootEntityID != "service/team-a/worker-deployment" || len(model.Entities) != 1 || model.Entities[0].Resource != "worker-deployment" {
+		t.Fatalf("resource-only Incident lost its World Model root: %+v", model)
+	}
+}
+
+func TestBuildExpandsCanonicalKubernetesFactsIntoOperationalEntities(t *testing.T) {
+	now := time.Now().UTC()
+	incident := &domain.Incident{ID: "incident-kubernetes", Namespace: "team-a", Service: "payment", Resource: "payment", CreatedAt: now.Add(-time.Minute)}
+	evidence := []domain.Evidence{{ID: "k8s-a", Source: "kubernetes", Kind: "workload_state", Namespace: "team-a", Service: "payment", Resource: "payment", ObservedAt: now, Data: map[string]any{
+		"deployment":              map[string]any{"name": "payment", "uid": "deployment-uid", "resource_version": "12", "revision": "3", "unavailable_replicas": int32(1), "containers": []map[string]any{{"name": "api", "image": "payment:v3"}}},
+		"pods":                    []map[string]any{{"name": "payment-abc", "uid": "pod-uid", "resource_version": "17", "phase": "Running", "node": "node-a", "containers": []map[string]any{{"name": "api", "state": "waiting", "reason": "CrashLoopBackOff"}}}},
+		"discovered_dependencies": []string{"redis"},
+		"events":                  []map[string]any{{"object": "payment-abc", "reason": "BackOff", "message": "back-off restarting failed container", "last_timestamp": now}},
+	}}}
+	graph := topology.IncidentGraph{Nodes: []topology.GraphNode{{ID: "orders-db", Type: "database"}}}
+	model := Build(incident, evidence, graph)
+	wantedKinds := map[string]bool{"service": false, "deployment": false, "pod": false, "container": false, "node": false, "database": false}
+	for _, entity := range model.Entities {
+		if _, ok := wantedKinds[entity.Kind]; ok {
+			wantedKinds[entity.Kind] = true
+		}
+	}
+	for kind, found := range wantedKinds {
+		if !found {
+			t.Fatalf("World Model did not materialize %s: %+v", kind, model.Entities)
+		}
+	}
+	wantedRelations := map[string]bool{"implemented_by": false, "owns": false, "contains": false, "runs_on": false, "depends_on": false}
+	for _, relation := range model.Relations {
+		if _, ok := wantedRelations[relation.Kind]; ok {
+			wantedRelations[relation.Kind] = true
+		}
+	}
+	for relation, found := range wantedRelations {
+		if !found {
+			t.Fatalf("World Model did not materialize %s relation: %+v", relation, model.Relations)
+		}
+	}
+	if len(model.Timeline) < 2 || model.Timeline[len(model.Timeline)-1].Kind != "BackOff" || model.Timeline[len(model.Timeline)-1].EntityID != "pod/team-a/payment-abc" {
+		t.Fatalf("Kubernetes event timeline was not bound to the Pod: %+v", model.Timeline)
+	}
+}

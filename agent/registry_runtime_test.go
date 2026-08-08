@@ -80,18 +80,18 @@ func TestRegistryProceduralMemoryAndSupervisorRuntimeMetadata(t *testing.T) {
 		}
 	}
 
-	supervisor := &Supervisor{skillSnapshotHash: "skills", brainSkillHash: "brain-skills", rankingPolicyHash: "ranking", hooks: &supervisorHooks{}}
+	supervisor := &Supervisor{brainSkillHash: "brain-skills", brainPolicyHash: "brain-policy", hooks: &supervisorHooks{}}
 	sink := workflowgraph.EventSink(func(context.Context, workflowgraph.WorkflowEvent) {})
 	supervisor.SetEventSink(sink)
 	if supervisor.eventSink == nil || supervisor.hooks.eventSink == nil {
 		t.Fatal("event sink was not propagated to runtime hooks")
 	}
 	skillHash, rankingHash, rerankerHash := supervisor.RuntimeHashes()
-	if skillHash != "skills" || rankingHash != "ranking" || rerankerHash != "" {
+	if skillHash != "brain-skills" || rankingHash != "brain-policy" || rerankerHash != "" {
 		t.Fatalf("unexpected runtime hashes: %q %q %q", skillHash, rankingHash, rerankerHash)
 	}
 	brainSkillHash, brainRankingHash, brainRerankerHash := supervisor.RuntimeHashesForMethod(domain.DiagnosisMethodKubePilot)
-	if brainSkillHash != "brain-skills" || brainRankingHash != "ranking" || brainRerankerHash != "" {
+	if brainSkillHash != "brain-skills" || brainRankingHash != "brain-policy" || brainRerankerHash != "" {
 		t.Fatalf("unexpected Brain runtime hashes: %q %q %q", brainSkillHash, brainRankingHash, brainRerankerHash)
 	}
 }

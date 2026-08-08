@@ -88,7 +88,9 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 	if len(output.Patterns) > 0 {
 		state.BrainCausalPatterns = append([]domain.CausalPattern(nil), output.Patterns...)
 	}
-	if len(output.HistoricalIncidents) > 0 || len(output.Patterns) > 0 || len(output.Memory) > 0 {
+	if len(state.ToolExecutions) > 0 &&
+		state.ToolExecutions[len(state.ToolExecutions)-1].Envelope.ToolCategory == domain.BrainToolRetrieval &&
+		output.Class == domain.ToolResultValidation {
 		r.auditRetrieval(state, output)
 	}
 	if output.HybridRetrieval != nil {
@@ -116,6 +118,7 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 		state.BrainBudget.Usage.HypothesisBranches = hypothesisBranchCount(state.AgentHypotheses)
 	}
 	state.HypothesisAdmissions = append(state.HypothesisAdmissions, output.Admissions...)
+	state.EvidenceAttributions = append(state.EvidenceAttributions, output.EvidenceAttributions...)
 	if output.Grounding != nil {
 		state.HypothesisGroundings = replaceGrounding(state.HypothesisGroundings, *output.Grounding)
 		for index := range state.AgentHypotheses {
@@ -149,6 +152,7 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 	}
 	if output.InvestigationPlan != nil {
 		plan := *output.InvestigationPlan
+		state.InvestigationPlanHistory = append(state.InvestigationPlanHistory, plan)
 		state.InvestigationPlan = &plan
 		state.Incident.Investigation.Plan = plan
 		state.BrainPhase, state.ActiveToolCategory = domain.BrainPhaseInvestigation, domain.BrainToolReasoning
@@ -187,6 +191,13 @@ func (r *brainGraphRuntime) applyCapabilityOutput(state *WorkflowState, output b
 		}
 	}
 	if output.RecoveryPlan != nil {
+		// A new LLM-authored plan is a new safety version chain. Never carry a
+		// proposal, permission, or dry-run result from the previous plan across
+		// this boundary.
+		state.RecoveryPermission = nil
+		state.Incident.Proposal = nil
+		state.Incident.DryRun = nil
+		state.DryRun = nil
 		state.AgentRecoveryPlan = output.RecoveryPlan
 	}
 	if len(output.RequestedSkills) > 0 {
@@ -261,25 +272,28 @@ func (r *brainGraphRuntime) auditRetrieval(state *WorkflowState, output brainCap
 		return
 	}
 	execution := state.ToolExecutions[len(state.ToolExecutions)-1]
-	event := domain.MemoryAccessEvent{IncidentID: state.Incident.ID, Agent: "kubepilot-brain", Scope: domain.MemoryScope{Cluster: state.Incident.Cluster, Namespace: state.Incident.Namespace}, QueryHash: brainruntime.Hash(execution.Envelope.Intent), PolicyVersion: state.ExecutionSnapshot.PolicyHash, CreatedAt: time.Now().UTC()}
-	if len(output.HistoricalIncidents) > 0 {
+	event := domain.MemoryAccessEvent{IncidentID: state.Incident.ID, Agent: "kubepilot-brain", Scope: domain.MemoryScope{Cluster: state.Incident.Cluster, Namespace: state.Incident.Namespace}, QueryHash: brainruntime.Hash(execution.Envelope), PolicyVersion: state.ExecutionSnapshot.PolicyHash, CreatedAt: time.Now().UTC()}
+	switch execution.Envelope.ToolName {
+	case "retrieve_incidents":
 		event.Kind = domain.MemoryEpisodic
 		for _, candidate := range output.HistoricalIncidents {
 			event.ResultIDs = append(event.ResultIDs, candidate.IncidentID)
 			event.Results = append(event.Results, domain.MemoryAccessResult{ID: candidate.IncidentID, Score: candidate.Rank.FinalScore, Version: candidate.Revision})
 		}
-	} else if len(output.Memory) > 0 {
+	case "retrieve_runbooks":
 		event.Kind = domain.MemoryProcedural
 		for _, item := range output.Memory {
 			event.ResultIDs = append(event.ResultIDs, item.ID)
 			event.Results = append(event.Results, domain.MemoryAccessResult{ID: item.ID, Score: item.Score, Version: item.Version})
 		}
-	} else {
+	case "retrieve_patterns":
 		event.Kind = domain.MemorySemantic
 		for _, pattern := range output.Patterns {
 			event.ResultIDs = append(event.ResultIDs, pattern.ID)
 			event.Results = append(event.Results, domain.MemoryAccessResult{ID: pattern.ID, Score: pattern.Confidence, Version: fmt.Sprintf("%d", pattern.Version)})
 		}
+	default:
+		return
 	}
 	state.Incident.Investigation.MemoryReads = append(state.Incident.Investigation.MemoryReads, event)
 }
@@ -289,13 +303,13 @@ func (r *brainGraphRuntime) observationUpdate(ctx context.Context, state *Workfl
 	if r.deps.Reasoning != nil && len(state.Incident.Evidence) > 0 {
 		ranked, err := r.deps.Reasoning.RankEvidence(state.Incident, state.Incident.Evidence)
 		if err == nil {
-			state.RankedEvidence = ranked.RuntimeEvidence
-			if len(state.RankedEvidence) == 0 {
-				state.RankedEvidence = ranked.Evidence
+			state.RuntimeEvidence = ranked.RuntimeEvidence
+			if len(state.RuntimeEvidence) == 0 {
+				state.RuntimeEvidence = ranked.Evidence
 			}
-			state.Incident.Evidence = mergeEvidence(state.Incident.Evidence, state.RankedEvidence)
-			state.StateAssertions = reasoning.BuildStateAssertions(state.Incident, state.RankedEvidence, state.StateAssertions, time.Now().UTC())
-			state.Features = r.deps.Reasoning.BuildFeatures(state.Incident, state.RankedEvidence)
+			state.Incident.Evidence = mergeEvidence(state.Incident.Evidence, state.RuntimeEvidence)
+			state.RuntimeAssertions = reasoning.BuildStateAssertions(state.Incident, state.RuntimeEvidence, state.RuntimeAssertions, time.Now().UTC())
+			state.RuntimeFeatures = r.deps.Reasoning.BuildFeatures(state.Incident, state.RuntimeEvidence)
 		}
 	}
 	// Topology is a server-owned observation derived from normalized evidence.
@@ -303,19 +317,19 @@ func (r *brainGraphRuntime) observationUpdate(ctx context.Context, state *Workfl
 	// never creates or ranks a diagnosis hypothesis.
 	graph := topology.Build(state.Incident, state.Incident.Evidence)
 	if len(graph.Nodes) > 0 || len(graph.Edges) > 0 {
-		state.IncidentGraph = &graph
-		state.Features.TopologyGraph = graph.ToDependencyGraph(state.Incident.Service)
+		state.RuntimeTopology = &graph
+		state.RuntimeFeatures.TopologyGraph = graph.ToDependencyGraph(state.Incident.Service)
 		if r.deps.GraphStore != nil {
 			if err := r.deps.GraphStore.Put(ctx, graph); err != nil {
 				state.Errors = append(state.Errors, "incident topology graph persistence unavailable")
 			}
 		}
 	}
-	worldEvidence := state.RankedEvidence
-	if len(worldEvidence) == 0 {
-		worldEvidence = state.Incident.Evidence
-	}
-	model := worldmodel.Build(state.Incident, worldEvidence, graph)
+	// The World Model is the Runtime's complete operational state, not a model
+	// context ranking projection. Ranking may bound the LLM Evidence view, but
+	// it must never remove canonical observations from topology, state, timeline,
+	// metric signatures, or the replayable Evidence snapshot.
+	model := worldmodel.Build(state.Incident, state.Incident.Evidence, graph)
 	state.WorldModel = &model
 	state.EvidenceSnapshotHash = brainruntime.EvidenceSnapshotHash(state.Incident.Evidence)
 	if previous != "" && previous != state.EvidenceSnapshotHash {
@@ -606,6 +620,7 @@ func (r *brainGraphRuntime) syncInvestigation(state *WorkflowState) {
 	if state.InvestigationPlan != nil {
 		inv.Plan = *state.InvestigationPlan
 	}
+	inv.PlanHistory = append([]domain.InvestigationPlan(nil), state.InvestigationPlanHistory...)
 	inv.BrainTurns = append([]domain.BrainTurn(nil), state.BrainTurns...)
 	inv.AssistantTurns = append([]domain.AssistantTurnRecord(nil), state.AssistantTurns...)
 	inv.IncidentUnderstanding = state.IncidentUnderstanding
@@ -614,6 +629,7 @@ func (r *brainGraphRuntime) syncInvestigation(state *WorkflowState) {
 	inv.SkillRetrievals = append([]domain.SkillRetrievalResult(nil), state.SkillRetrievals...)
 	inv.SkillActivations = append([]domain.SkillActivation(nil), state.SkillActivations...)
 	inv.ToolExecutions = append([]domain.BrainToolExecution(nil), state.ToolExecutions...)
+	inv.EvidenceAttributions = append([]domain.HypothesisEvidenceAttribution(nil), state.EvidenceAttributions...)
 	inv.AgentHypotheses = append([]domain.AgentHypothesis(nil), state.AgentHypotheses...)
 	inv.HypothesisAdmissions = append([]domain.HypothesisAdmission(nil), state.HypothesisAdmissions...)
 	inv.HypothesisGroundings = append([]domain.HypothesisGrounding(nil), state.HypothesisGroundings...)
@@ -625,7 +641,7 @@ func (r *brainGraphRuntime) syncInvestigation(state *WorkflowState) {
 	inv.DiagnosisValidations = append([]domain.DiagnosisValidation(nil), state.DiagnosisValidations...)
 	inv.BrainBudget, inv.ExecutionSnapshot = &state.BrainBudget, &state.ExecutionSnapshot
 	inv.WorkflowAttempt = state.WorkflowAttempt
-	inv.Signals, inv.Assertions = collectSignals(state.Incident.Evidence), append([]domain.StateAssertion(nil), state.StateAssertions...)
+	inv.Signals, inv.Assertions = collectSignals(state.Incident.Evidence), append([]domain.StateAssertion(nil), state.RuntimeAssertions...)
 }
 
 func envelopeFromToolCall(state *WorkflowState, callID, toolName string) domain.AgentActionEnvelope {
@@ -694,7 +710,7 @@ func categoryForToolName(name string) domain.BrainToolCategory {
 		return domain.BrainToolEvidence
 	case "retrieve_incidents", "retrieve_runbooks", "retrieve_patterns":
 		return domain.BrainToolRetrieval
-	case "submit_hypotheses", "revise_hypothesis", "validate_hypothesis", "compare_hypotheses", "commit_belief_delta", "submit_diagnosis", "validate_diagnosis", "submit_investigation_plan":
+	case "submit_hypotheses", "revise_hypothesis", "validate_hypothesis", "compare_hypotheses", "commit_belief_delta", "submit_diagnosis", "validate_diagnosis", "submit_investigation_plan", "revise_investigation_plan":
 		return domain.BrainToolReasoning
 	case "submit_recovery_plan":
 		return domain.BrainToolRecovery

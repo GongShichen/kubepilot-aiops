@@ -37,22 +37,46 @@ type brainGraphRuntime struct {
 	tools      *captools.Registry
 	toolHash   string
 	policyHash string
-	agents     *AgentRegistry
+	model      BrainModelRuntime
 	deps       brainRuntimeDeps
 	states     *sync.Map
 }
 
+// BrainModelRuntime is the direct Eino ChatModel boundary for KubePilot. It is
+// intentionally independent from AgentRegistry and the removed nested ADK
+// agents used by historical baselines.
+type BrainModelRuntime struct {
+	Chat                     model.BaseChatModel
+	InputPricePerMillion     float64
+	OutputPricePerMillion    float64
+	ReasoningPricePerMillion float64
+}
+
+func (r BrainModelRuntime) modelUsage(incidentID, node string, message *schema.Message, duration time.Duration) domain.ModelUsageEvent {
+	usage := domain.ModelUsageEvent{IncidentID: incidentID, Agent: node, ParentAgent: "kubepilot_brain", Phase: "brain", DurationMS: duration.Seconds() * 1000, CreatedAt: time.Now().UTC()}
+	if message != nil && message.ResponseMeta != nil && message.ResponseMeta.Usage != nil {
+		usage.InputTokens = message.ResponseMeta.Usage.PromptTokens
+		usage.OutputTokens = message.ResponseMeta.Usage.CompletionTokens
+		if usage.OutputTokens == 0 && message.ResponseMeta.Usage.TotalTokens > usage.InputTokens {
+			usage.OutputTokens = message.ResponseMeta.Usage.TotalTokens - usage.InputTokens
+		}
+		usage.ReasoningTokens = message.ResponseMeta.Usage.CompletionTokensDetails.ReasoningTokens
+	}
+	visibleOutputTokens := max(0, usage.OutputTokens-usage.ReasoningTokens)
+	usage.EstimatedCost = (float64(usage.InputTokens)*r.InputPricePerMillion + float64(visibleOutputTokens)*r.OutputPricePerMillion + float64(usage.ReasoningTokens)*r.ReasoningPricePerMillion) / 1_000_000
+	return usage
+}
+
 type boundBrainModel struct {
-	base   model.BaseChatModel
-	tools  []*schema.ToolInfo
-	agents *AgentRegistry
-	label  string
+	runtime BrainModelRuntime
+	tools   []*schema.ToolInfo
+	label   string
 }
 
 func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.Message, error) {
 	started := time.Now()
 	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
-	message, err := m.base.Generate(ctx, normalizeBrainModelMessages(messages), options...)
+	message, err := m.runtime.Chat.Generate(ctx, normalizeBrainModelMessages(messages), options...)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +95,7 @@ func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Messag
 	}
 	if len(state.BrainTurns) > 0 {
 		index := len(state.BrainTurns) - 1
-		usage := m.agents.modelUsage(state.Incident.ID, m.label, message, time.Since(started))
+		usage := m.runtime.modelUsage(state.Incident.ID, m.label, message, time.Since(started))
 		state.BrainTurns[index].ModelUsage = &usage
 		state.BrainTurns[index].CompletedAt = now
 		if state.Incident.Investigation != nil {
@@ -88,7 +112,7 @@ func (m boundBrainModel) Generate(ctx context.Context, messages []*schema.Messag
 
 func (m boundBrainModel) Stream(ctx context.Context, messages []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	options = append(options, model.WithTools(m.tools), model.WithMaxTokens(8192), model.WithTemperature(0))
-	return m.base.Stream(ctx, normalizeBrainModelMessages(messages), options...)
+	return m.runtime.Chat.Stream(ctx, normalizeBrainModelMessages(messages), options...)
 }
 
 func buildBrainGraph(ctx context.Context, runtime *brainGraphRuntime) (compose.AnyGraph, error) {
@@ -128,7 +152,7 @@ func buildBrainGraph(ctx context.Context, runtime *brainGraphRuntime) (compose.A
 		if err != nil {
 			return nil, err
 		}
-		if err = graph.AddChatModelNode(key, boundBrainModel{base: runtime.agents.chat, tools: infos, agents: runtime.agents, label: key}, compose.WithNodeName("brain_model")); err != nil {
+		if err = graph.AddChatModelNode(key, boundBrainModel{runtime: runtime.model, tools: infos, label: key}, compose.WithNodeName("brain_model")); err != nil {
 			return nil, err
 		}
 		if err = graph.AddEdge(key, "brain_action_gateway"); err != nil {
@@ -139,7 +163,7 @@ func buildBrainGraph(ctx context.Context, runtime *brainGraphRuntime) (compose.A
 	if err != nil {
 		return nil, err
 	}
-	if err = graph.AddChatModelNode("reflection_update", boundBrainModel{base: runtime.agents.chat, tools: reflectionInfos, agents: runtime.agents, label: "reflection_update"}, compose.WithNodeName("reflection_update")); err != nil {
+	if err = graph.AddChatModelNode("reflection_update", boundBrainModel{runtime: runtime.model, tools: reflectionInfos, label: "reflection_update"}, compose.WithNodeName("reflection_update")); err != nil {
 		return nil, err
 	}
 	if err = graph.AddEdge("reflection_update", "brain_action_gateway"); err != nil {
@@ -355,7 +379,7 @@ func (r *brainGraphRuntime) contextBuilder(ctx context.Context, state *WorkflowS
 			availableOptionalSkills = search.Results
 		}
 	}
-	payload := map[string]any{"incident": safeIncident(state.Incident), "world_model": brainWorldModelView(state.WorldModel), "understanding": state.IncidentUnderstanding, "plan": state.InvestigationPlan, "phase": state.BrainPhase, "evidence_snapshot_hash": state.EvidenceSnapshotHash, "evidence_view": brainEvidenceViews(state, state.Incident.Evidence, 24<<10, 8), "hypotheses": state.AgentHypotheses, "admissions": state.HypothesisAdmissions, "groundings": state.HypothesisGroundings, "grounding_deltas": tailGroundingDeltas(state.GroundingDeltas, 5), "recent_tool_results": tailBrainToolExecutions(state.ToolExecutions, 5), "memory_reads": tailMemoryReads(state.Incident.Investigation.MemoryReads, 5), "hybrid_retrievals": brainHybridRetrievalViews(state.HybridRetrievals, 1), "causal_patterns": tailCausalPatterns(state.BrainCausalPatterns, 6), "loaded_skill_references": state.LoadedSkillReferences, "available_optional_skills": availableOptionalSkills, "optional_skill_selection_phase": skillSelectionPhase, "max_optional_skills_this_turn": maxOptional, "diagnosis": state.AgentDiagnosis, "recovery_plan": state.AgentRecoveryPlan, "budget": state.BrainBudget, "active_tool_category": effectiveToolCategory(state), "execution_snapshot": state.ExecutionSnapshot}
+	payload := map[string]any{"incident": safeIncident(state.Incident), "world_model": brainWorldModelView(state.WorldModel), "understanding": state.IncidentUnderstanding, "plan": state.InvestigationPlan, "phase": state.BrainPhase, "evidence_snapshot_hash": state.EvidenceSnapshotHash, "evidence_view": brainEvidenceViews(state, state.Incident.Evidence, 24<<10, 8), "hypotheses": state.AgentHypotheses, "admissions": state.HypothesisAdmissions, "evidence_attributions": boundedSlice(state.EvidenceAttributions, 24), "groundings": state.HypothesisGroundings, "grounding_deltas": tailGroundingDeltas(state.GroundingDeltas, 5), "recent_tool_results": tailBrainToolExecutions(state.ToolExecutions, 5), "memory_reads": tailMemoryReads(state.Incident.Investigation.MemoryReads, 5), "hybrid_retrievals": brainHybridRetrievalViews(state.HybridRetrievals, 1), "causal_patterns": tailCausalPatterns(state.BrainCausalPatterns, 6), "loaded_skill_references": state.LoadedSkillReferences, "available_optional_skills": availableOptionalSkills, "optional_skill_selection_phase": skillSelectionPhase, "max_optional_skills_this_turn": maxOptional, "diagnosis": state.AgentDiagnosis, "recovery_plan": state.AgentRecoveryPlan, "budget": state.BrainBudget, "active_tool_category": effectiveToolCategory(state), "execution_snapshot": state.ExecutionSnapshot}
 	raw, _ := json.Marshal(payload)
 	system := "You are KubePilot's LLM Brain. You own investigation, open-world hypotheses, subjective belief revision, diagnosis selection, and recovery planning. The Runtime owns facts, grounding, constraints, authorization, execution, and verification. Follow the injected Skills exactly. Use only an exposed native structured tool call; do not answer in prose or reveal hidden chain-of-thought. JSON Output Examples in Skills describe native tool calls and must never be emitted as Assistant text. Request optional Skills only by an exact ID listed in available_optional_skills; the Runtime never guesses or auto-selects a Skill for you. Constraint or tool errors are not Incident evidence.\n\n" + resolved.Prompt
 	if state.BrainBudget.ToolCallsExhausted {

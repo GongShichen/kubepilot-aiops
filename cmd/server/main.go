@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -15,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/kubepilot-aiops/kubepilot/agent"
 	"github.com/kubepilot-aiops/kubepilot/internal/api"
-	"github.com/kubepilot-aiops/kubepilot/internal/causal"
 	causaldiscovery "github.com/kubepilot-aiops/kubepilot/internal/causal/discovery"
 	"github.com/kubepilot-aiops/kubepilot/internal/config"
 	"github.com/kubepilot-aiops/kubepilot/internal/domain"
@@ -72,14 +70,6 @@ func main() {
 	if err = pg.SeedCausalPatterns(ctx, patternSeed.Patterns); err != nil {
 		slog.Error("seed causal patterns", "error", err)
 		os.Exit(1)
-	}
-	causalMatcher := causal.DefaultMatcher()
-	if paths, globErr := filepath.Glob(filepath.Join(cfg.Reasoning.CausalPatternDirectory, "*.yaml")); globErr == nil && len(paths) > 0 {
-		if loaded, loadErr := causal.Load(paths...); loadErr == nil {
-			causalMatcher = loaded
-		} else {
-			slog.Warn("load topology causal patterns failed; using built-in patterns", "error", loadErr)
-		}
 	}
 	redisStore, err := store.NewRedis(cfg.RedisURL)
 	if err != nil {
@@ -173,9 +163,11 @@ func main() {
 	discoveryEngine.Patterns = causalPatterns
 	discoveryEngine.Explainer = causaldiscovery.NewChatExplainer(chat)
 	learner := service.CausalLearner{Store: pg, ConfidenceThreshold: cfg.Reasoning.CausalAutoActivateConfidence, Namespaces: cfg.Reasoning.CausalLearningNamespaces, EmbeddingVersion: cfg.Embedding.Model, Embedder: learnerEmbedder, Vectors: learnerVectors, TopologyPatterns: topologyPatterns, CausalPatterns: causalPatterns, Discovery: discoveryEngine, IncidentHistory: pg}
-	agentMemory := &memory.Service{Historical: historical, Causal: pg, Reasoning: reasoningEngine, Recorder: pg, Writer: learner, Procedures: agents.ProceduralMemories()}
+	// Brain Skills are injected by the versioned Skill Runtime and must never
+	// be retrieved as legacy ADK procedural memory.
+	agentMemory := &memory.Service{Historical: historical, Causal: pg, Reasoning: reasoningEngine, Recorder: pg, Writer: learner}
 	skillRetrieval := retrieval.NewSkillHybridRetriever(learnerEmbedder, neuralReranker)
-	supervisor, err := agent.NewSupervisor(ctx, agent.SupervisorDeps{Collectors: collectors, HistoricalCandidates: historical, BrainRetrieval: historical, SkillRetrieval: skillRetrieval, Knowledge: pg, Reasoning: reasoningEngine, Agents: agents, Executor: executor, Checkpoints: checkpointStore, Reranker: neuralReranker, RankingPolicy: &rankingPolicy, Causal: causalMatcher, GraphStore: store.NewPostgresGraphStore(pg), TopologyPatterns: topologyPatterns, CausalPatterns: causalPatterns, DiscoveredPatterns: discoveredCandidates, Memory: agentMemory})
+	supervisor, err := agent.NewSupervisor(ctx, agent.SupervisorDeps{Collectors: collectors, BrainRetrieval: historical, SkillRetrieval: skillRetrieval, Knowledge: pg, Reasoning: reasoningEngine, BrainModel: agent.BrainModelRuntime{Chat: chat, InputPricePerMillion: cfg.Chat.InputPricePerMillion, OutputPricePerMillion: cfg.Chat.OutputPricePerMillion, ReasoningPricePerMillion: cfg.Chat.ReasoningPricePerMillion}, Executor: executor, Checkpoints: checkpointStore, Reranker: neuralReranker, GraphStore: store.NewPostgresGraphStore(pg), Memory: agentMemory})
 	if err != nil {
 		slog.Error("compile Eino graph", "error", err)
 		os.Exit(1)

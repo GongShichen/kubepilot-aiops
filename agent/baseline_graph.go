@@ -12,7 +12,7 @@ import (
 // ReAct, rule-only, evidence-only, cognitive, and active-diagnosis. It is a
 // separate Eino subgraph so none of these nodes are reachable from the
 // KubePilot Brain loop.
-func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, transition func(context.Context, *domain.Incident, domain.IncidentStatus) error) (*compose.Graph[*WorkflowState, *WorkflowState], error) {
+func buildBaselineGraph(registry *AgentRegistry, runtimeDeps constrainedToolDeps, transition func(context.Context, *domain.Incident, domain.IncidentStatus) error) (*compose.Graph[*WorkflowState, *WorkflowState], error) {
 	graph := compose.NewGraph[*WorkflowState, *WorkflowState]()
 	add := func(name string, fn func(context.Context, *WorkflowState) (*WorkflowState, error)) error {
 		return graph.AddLambdaNode(name, compose.InvokableLambda(fn), compose.WithNodeName(name))
@@ -23,7 +23,7 @@ func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, tr
 		return nil, err
 	}
 	if err := add("baseline_strategy", func(ctx context.Context, state *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.RunBaseline(ctx, state, runtimeDeps); err != nil {
+		if err := registry.RunBaseline(ctx, state, runtimeDeps); err != nil {
 			return state, err
 		}
 		state.Incident.DiagnosisLedger = &state.DiagnosisLedger
@@ -32,7 +32,7 @@ func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, tr
 		return nil, err
 	}
 	if err := add("cognitive_intent", func(ctx context.Context, state *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.cognitiveIntentNode(ctx, state); err != nil {
+		if err := registry.cognitiveIntentNode(ctx, state); err != nil {
 			return state, err
 		}
 		return state, nil
@@ -40,7 +40,7 @@ func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, tr
 		return nil, err
 	}
 	if err := add("query_compiler", func(_ context.Context, state *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.queryCompilerNode(state); err != nil {
+		if err := registry.queryCompilerNode(state); err != nil {
 			return state, err
 		}
 		return state, nil
@@ -48,7 +48,7 @@ func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, tr
 		return nil, err
 	}
 	if err := add("evidence_collection", func(ctx context.Context, state *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.evidenceCollectionNode(ctx, state, runtimeDeps); err != nil {
+		if err := registry.evidenceCollectionNode(ctx, state, runtimeDeps); err != nil {
 			return state, err
 		}
 		return state, nil
@@ -56,7 +56,7 @@ func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, tr
 		return nil, err
 	}
 	if err := add("signal_assertion_builder", func(_ context.Context, state *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.signalAssertionBuilderNode(state, runtimeDeps); err != nil {
+		if err := registry.signalAssertionBuilderNode(state, runtimeDeps); err != nil {
 			return state, err
 		}
 		return state, nil
@@ -64,7 +64,7 @@ func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, tr
 		return nil, err
 	}
 	if err := add("candidate_generation", func(ctx context.Context, state *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.candidateGenerationNode(ctx, state, runtimeDeps); err != nil {
+		if err := registry.candidateGenerationNode(ctx, state, runtimeDeps); err != nil {
 			return state, err
 		}
 		return state, nil
@@ -72,7 +72,7 @@ func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, tr
 		return nil, err
 	}
 	if err := add("cognitive_reasoning", func(ctx context.Context, state *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.cognitiveReasoningNode(ctx, state); err != nil {
+		if err := registry.cognitiveReasoningNode(ctx, state); err != nil {
 			return state, err
 		}
 		return state, nil
@@ -80,7 +80,7 @@ func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, tr
 		return nil, err
 	}
 	if err := add("causal_falsification", func(_ context.Context, state *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.causalFalsificationNode(state); err != nil {
+		if err := registry.causalFalsificationNode(state); err != nil {
 			return state, err
 		}
 		return state, nil
@@ -88,7 +88,7 @@ func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, tr
 		return nil, err
 	}
 	if err := add("objective_arbitration", func(_ context.Context, state *WorkflowState) (*WorkflowState, error) {
-		if err := deps.Agents.objectiveArbitrationNode(state); err != nil {
+		if err := registry.objectiveArbitrationNode(state); err != nil {
 			return state, err
 		}
 		return state, nil
@@ -106,7 +106,7 @@ func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, tr
 		if err != nil {
 			return state, err
 		}
-		if err = deps.Agents.applyDiagnosisResult(ctx, state, runtimeDeps, result); err != nil {
+		if err = registry.applyDiagnosisResult(ctx, state, runtimeDeps, result); err != nil {
 			return state, err
 		}
 		return state, nil
@@ -117,7 +117,7 @@ func buildBaselineGraph(deps SupervisorDeps, runtimeDeps constrainedToolDeps, tr
 		if state.Incident.Status == domain.StatusNeedsAttention {
 			return state, nil
 		}
-		if err := deps.Agents.runConstrainedAgents(ctx, state, runtimeDeps); err != nil {
+		if err := registry.runConstrainedAgents(ctx, state, runtimeDeps); err != nil {
 			return state, err
 		}
 		state.Incident.DiagnosisLedger = &state.DiagnosisLedger

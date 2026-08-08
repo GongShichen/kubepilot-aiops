@@ -96,24 +96,3 @@ func TestBenchmarkRunSnapshotsDoNotShareOutputStorage(t *testing.T) {
 		t.Fatalf("list snapshot mutated manager state: %v", stored.Output)
 	}
 }
-
-func TestGateStreakPausesOnlyForFourInfrastructureHealthyCases(t *testing.T) {
-	state := gateStreakState{}
-	for index := 0; index < 3; index++ {
-		if _, pause := state.Observe([]string{"supporting_score", "final_score"}, false); pause {
-			t.Fatal("gate streak paused before four cases")
-		}
-	}
-	gate, pause := state.Observe([]string{"supporting_score"}, false)
-	if !pause || gate != "supporting_score" {
-		t.Fatalf("shared four-case gate was not detected: gate=%q pause=%t", gate, pause)
-	}
-	state = gateStreakState{}
-	state.Observe([]string{"final_score"}, false)
-	state.Observe([]string{"final_score"}, true)
-	state.Observe([]string{"final_score"}, false)
-	state.Observe([]string{"final_score"}, false)
-	if _, pause = state.Observe([]string{"final_score"}, false); pause {
-		t.Fatal("infrastructure failure did not reset the four-case streak")
-	}
-}
