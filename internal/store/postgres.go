@@ -444,10 +444,7 @@ func syncIncidentRecords(ctx context.Context, tx pgx.Tx, in *domain.Incident) er
 		}
 	}
 	budget, _ := json.Marshal(in.AgentBudget)
-	architecture := "constrained-react"
-	if in.Investigation != nil && in.Investigation.Architecture != "" {
-		architecture = in.Investigation.Architecture
-	}
+	architecture := incidentWorkflowArchitecture(in)
 	if _, err := tx.Exec(ctx, `INSERT INTO agent_workflows(incident_id,graph_version,strategy_id,architecture,checkpoint_id,interrupt_id,model_protocol,model_name,model_config_hash,skill_snapshot_hash,ranking_policy_hash,reranker_config_hash,budget_state,status,started_at,interrupted_at,resumed_at,completed_at,last_error)
 		VALUES($1,$19,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		ON CONFLICT(incident_id) DO UPDATE SET graph_version=EXCLUDED.graph_version,strategy_id=EXCLUDED.strategy_id,architecture=EXCLUDED.architecture,checkpoint_id=EXCLUDED.checkpoint_id,interrupt_id=EXCLUDED.interrupt_id,model_protocol=EXCLUDED.model_protocol,model_name=EXCLUDED.model_name,model_config_hash=EXCLUDED.model_config_hash,skill_snapshot_hash=EXCLUDED.skill_snapshot_hash,ranking_policy_hash=EXCLUDED.ranking_policy_hash,reranker_config_hash=EXCLUDED.reranker_config_hash,budget_state=EXCLUDED.budget_state,status=EXCLUDED.status,interrupted_at=COALESCE(agent_workflows.interrupted_at,EXCLUDED.interrupted_at),resumed_at=COALESCE(agent_workflows.resumed_at,EXCLUDED.resumed_at),completed_at=EXCLUDED.completed_at,last_error=EXCLUDED.last_error`,
@@ -455,6 +452,20 @@ func syncIncidentRecords(ctx context.Context, tx pgx.Tx, in *domain.Incident) er
 		return err
 	}
 	return nil
+}
+
+func incidentWorkflowArchitecture(in *domain.Incident) string {
+	if in != nil && in.Investigation != nil && in.Investigation.Architecture != "" {
+		return in.Investigation.Architecture
+	}
+	if in != nil && domain.IsKubePilotBrainMethod(in.DiagnosisMethod) {
+		// A KubePilot Workflow is routed exclusively to the Brain graph. Its
+		// Investigation projection is created after intake, so the durable row
+		// must derive its initial architecture from the immutable strategy and
+		// must never advertise the legacy runtime while the Brain is running.
+		return "eino-native-self-reflective-brain"
+	}
+	return "constrained-react"
 }
 
 // diagnosticIntelligencePayload is the durable, API-facing audit projection

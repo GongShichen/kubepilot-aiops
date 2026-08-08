@@ -40,3 +40,26 @@ func TestDiagnosticIntelligencePayloadIncludesAssistantTurnAudit(t *testing.T) {
 		t.Fatalf("Assistant turn audit was omitted from investigation payload: %#v", payload)
 	}
 }
+
+func TestKubePilotWorkflowArchitectureNeverUsesLegacyRuntimeBeforeInvestigation(t *testing.T) {
+	for _, method := range []string{
+		domain.DiagnosisMethodKubePilot,
+		domain.DiagnosisMethodKubePilotNoReflection,
+		domain.DiagnosisMethodKubePilotNoOptionalSkills,
+	} {
+		incident := &domain.Incident{DiagnosisMethod: method}
+		if got := incidentWorkflowArchitecture(incident); got != "eino-native-self-reflective-brain" {
+			t.Fatalf("method %q initial architecture=%q", method, got)
+		}
+	}
+}
+
+func TestWorkflowArchitectureUsesPersistedInvestigationProjection(t *testing.T) {
+	incident := &domain.Incident{
+		DiagnosisMethod: domain.DiagnosisMethodDirect,
+		Investigation:   &domain.Investigation{Architecture: "single-pass"},
+	}
+	if got := incidentWorkflowArchitecture(incident); got != "single-pass" {
+		t.Fatalf("persisted architecture=%q", got)
+	}
+}
